@@ -1,0 +1,8 @@
+{
+    "src": "src",
+    "dependencies": {
+        "gui": {
+            "src": "../../"
+        }
+    }
+}

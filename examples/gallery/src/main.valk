@@ -1,0 +1,166 @@
+use gui
+
+// Every built-in component and icon, in both themes
+
+class Gallery is gui.Render {
+    dark: bool (true)
+    tab: uint (0)
+    checked: bool (true)
+    on: bool (true)
+    volume: f32 (0.6)
+    plan: uint (1)
+    show_dialog: bool (false)
+    loading: bool (false)
+    loaded: String ("")
+    name: gui.TextInput (gui.TextInput.new("Your name"))
+    password: gui.TextInput (gui.TextInput.new("Password"))
+    notes: gui.TextArea (gui.TextArea.new("Notes keep their indentation.\n    Tab indents, Shift+Tab takes it back.\nUndo with Ctrl+Z."))
+    size: gui.Select (gui.Select.new(.{ "Small", "Medium", "Large", "Extra large" }, 1))
+    menu: gui.Popup (gui.Popup{})
+    log: String ("Right-click anywhere for a menu")
+
+    fn render(win: gui.Window) gui.Div {
+        win.theme = this.dark ? gui.Theme.dark() : gui.Theme.light()
+        let t = win.theme
+        this.password.password = true
+
+        let header = gui.div().flex().items_center().gap(12).px(20).h(56).border_b(1).border_color(t.border).bg(t.surface)
+            .child(gui.icon(.grid, 20).text_color(t.accent))
+            .child(gui.div().text_lg().font_semibold().child("Components"))
+            .child(gui.badge("valk-gui", t.accent))
+            .child(gui.div().flex_1())
+            .child(gui.icon(this.dark ? gui.Icon.moon : gui.Icon.sun, 16).text_color(t.muted))
+            .child(gui.switch(win, this.dark).tooltip("Dark theme").on_click(fn(e) { this.dark = !this.dark }))
+
+        let pages = Array[gui.Div]{ this.controls(win), this.icons(win), this.text_page(win) }
+        let body = gui.div().flex_1().p(20).gap(16).overflow_y_scroll().id("body")
+            .child(gui.tabs(win, "tabs", .{ "Controls", "Icons", "Text" }, this.tab, fn(i) { this.tab = i }))
+            .child(pages.get(this.tab) !? gui.div())
+
+        let root = gui.div().size_full().bg(t.background).text_color(t.text)
+            .on_mouse_down(fn(e) {
+                if e.button == .right : this.menu.open_at(e.x, e.y)
+            })
+            .child(header)
+            .child(body)
+            .child(gui.div().flex().items_center().px(20).h(32).border_t(1).border_color(t.border).bg(t.surface).text_xs().text_color(t.muted)
+                .child(gui.icon(.info, 13)).child(gui.div().pl(6).child(this.log)))
+            .child(this.menu.render(win, gui.menu(win, .{
+                gui.MenuItem.new("Copy", fn() { this.log = "Copied" }).with_icon(.copy).with_shortcut("Ctrl+C"),
+                gui.MenuItem.new("Rename", fn() { this.log = "Renamed" }).with_icon(.edit),
+                gui.MenuItem.new("Share", fn() { this.log = "Shared" }).with_icon(.external),
+                gui.MenuItem.line(),
+                gui.MenuItem.new("Delete", fn() { this.show_dialog = true }).with_icon(.trash).as_danger()
+            }, fn() { this.menu.close() })))
+        if this.show_dialog {
+            root.child(gui.modal(win, gui.dialog(win, "Delete this item?", gui.div().text_color(t.muted).child("It goes to the trash, where you can still restore it for 30 days."), .{
+                gui.button(win, "Cancel").on_click(fn(e) { this.show_dialog = false }),
+                gui.button_primary(win, "Delete").bg(t.danger).on_click(fn(e) {
+                    this.show_dialog = false
+                    this.log = "Deleted"
+                })
+            }), fn() { this.show_dialog = false }))
+        }
+        return root
+    }
+
+    fn section(win: gui.Window, title: String) gui.Div {
+        return gui.card(win).gap(12).child(gui.div().text_xs().font_semibold().text_color(win.theme.muted).child(title))
+    }
+
+    fn controls(win: gui.Window) gui.Div {
+        let t = win.theme
+        let buttons = this.section(win, "BUTTONS").child(gui.div().flex().flex_wrap().gap(8).items_center()
+            .child(gui.button_primary(win, "Primary"))
+            .child(gui.button(win, "Secondary"))
+            .child(gui.button(win, "Download", .download))
+            .child(gui.button(win, "Disabled").opacity(0.5).cursor(.not_allowed))
+            .child(gui.icon_button(win, .settings).tooltip("Settings")))
+
+        let inputs = this.section(win, "INPUTS")
+            .child(gui.div().flex().gap(8).child(gui.div().flex_1().child(this.name.render(win))).child(gui.div().flex_1().child(this.password.render(win))))
+            .child(gui.div().flex().items_center().gap(12)
+                .child(this.size.render(win))
+                .child(gui.div().text_sm().text_color(t.muted).child("Size: " + this.size.value)))
+
+        let toggles = this.section(win, "CHOICES")
+            .child(gui.checkbox(win, this.checked, "Send me updates").on_click(fn(e) { this.checked = !this.checked }))
+            .child(gui.div().flex().items_center().gap(10).child(gui.switch(win, this.on).on_click(fn(e) { this.on = !this.on })).child(this.on ? "Notifications on" : "Notifications off"))
+        each Array[String]{ "Free", "Pro", "Team" } as plan, i {
+            toggles.child(gui.radio(win, this.plan == i, plan).on_click(fn(e) { this.plan = i }))
+        }
+
+        let progress = this.section(win, "PROGRESS")
+            .child(gui.div().flex().justify_between().text_sm().child("Volume").child("%{(this.volume * 100).to(int)}%"))
+            .child(gui.slider(win, this.volume, fn(v) { this.volume = v }))
+            .child(gui.progress(win, this.volume))
+            .child(gui.div().flex().items_center().gap(10)
+                .child(gui.button(win, this.loading ? "Working…" : "Run a background task").on_click(fn(e) {
+                    if this.loading : return
+                    this.loading = true
+                    win.spawn[String](fn() String {
+                        let total: u64 = 0
+                        each 0 .. 30000000 as i : total += i.to(u64) % 7
+                        return "Done: " + total
+                    }, fn(result) {
+                        this.loading = false
+                        this.loaded = result
+                    }) _
+                }))
+                .when(this.loading, fn(d) { d.child(gui.spinner(win)) })
+                .child(gui.div().text_sm().text_color(t.muted).child(this.loaded)))
+
+        let people = this.section(win, "PEOPLE")
+        let colors = Array[u32]{ 0xf97316, 0x8b5cf6, 0x10b981, 0x3b82f6 }
+        each Array[String]{ "Ada Lovelace", "Alan Turing", "Grace Hopper", "Linus Torvalds" } as person, i {
+            people.child(gui.div().flex().items_center().gap(10)
+                .child(gui.avatar(person, gui.rgb(colors.get(i) !? 0)))
+                .child(gui.div().flex_1().child(person))
+                .child(gui.badge(i % 2 == 0 ? "Online" : "Away", i % 2 == 0 ? gui.rgb(0x22c55e) : gui.rgb(0xeab308))))
+        }
+
+        return gui.div().grid(2).gap(16)
+            .child(buttons).child(inputs).child(toggles).child(progress).child(people)
+            .child(this.section(win, "SHORTCUTS").child(gui.div().flex().gap(6).items_center().child(gui.kbd(win, "Ctrl+K")).child("Command palette"))
+                .child(gui.div().flex().gap(6).items_center().child(gui.kbd(win, "Esc")).child("Close dialogs and menus")))
+    }
+
+    fn icons(win: gui.Window) gui.Div {
+        let t = win.theme
+        let grid = gui.div().grid(8).gap(8)
+        each gui.Icon.items() as ic {
+            grid.child(gui.div().h(72).rounded(t.radius).center().gap(6).bg(t.surface).border(1).border_color(t.border)
+                .hover(fn(s) { s.border_color(t.accent).text_color(t.accent) })
+                .child(gui.icon(ic, 22))
+                .child(gui.div().text_xs().text_color(t.muted).child(ic.name())))
+        }
+        return grid
+    }
+
+    fn text_page(win: gui.Window) gui.Div {
+        let t = win.theme
+        return gui.div().gap(16)
+            .child(gui.card(win).gap(8)
+                .child(gui.div().text_3xl().font_bold().child("Typography"))
+                .child(gui.div().text_lg().text_color(t.muted).child("Inter in four weights, with italics and decorations."))
+                .child(gui.div().flex().gap(16).items_center()
+                    .child(gui.div().child("Regular")).child(gui.div().font_medium().child("Medium"))
+                    .child(gui.div().font_semibold().child("Semibold")).child(gui.div().font_bold().child("Bold"))
+                    .child(gui.div().italic().child("Italic")).child(gui.div().underline().child("Underline"))
+                    .child(gui.div().line_through().text_color(t.muted).child("Struck"))))
+            .child(gui.card(win).gap(6)
+                .child(gui.div().text_xs().font_semibold().text_color(t.muted).child("UNICODE"))
+                .child("Grüße aus Köln · Ελληνικά · Русский · Tiếng Việt")
+                .child("日本語のテキスト · 中文文本 · 한국어 텍스트")
+                .child("Arrows ← ↑ → ↓ · Math ± × ÷ ≠ ≤ ≥ · Currency € £ ¥"))
+            .child(gui.card(win).gap(8).h(170)
+                .child(gui.div().text_xs().font_semibold().text_color(t.muted).child("TEXT AREA"))
+                .child(this.notes.render(win).flex_1()))
+            .child(gui.div().h(80).rounded(12).bg_gradient(gui.rgb(0x6366f1), gui.rgb(0xec4899), 90).center()
+                .text_color(gui.white()).font_semibold().text_lg().child("Gradients, rounded corners and shadows").shadow_lg())
+    }
+}
+
+fn main() {
+    gui.run(Gallery{}, .{ title: "Components", width: 1000, height: 760 })
+}

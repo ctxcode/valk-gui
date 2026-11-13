@@ -2,28 +2,41 @@
 // Small stateless components styled from the window's theme. Each returns a `Div`, so it
 // takes more styles and handlers like any other element.
 
-/// A button with a label. Add `on_click`.
-+ fn button(win: Window, label: String) Div {
+/// A button with a label and an optional icon before it. Add `on_click`.
++ fn button(win: Window, label: String, icon: ?Icon (null)) Div {
     let t = win.theme
     let bg = t.elevated
-    return div().flex().center().h(32).px(14).rounded(t.radius).bg(bg)
+    return button_content(div().flex().center().gap(6).h(32).px(14).rounded(t.radius).bg(bg)
         .border(1).border_color(t.border).text_color(t.text).font_medium().whitespace_nowrap()
         .cursor_pointer()
         .hover(fn(s) { s.bg(bg.lighten(0.06)) })
-        .active(fn(s) { s.bg(bg.darken(0.1)) })
-        .child(label)
+        .active(fn(s) { s.bg(bg.darken(0.1)) }), label, icon)
 }
 
 /// A button in the accent color, for the main action.
-+ fn button_primary(win: Window, label: String) Div {
++ fn button_primary(win: Window, label: String, icon: ?Icon (null)) Div {
     let t = win.theme
     let bg = t.accent
-    return div().flex().center().h(32).px(14).rounded(t.radius).bg(bg)
+    return button_content(div().flex().center().gap(6).h(32).px(14).rounded(t.radius).bg(bg)
         .text_color(t.accent_text).font_medium().whitespace_nowrap()
         .cursor_pointer()
         .hover(fn(s) { s.bg(bg.lighten(0.1)) })
-        .active(fn(s) { s.bg(bg.darken(0.1)) })
-        .child(label)
+        .active(fn(s) { s.bg(bg.darken(0.1)) }), label, icon)
+}
+
+/// A square button with only an icon; give it a `tooltip`.
++ fn icon_button(win: Window, name: Icon, size: f32 (32)) Div {
+    let t = win.theme
+    return div().size(size).flex_shrink_0().rounded(t.radius).center().text_color(t.muted).cursor_pointer()
+        .hover(fn(s) { s.bg(t.elevated).text_color(t.text) })
+        .active(fn(s) { s.bg(t.border) })
+        .child(icon(name, round32(size * 0.5)))
+}
+
+fn button_content(d: Div, label: String, ic: ?Icon) Div {
+    if isset(ic) : d.child(icon(ic, 15))
+    if label.length > 0 : d.child(label)
+    return d
 }
 
 /// A checkbox with a label. Toggle your state in `on_click`.

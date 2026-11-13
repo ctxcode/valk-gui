@@ -29,6 +29,9 @@ class Face {
     generation: uint
     // The code points the file has a glyph for
     has: HashSet[i32]
+    // The size to draw at, and the distance from the top of the text to the baseline
+    size: f32
+    baseline: f32
 }
 
 struct Run {
@@ -79,15 +82,20 @@ class Fonts {
     /// The face of a font family at a size, `fallback` 0 for the family itself and 1.. for the
     /// fallback fonts.
     fn face(font: ResolvedFont, fallback: uint) Face {
-        let px = font_pixels(font)
-        let key = fallback == 0 ? font_key(font, px) : (fallback.to(u64) << 40) + px.to(u64)
+        let size_key = round32(font.size * 8).to(u64)
+        let key = fallback == 0 ? font_key(font, size_key) : (fallback.to(u64) << 40) + (font.weight.to(u64) << 32) + size_key
         let cached = this.faces.get(key) !? null
         if isset(cached) && cached.generation == this.generation : return cached
         if isset(cached) : raylib.unload_font(cached.font)
         let data = fallback == 0 ? this.family_file(font.name, font.weight, font.italic) : this.file(this.fallbacks.get(fallback - 1) !? "")
+        // Sized so that every font's em is the requested size, whatever its ascent and descent
+        let ratio, ascent = font_metrics(data)
+        let scale = dpi_scale()
+        let px = round32(font.size * ratio * scale).to(i32).max(4)
         let f = load_font_memory(data, px, this.codepoints)
         raylib.set_texture_filter(f.texture, .bilinear)
-        let face = Face{ font: f, generation: this.generation, has: glyph_set(f) }
+        let size = px.to(f32) / scale
+        let face = Face{ font: f, generation: this.generation, has: glyph_set(f), size: size, baseline: size * ascent / ratio }
         this.faces.set(key, face)
         return face
     }
@@ -128,18 +136,20 @@ class Fonts {
     }
 
     fn width(text: String, font: ResolvedFont) f32 {
-        let size = draw_size(font)
         let w: f32 = 0
-        each this.runs(text, font) as run : w += raylib.measure_text_ex(run.face.font, run.text, size, 0).x
+        each this.runs(text, font) as run : w += raylib.measure_text_ex(run.face.font, run.text, run.face.size, 0).x
         return w
     }
 
     fn draw(text: String, font: ResolvedFont, x: f32, y: f32, color: raylib.Color) {
-        let size = draw_size(font)
+        let primary = this.face(font, 0)
+        let scale = dpi_scale()
         let pos = x
         each this.runs(text, font) as run {
-            raylib.draw_text_ex(run.face.font, run.text, .{ x: pos, y: y }, size, 0, color)
-            pos += raylib.measure_text_ex(run.face.font, run.text, size, 0).x
+            // Fallback fonts sit on the same baseline
+            let dy = round32((primary.baseline - run.face.baseline) * scale) / scale
+            raylib.draw_text_ex(run.face.font, run.text, .{ x: pos, y: y + dy }, run.face.size, 0, color)
+            pos += raylib.measure_text_ex(run.face.font, run.text, run.face.size, 0).x
         }
     }
 
@@ -153,9 +163,12 @@ class Fonts {
     /// For text made only of symbols, such as "+" or "×": the middle of its ink below the top of
     /// the text, in logical pixels. Symbols sit at different heights, so they center on themselves.
     fn symbol_middle(font: ResolvedFont, text: String) ?f32 {
+        let primary = this.face(font, 0)
+        let scale = dpi_scale()
         let top: f32 = INF
         let bottom: f32 = -INF
         each this.runs(text, font) as run {
+            let shift = primary.baseline - run.face.baseline
             let i: uint = 0
             while i < run.text.length {
                 let cp, len = decode_utf8(run.text, i)
@@ -164,12 +177,12 @@ class Fonts {
                 if !is_symbol(cp) : return null
                 let g = raylib.get_glyph_info(run.face.font, cp.to(i32))
                 if g.image.height <= 0 : continue
-                top = top.min(g.offset_y.to(f32))
-                bottom = bottom.max((g.offset_y + g.image.height).to(f32))
+                top = top.min(g.offset_y.to(f32) / scale + shift)
+                bottom = bottom.max((g.offset_y + g.image.height).to(f32) / scale + shift)
             }
         }
         if top > bottom : return null
-        return (top + bottom) / 2 / dpi_scale()
+        return (top + bottom) / 2
     }
 
     // The bytes of the closest weight added for a family, or the built-in font
@@ -261,21 +274,38 @@ fn decode_utf8(text: String, i: uint) (u32, uint) {
     return (cp, len)
 }
 
-fn font_key(font: ResolvedFont, px: i32) u64 {
-    return font.name.hash().to(u64) * 31 + font.weight.to(u64) * 100003 + (font.italic ? 7919 : 0) + px.to(u64)
+fn font_key(font: ResolvedFont, size_key: u64) u64 {
+    return font.name.hash().to(u64) * 31 + font.weight.to(u64) * 100003 + (font.italic ? 7919 : 0) + size_key
+}
+
+/// From a font file: (ascent - descent) / em, which stb_truetype sizes to, and ascent / em.
+fn font_metrics(data: String) (f32, f32) {
+    if data.length < 12 : return (EM_SCALE, 0.97)
+    let tables = read_u16(data, 4).to(uint)
+    let units: f32 = 0
+    let ascent: f32 = 0
+    let descent: f32 = 0
+    each 0 .. tables as i {
+        let rec = 12 + i * 16
+        if rec + 16 > data.length : break
+        let tag = data.range(rec, 4)
+        let at = read_u32(data, rec + 8).to(uint)
+        if tag == "head" && at + 20 <= data.length : units = read_u16(data, at + 18).to(f32)
+        if tag == "hhea" && at + 8 <= data.length {
+            ascent = signed16(read_u16(data, at + 4)).to(f32)
+            descent = signed16(read_u16(data, at + 6)).to(f32)
+        }
+    }
+    if units <= 0 || ascent - descent <= 0 : return (EM_SCALE, 0.97)
+    return ((ascent - descent) / units, ascent / units)
+}
+
+fn signed16(v: u32) int {
+    let i = v.to(int)
+    return i >= 0x8000 ? i - 0x10000 : i
 }
 
 fn dpi_scale() f32 { return raylib.get_window_scale_dpi().x.max(1) }
-
-/// The size of the font's atlas in device pixels.
-fn font_pixels(font: ResolvedFont) i32 {
-    return round32(font.size * EM_SCALE * dpi_scale()).to(i32).max(4)
-}
-
-/// The size text is drawn at: exactly the atlas size, so glyphs are not resampled.
-fn draw_size(font: ResolvedFont) f32 {
-    return font_pixels(font).to(f32) / dpi_scale()
-}
 
 fn load_font_memory(data: local &[u8], px: i32, codepoints: local &[i32]) raylib.Font {
     @unsafe
