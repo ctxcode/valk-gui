@@ -1,0 +1,361 @@
+use gui
+use valk.thread
+
+// A sales dashboard: live numbers every two seconds, animated charts with hover read-outs, a
+// sortable and searchable table of 5000 orders, and a refresh that loads on a background thread.
+
+class Order {
+    id: uint
+    customer: String
+    country: String
+    amount: f32
+    status: uint
+    day: uint
+}
+
+value STATUSES ("Paid,Pending,Refunded,Shipped")
+value COUNTRIES ("Netherlands,Germany,France,Japan,Brazil,Canada,Kenya,India")
+
+class Dashboard is gui.Render {
+    page: uint (0)
+    dark: bool (true)
+    range: gui.Select (gui.Select.new(.{ "Last 7 days", "Last 14 days", "Last 30 days" }, 1))
+    search: gui.TextInput (gui.TextInput.new("Search orders…"))
+    orders: Array[Order] (.{})
+    revenue: Array[f32] (.{})
+    visitors: f32 (12840)
+    conversion: f32 (3.2)
+    sort_column: uint (0)
+    sort_down: bool (true)
+    hover_point: int (-1)
+    hover_bar: int (-1)
+    refreshing: bool (false)
+    live: ?gui.Timer (null)
+    seed: u64 (7)
+
+    fn render(win: gui.Window) gui.Div {
+        win.theme = this.dark ? gui.Theme.dark() : gui.Theme.light()
+        let t = win.theme
+        if !isset(this.live) {
+            this.live = win.every(2, fn() { this.tick() })
+        }
+        return gui.div().size_full().flex().bg(t.background).text_color(t.text).text_sm()
+            .child(this.nav(win))
+            .child(gui.div().flex_1().min_w(0).flex_col()
+                .child(this.header(win))
+                .child(gui.div().flex_1().p(20).gap(16).overflow_y_scroll().id("page")
+                    .child(this.stats(win))
+                    .child(gui.div().grid(3).gap(16)
+                        .child(this.revenue_chart(win).col_span(2))
+                        .child(this.status_chart(win)))
+                    .child(this.table(win))))
+    }
+
+    // ---- Data ----
+
+    fn random() f32 {
+        this.seed = this.seed * 6364136223846793005 + 1442695040888963407
+        return ((this.seed >> 33) % 10000).to(f32) / 10000
+    }
+
+    fn generate() {
+        let names = Array[String]{ "Ada", "Alan", "Grace", "Linus", "Margaret", "Dennis", "Barbara", "Ken", "Frances", "John" }
+        let surnames = Array[String]{ "Lovelace", "Turing", "Hopper", "Torvalds", "Hamilton", "Ritchie", "Liskov", "Thompson", "Allen", "Backus" }
+        let countries = COUNTRIES.split(",")
+        each 0 .. 5000 as i {
+            let name = (names.get((this.random() * 10).to(uint)) !? "Ada") + " " + (surnames.get((this.random() * 10).to(uint)) !? "Lovelace")
+            this.orders.append(Order{
+                id: 10000 + i, customer: name, country: countries.get((this.random() * 8).to(uint)) !? "",
+                amount: 20 + this.random() * this.random() * 900, status: (this.random() * 4).to(uint), day: (this.random() * 30).to(uint)
+            })
+        }
+        each 0 .. 30 as i : this.revenue.append(4000 + this.random() * 3000 + i.to(f32) * 80)
+    }
+
+    fn tick() {
+        // New numbers: the charts and counters ease to them
+        let last = this.revenue.last() !? 5000
+        this.revenue.remove(0)
+        this.revenue.append((last + (this.random() - 0.45) * 1400).max(1500))
+        this.visitors += (this.random() * 140).to(int).to(f32)
+        this.conversion = (this.conversion + (this.random() - 0.5) * 0.3).max(1)
+    }
+
+    fn days() uint {
+        return match this.range.selected : uint {
+            0 => 7
+            1 => 14
+            default => 30
+        }
+    }
+
+    fn refresh(win: gui.Window) {
+        if this.refreshing : return
+        this.refreshing = true
+        // Loading takes a while; the window stays responsive
+        win.spawn[f32](fn() f32 {
+            thread.suspend_ms(1200)
+            return 1.08
+        }, fn(factor) {
+            this.refreshing = false
+            each this.revenue as v, i : this.revenue.set(i, v * factor) _
+        }) _
+    }
+
+    // ---- Views ----
+
+    fn nav(win: gui.Window) gui.Div {
+        let t = win.theme
+        let items = Array[(gui.Icon, String)]{ (.home, "Overview"), (.chart, "Reports"), (.user, "Customers"), (.file, "Invoices"), (.settings, "Settings") }
+        let nav = gui.div().w(210).flex_shrink_0().p(12).gap(2).bg(t.surface).border_r(1).border_color(t.border)
+            .child(gui.div().flex().items_center().gap(10).px(8).pb(16).pt(4)
+                .child(gui.div().size(30).rounded(8).bg_gradient(gui.rgb(0x6366f1), gui.rgb(0xec4899), 135).center().child(gui.icon(.bolt, 16).text_color(gui.white())))
+                .child(gui.div().text_base().font_bold().child("Lumen")))
+        each items as ic, label, i {
+            let active = i == this.page
+            nav.child(gui.div().flex().items_center().gap(10).px(10).h(34).rounded(t.radius).cursor_pointer()
+                .text_color(active ? t.text : t.muted).when(active, fn(d) { d.bg(t.elevated).font_medium() })
+                .hover(fn(s) { s.bg(t.elevated).text_color(t.text) })
+                .on_click(fn(e) { this.page = i })
+                .child(gui.icon(ic, 16)).child(label))
+        }
+        return nav.child(gui.div().flex_1())
+            .child(gui.div().flex().items_center().justify_between().px(10)
+                .child(gui.div().flex().items_center().gap(8).text_color(t.muted).child(gui.icon(this.dark ? gui.Icon.moon : gui.Icon.sun, 15)).child("Dark mode"))
+                .child(gui.switch(win, this.dark).on_click(fn(e) { this.dark = !this.dark })))
+    }
+
+    fn header(win: gui.Window) gui.Div {
+        let t = win.theme
+        return gui.div().flex().items_center().gap(12).px(20).h(60).flex_shrink_0().border_b(1).border_color(t.border)
+            .child(gui.div().gap(0).child(gui.div().text_lg().font_semibold().child("Overview")).child(gui.div().text_xs().text_color(t.muted).child("Live · updates every 2 seconds")))
+            .child(gui.div().flex_1())
+            .child(this.range.render(win))
+            .child(gui.button(win, this.refreshing ? "Refreshing" : "Refresh", this.refreshing ? null : gui.Icon.refresh)
+                .when(this.refreshing, fn(d) { d.child(gui.spinner(win, 14)) })
+                .on_click(fn(e) { this.refresh(win) }))
+    }
+
+    fn stats(win: gui.Window) gui.Div {
+        let t = win.theme
+        let days = this.days()
+        let total: f32 = 0
+        each this.revenue skip 30 - days as v : total += v
+        let paid: uint = 0
+        each this.orders as o {
+            if o.day < days && o.status == 0 : paid++
+        }
+        let cards = Array[(String, String, gui.Icon, u32, String)]{
+            ("Revenue", "€ " + group(win.transition("revenue", total, 0.8)), .chart, 0x6366f1, "+12.4%"),
+            ("Paid orders", group(win.transition("paid", paid.to(f32), 0.8)), .check, 0x22c55e, "+4.1%"),
+            ("Visitors", group(win.transition("visitors", this.visitors, 0.8)), .user, 0x0ea5e9, "+8.9%"),
+            ("Conversion", win.transition("conversion", this.conversion, 0.8).to_string(2) + "%", .bolt, 0xf59e0b, "−0.3%")
+        }
+        let grid = gui.div().grid(4).gap(16)
+        each cards as label, value, ic, color, change {
+            let up = !change.starts_with("−")
+            grid.child(gui.card(win).gap(10)
+                .child(gui.div().flex().items_center().justify_between()
+                    .child(gui.div().text_color(t.muted).child(label))
+                    .child(gui.div().size(30).rounded(8).bg(gui.rgb(color).opacity(0.15)).center().child(gui.icon(ic, 16).text_color(gui.rgb(color)))))
+                .child(gui.div().text_2xl().font_bold().child(value))
+                .child(gui.div().flex().items_center().gap(4).text_xs()
+                    .child(gui.icon(up ? gui.Icon.arrow_up : gui.Icon.arrow_down, 12).text_color(up ? gui.rgb(0x22c55e) : t.danger))
+                    .child(gui.div().text_color(up ? gui.rgb(0x22c55e) : t.danger).child(change))
+                    .child(gui.div().text_color(t.muted).child("vs last period"))))
+        }
+        return grid
+    }
+
+    fn revenue_chart(win: gui.Window) gui.Div {
+        let t = win.theme
+        let days = this.days()
+        // Every point eases to its new value
+        let values = Array[f32]{}
+        each this.revenue skip 30 - days as v, i : values.append(win.transition("point-%i", v, 0.6))
+        let accent = t.accent
+        let grid_color = t.border
+        let muted = t.muted
+        let text_color = t.text
+        let surface = t.elevated
+        let hover = this.hover_point
+        let chart = gui.canvas(fn(p, b) {
+            let max: f32 = 1
+            each values as v : max = max.max(v)
+            max = max * 1.15
+            let left = b.x + 44
+            let w = b.w - 52
+            let bottom = b.bottom - 22
+            let h = b.h - 30
+            each 0 .. 5 as i {
+                let y = bottom - h * i.to(f32) / 4
+                p.line(left, y, left + w, y, grid_color, 1)
+                p.text(b.x, y - 9, "%{(max * i.to(f32) / 4 / 1000).to_string(1)}k", muted, 11)
+            }
+            let points = Array[gui.Point]{}
+            each values as v, i {
+                let x = left + w * i.to(f32) / (values.length - 1).max(1).to(f32)
+                points.append(.{ x: x, y: bottom - h * v / max })
+            }
+            // The area under the line fades out downwards
+            each points as pt, i {
+                if i == 0 : continue
+                let prev = points.get(i - 1) ! continue
+                p.triangle(prev, pt, .{ x: pt.x, y: bottom }, accent.opacity(0.14))
+                p.triangle(prev, .{ x: prev.x, y: bottom }, .{ x: pt.x, y: bottom }, accent.opacity(0.14))
+            }
+            p.polyline(points, accent, 2.5)
+            let hp = points.get(hover.max(0).to(uint)) !? null
+            if hover >= 0 && isset(hp) {
+                p.line(hp.x, b.y, hp.x, bottom, grid_color, 1)
+                p.circle(hp.x, hp.y, 5, accent)
+                p.ring(hp.x, hp.y, 7, surface, 2)
+                let label = "€ " + group(values.get(hover.to(uint)) !? 0)
+                let lw = p.text_width(label, 12) + 16
+                let bx = (hp.x - lw / 2).max(b.x).min(b.right - lw)
+                p.fill(.{ x: bx, y: hp.y - 40, w: lw, h: 26 }, surface, 6)
+                p.text(bx + 8, hp.y - 37, label, text_color, 12, .semibold)
+            }
+        }).flex_1()
+            .on_mouse_move(fn(e) {
+                let w = e.bounds.w - 52
+                let i = ((e.x - e.bounds.x - 44) / w * (days - 1).to(f32) + 0.5).to(int)
+                this.hover_point = i.max(0).min(days.to(int) - 1)
+            })
+        return gui.card(win).h(300).gap(12)
+            .child(gui.div().flex().items_center().justify_between()
+                .child(gui.div().font_semibold().child("Revenue"))
+                .child(gui.div().flex().gap(12).text_xs().text_color(t.muted)
+                    .child(gui.div().flex().items_center().gap(6).child(gui.div().size(8).rounded_full().bg(accent)).child("This period"))))
+            .child(chart)
+            .on_mouse_move(fn(e) {
+                if !e.bounds.contains(e.x, e.y) : this.hover_point = -1
+            })
+    }
+
+    fn status_chart(win: gui.Window) gui.Div {
+        let t = win.theme
+        let counts = Array[f32]{ 0, 0, 0, 0 }
+        let days = this.days()
+        each this.orders as o {
+            if o.day < days : counts.set(o.status, (counts.get(o.status) !? 0) + 1) _
+        }
+        let colors = Array[gui.Color]{ gui.rgb(0x22c55e), gui.rgb(0xf59e0b), gui.rgb(0xef4444), gui.rgb(0x6366f1) }
+        let total: f32 = 0
+        each counts as c, i : total += win.transition("status-%i", c, 0.6)
+        let shares = Array[f32]{}
+        each counts as c, i : shares.append(win.transition("status-%i", c, 0.6) / total.max(1))
+        let hover = this.hover_bar
+        let muted = t.muted
+        let text_color = t.text
+        let donut = gui.canvas(fn(p, b) {
+            let c = b.center
+            let r = b.w.min(b.h) / 2 - 12
+            let angle: f32 = -90
+            each shares as share, i {
+                let sweep = share * 360
+                let thick: f32 = i.to(int) == hover ? 22 : 16
+                p.arc(c.x, c.y, r, angle + 1.5, angle + sweep - 1.5, colors.get(i) !? muted, thick)
+                angle += sweep
+            }
+            let label = group(total)
+            p.text(c.x - p.text_width(label, 22, .bold) / 2, c.y - 20, label, text_color, 22, .bold)
+            p.text(c.x - p.text_width("orders", 12) / 2, c.y + 8, "orders", muted, 12)
+        }).flex_1()
+        let legend = gui.div().grid(2).gap(4)
+        each STATUSES.split(",") as name, i {
+            legend.child(gui.div().flex().items_center().gap(8).px(6).h(26).rounded(t.radius)
+                .hover(fn(s) { s.bg(t.elevated) })
+                .on_mouse_move(fn(e) { this.hover_bar = i.to(int) })
+                .child(gui.div().size(10).rounded(3).bg(colors.get(i) !? t.muted))
+                .child(gui.div().flex_1().child(name))
+                .child(gui.div().text_color(t.muted).child("%{((shares.get(i) !? 0) * 100).to_string(1)}%")))
+        }
+        return gui.card(win).h(300).gap(8)
+            .on_mouse_move(fn(e) {
+                if !e.bounds.contains(e.x, e.y) : this.hover_bar = -1
+            })
+            .child(gui.div().font_semibold().child("Orders by status"))
+            .child(donut)
+            .child(legend)
+    }
+
+    fn table(win: gui.Window) gui.Div {
+        let t = win.theme
+        let q = this.search.text.lower()
+        let days = this.days()
+        let rows = this.orders.filter(fn(o: Order) bool {
+            if o.day >= days : return false
+            return q.length == 0 || o.customer.lower().contains(q) || o.country.lower().contains(q) || o.id.to(String).contains(q)
+        })
+        let col = this.sort_column
+        let down = this.sort_down
+        rows.sort(fn(a: Order, b: Order) bool {
+            let after = match col : bool {
+                0 => a.id > b.id
+                1 => a.customer > b.customer
+                2 => a.country > b.country
+                3 => a.amount > b.amount
+                default => a.status > b.status
+            }
+            return down ? !after : after
+        })
+        let widths = Array[f32]{ 90, 0, 140, 110, 110 }
+        let names = Array[String]{ "Order", "Customer", "Country", "Amount", "Status" }
+        let head = gui.div().flex().items_center().h(36).px(12).border_b(1).border_color(t.border).text_xs().font_semibold().text_color(t.muted)
+        each names as name, i {
+            let cell = gui.div().flex().items_center().gap(4).cursor_pointer().hover(fn(s) { s.text_color(t.text) })
+                .on_click(fn(e) {
+                    if this.sort_column == i : this.sort_down = !this.sort_down
+                    else : this.sort_column = i
+                })
+                .child(name.upper())
+                .when(this.sort_column == i, fn(d) { d.text_color(t.text).child(gui.icon(this.sort_down ? gui.Icon.chevron_down : gui.Icon.chevron_up, 12)) })
+            let w = widths.get(i) !? 0
+            if w > 0 : cell.w(w).flex_shrink_0() else : cell.flex_1()
+            if i == 3 : cell.justify_end().pr(24)
+            head.child(cell)
+        }
+        let status_colors = Array[gui.Color]{ gui.rgb(0x22c55e), gui.rgb(0xf59e0b), gui.rgb(0xef4444), gui.rgb(0x6366f1) }
+        let statuses = STATUSES.split(",")
+        let list = gui.uniform_list(win, "orders", rows.length, 40, fn(i) {
+            let o = rows.get(i) !? null
+            if !isset(o) : return gui.div()
+            return gui.div().flex().items_center().px(12).border_b(1).border_color(t.border.opacity(0.5))
+                .hover(fn(s) { s.bg(t.elevated) })
+                .child(gui.div().w(90).flex_shrink_0().text_color(t.muted).child("#%{o.id}"))
+                .child(gui.div().flex_1().flex().items_center().gap(8).min_w(0)
+                    .child(gui.avatar(o.customer, gui.hsla((o.id % 12).to(f32) * 30, 0.55, 0.5, 1), 24))
+                    .child(gui.div().truncate().child(o.customer)))
+                .child(gui.div().w(140).flex_shrink_0().child(o.country))
+                .child(gui.div().w(110).flex_shrink_0().text_right().pr(24).font_medium().child("€ " + o.amount.to_string(2)))
+                .child(gui.div().w(110).flex_shrink_0().items_start().child(gui.badge(statuses.get(o.status) !? "", status_colors.get(o.status) !? t.muted)))
+        }).h(400)
+        return gui.card(win).p(0).gap(0)
+            .child(gui.div().flex().items_center().gap(12).p(16)
+                .child(gui.div().font_semibold().child("Orders"))
+                .child(gui.badge("%{rows.length}", t.muted))
+                .child(gui.div().flex_1())
+                .child(gui.div().w(260).child(this.search.render(win))))
+            .child(head)
+            .child(list)
+    }
+}
+
+// 12345.6 as "12,346"
+fn group(v: f32) String {
+    let n = (v + 0.5).to(int)
+    let digits = n.to(String)
+    let out = ""
+    each digits as c, i {
+        if i > 0 && (digits.length - i) % 3 == 0 : out += ","
+        out += c.to_ascii_string()
+    }
+    return out
+}
+
+fn main() {
+    let app = Dashboard{}
+    app.generate()
+    gui.run(app, .{ title: "Dashboard", width: 1280, height: 860 })
+}
