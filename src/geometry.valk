@@ -73,3 +73,5 @@ fn floor32(v: f32) f32 { return math.floor(v).to(f32) }
 fn round32(v: f32) f32 { return math.round(v).to(f32) }
 fn ceil32(v: f32) f32 { return math.ceil(v).to(f32) }
 fn clamp32(v: f32, lo: f32, hi: f32) f32 { return v.max(lo).min(hi) }
+fn sin32(v: f32) f32 { return math.sin(v).to(f32) }
+fn cos32(v: f32) f32 { return math.cos(v).to(f32) }

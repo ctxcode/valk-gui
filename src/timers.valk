@@ -1,0 +1,159 @@
+use valk.sync
+use valk.thread
+
+/// A callback the window runs later, once or repeatedly. Made by `Window.after` and `Window.every`.
++ class Timer {
+    /// When it runs next, in `Window.time` seconds.
+    ~+ due: f64
+    ~+ interval: f64 (0)
+    callback: fn()()
+    ~+ cancelled: bool (false)
+
+    + fn cancel() { this.cancelled = true }
+}
+
+interface Pending {
+    fn poll() bool;
+}
+
+// Work on another thread whose result comes back through a channel
+class Task[T] is Pending {
+    channel: sync.Channel[T]
+    done: fn(T)()
+
+    fn poll() bool {
+        let value = this.channel.try_recv() ! return false
+        this.done(value)
+        return true
+    }
+}
+
+struct Transition {
+    from: f32
+    to: f32
+    start: f64
+    seconds: f64
+}
+
+extend Window {
+    /// Runs `callback` once after `seconds`, on the window's thread.
+    + fn after(seconds: f64, callback: fn()()) Timer {
+        let t = Timer{ due: this.time + seconds, callback: callback }
+        this.timers.append(t)
+        return t
+    }
+
+    /// Runs `callback` every `seconds` until the timer is cancelled.
+    + fn every(seconds: f64, callback: fn()()) Timer {
+        let t = Timer{ due: this.time + seconds, interval: seconds.max(0.001), callback: callback }
+        this.timers.append(t)
+        return t
+    }
+
+    /// Runs `work` on a new thread and then `done` with its result on the window's thread, followed
+    /// by a frame. The result travels between threads, so it is a number, a `String`, a `bool` or
+    /// an `atomic` object; `work` may only capture such values too.
+    + fn spawn[T](work: atomic fn()(T), done: fn(T)()) !InitError {
+        let channel = sync.Channel[T].new(1) ! throw .init
+        thread.start(fn() {
+            channel.send(work()) _
+        }) ! throw .init
+        this.tasks.append(Task[T]{ channel: channel, done: done })
+    }
+
+    /// A value that moves smoothly to `target` over `seconds` whenever the target changes. Call it
+    /// every frame with the same `key`; the window draws frames until the value arrives. The first
+    /// call returns `target` right away.
+    + fn transition(key: String, target: f32, seconds: f64 (0.15)) f32 {
+        let tr = this.transitions.get(key) ! {
+            this.transitions.set(key, .{ from: target, to: target, start: this.time, seconds: seconds })
+            return target
+        }
+        let current = transition_value(tr, this.time)
+        if tr.to != target {
+            tr = .{ from: current, to: target, start: this.time, seconds: seconds }
+            this.transitions.set(key, tr)
+            current = tr.from
+        }
+        if this.time < tr.start + tr.seconds : this.request_frame()
+        return current
+    }
+
+    /// Moves the clock of a headless window forward, runs what became due, and draws a frame.
+    + fn advance(seconds: f64) {
+        this.time += seconds
+        this.tick()
+        this.draw()
+    }
+
+    /// Waits until every task started with `spawn` has finished and run its `done`, then draws a
+    /// frame. For tests.
+    + fn wait_tasks() {
+        while this.tasks.length > 0 {
+            this.tick()
+            if this.tasks.length > 0 : thread.suspend_ms(1)
+        }
+        this.draw()
+    }
+
+    /// Runs the timers that are due and the `done` of finished tasks. True when anything ran.
+    fn tick() bool {
+        let ran = false
+        let due = Array[Timer]{}
+        each this.timers as t {
+            if !t.cancelled && t.due <= this.time : due.append(t)
+        }
+        each due as t {
+            if t.cancelled : continue
+            t.callback()
+            ran = true
+            if t.interval > 0 && !t.cancelled {
+                t.due += t.interval
+                if t.due <= this.time : t.due = this.time + t.interval
+            } else {
+                t.cancelled = true
+            }
+        }
+        this.timers.remove_where(fn(t: Timer) bool { return t.cancelled })
+
+        if this.tasks.length > 0 {
+            let running = this.tasks
+            this.tasks = Array[Pending]{}
+            let still = Array[Pending]{}
+            each running as task {
+                if task.poll() {
+                    ran = true
+                } else {
+                    still.append(task)
+                }
+            }
+            each this.tasks as task : still.append(task)
+            this.tasks = still
+        }
+        if this.wake_at <= this.time {
+            this.wake_at = INF
+            ran = true
+        }
+        return ran
+    }
+
+    /// Whether something will need a frame without input: timers, tasks, animations.
+    fn busy() bool {
+        return this.timers.length > 0 || this.tasks.length > 0 || this.wake_at < INF || this.frame_requested || this.dirty
+    }
+
+    /// When the next timer or wake-up is due.
+    fn next_due() f64 {
+        let next: f64 = this.wake_at
+        each this.timers as t : next = next.min(t.due)
+        return next
+    }
+}
+
+fn transition_value(tr: Transition, now: f64) f32 {
+    if tr.seconds <= 0 || now >= tr.start + tr.seconds : return tr.to
+    let t = ((now - tr.start) / tr.seconds).to(f32)
+    // Ease out: fast start, gentle arrival
+    let eased = 1 - (1 - t) * (1 - t) * (1 - t)
+    return tr.from + (tr.to - tr.from) * eased
+}

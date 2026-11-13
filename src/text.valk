@@ -5,6 +5,7 @@
     + name: String ("")
     + size: f32 (16)
     + weight: FontWeight (.normal)
+    + italic: bool (false)
     /// The height of one line in pixels.
     + line_height: f32 (22)
 }

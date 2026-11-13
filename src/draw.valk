@@ -1,0 +1,100 @@
+use raylib
+
+fn to_rl(c: Color) raylib.Color { return .{ r: c.r, g: c.g, b: c.b, a: c.a } }
+
+fn rect(b: Bounds) raylib.Rectangle { return .{ x: b.x, y: b.y, width: b.w, height: b.h } }
+
+fn draw_scene(win: Window, p: RaylibPlatform, sdf: Sdf) {
+    let scale = raylib.get_window_scale_dpi().x.max(1)
+    // Texts in a row share the text shader, so they draw in one batch
+    let in_text = false
+    each win.scene.items as item {
+        if (item.kind == .text) != in_text {
+            in_text = !in_text
+            if in_text : raylib.begin_shader_mode(sdf.text)
+            else : raylib.end_shader_mode()
+        }
+        match item.kind {
+            .quad => draw_quad(item, sdf)
+            .shadow => sdf.shadow(item.bounds, item.corners, item.width, item.color)
+            .text => {
+                let fonts = p.fonts
+                // Whole device pixels keep the glyphs sharp
+                let x = round32(item.bounds.x * scale) / scale
+                // Capitals and digits centered in the line box
+                let middle = fonts.symbol_middle(item.font, item.text) ?? fonts.cap_middle(item.font)
+                let y = round32((item.bounds.y + item.font.line_height / 2 - middle) * scale) / scale
+                fonts.draw(item.text, item.font, x, y, to_rl(item.color))
+            }
+            .image => draw_image(item, p.texture(item.text), sdf)
+            .line => sdf.line(item.points[0], item.points[1], item.width, item.color)
+            .circle => sdf.box(item.bounds, Corners.all(item.radius), item.color, 0, item.color)
+            .ring => sdf.box(item.bounds, Corners.all(item.radius), transparent(), item.width, item.color)
+            .triangle => {
+                let a = item.points[0]
+                let b = item.points[1]
+                let c = item.points[2]
+                // raylib wants counter-clockwise corners
+                if (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x) > 0 {
+                    raylib.draw_triangle(.{ x: a.x, y: a.y }, .{ x: c.x, y: c.y }, .{ x: b.x, y: b.y }, to_rl(item.color))
+                } else {
+                    raylib.draw_triangle(.{ x: a.x, y: a.y }, .{ x: b.x, y: b.y }, .{ x: c.x, y: c.y }, to_rl(item.color))
+                }
+            }
+            .clip => {
+                let b = item.bounds
+                let x = floor32(b.x)
+                let y = floor32(b.y)
+                raylib.begin_scissor_mode(x.to(i32), y.to(i32), (ceil32(b.x + b.w) - x).to(i32), (ceil32(b.y + b.h) - y).to(i32))
+            }
+            .unclip => raylib.end_scissor_mode()
+        }
+    }
+    if in_text : raylib.end_shader_mode()
+}
+
+fn draw_quad(item: Primitive, sdf: Sdf) {
+    let b = item.bounds
+    if b.w <= 0 || b.h <= 0 : return
+    let border = item.border
+    let has_border = !border.is_zero() && !item.border_color.is_transparent()
+    if item.gradient {
+        sdf.gradient_box(b, item.corners, item.color, item.color2, item.angle, has_border && border.is_uniform() ? border.top : 0, item.border_color)
+        return
+    }
+    if !item.corners.is_zero() || (has_border && border.is_uniform()) {
+        sdf.box(b, item.corners, item.color, has_border ? border.top : 0, item.border_color)
+        return
+    }
+    if !item.color.is_transparent() : raylib.draw_rectangle_rec(rect(b), to_rl(item.color))
+    if has_border {
+        let c = to_rl(item.border_color)
+        if border.top > 0 : raylib.draw_rectangle_rec(.{ x: b.x, y: b.y, width: b.w, height: border.top }, c)
+        if border.bottom > 0 : raylib.draw_rectangle_rec(.{ x: b.x, y: b.bottom - border.bottom, width: b.w, height: border.bottom }, c)
+        if border.left > 0 : raylib.draw_rectangle_rec(.{ x: b.x, y: b.y + border.top, width: border.left, height: b.h - border.top - border.bottom }, c)
+        if border.right > 0 : raylib.draw_rectangle_rec(.{ x: b.right - border.right, y: b.y + border.top, width: border.right, height: b.h - border.top - border.bottom }, c)
+    }
+}
+
+fn draw_image(item: Primitive, t: raylib.Texture, sdf: Sdf) {
+    if t.id == 0 || item.bounds.w <= 0 || item.bounds.h <= 0 : return
+    let tw = t.width.to(f32)
+    let th = t.height.to(f32)
+    let b = item.bounds
+    let source = raylib.Rectangle{ width: tw, height: th }
+    let dest = b
+    if item.fit == .contain {
+        let scale = (b.w / tw).min(b.h / th)
+        dest = .{ x: b.x + (b.w - tw * scale) / 2, y: b.y + (b.h - th * scale) / 2, w: tw * scale, h: th * scale }
+    } else if item.fit == .cover {
+        let scale = (b.w / tw).max(b.h / th)
+        let sw = b.w / scale
+        let sh = b.h / scale
+        source = .{ x: (tw - sw) / 2, y: (th - sh) / 2, width: sw, height: sh }
+    }
+    if item.corners.is_zero() {
+        raylib.draw_texture_pro(t, source, rect(dest), .{}, 0, to_rl(item.color))
+    } else {
+        sdf.image(t, source, dest, dest, item.corners, item.color)
+    }
+}

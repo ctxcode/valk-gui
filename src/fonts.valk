@@ -1,0 +1,303 @@
+use raylib
+use valk.fs
+
+extern fn LoadFontFromMemory(file_type: ?cstring, file_data: ?ptr, data_size: i32, font_size: i32, codepoints: ?*[i32], codepoint_count: i32) raylib.Font;
+
+// stb_truetype sizes fonts by ascent to descent; this makes the em the requested size
+value EM_SCALE (1.21)
+
+// Font files with wide coverage, tried for characters the font in use lacks
+fn system_fallback_fonts() Array[String] {
+    #if OS == "macos"
+    return .{ "/System/Library/Fonts/Supplemental/Arial Unicode.ttf", "/System/Library/Fonts/Hiragino Sans GB.ttc",
+        "/System/Library/Fonts/AppleSDGothicNeo.ttc", "/System/Library/Fonts/Apple Symbols.ttf" }
+    #elif OS == "win"
+    return .{ "C:/Windows/Fonts/segoeui.ttf", "C:/Windows/Fonts/msyh.ttc", "C:/Windows/Fonts/YuGothM.ttc",
+        "C:/Windows/Fonts/malgun.ttf", "C:/Windows/Fonts/seguisym.ttf" }
+    #else
+    return .{ "/usr/share/fonts/TTF/DejaVuSans.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/noto/NotoSans-Regular.ttf", "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
+        "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc", "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/google-noto-cjk/NotoSansCJK-Regular.ttc", "/usr/share/fonts/wenquanyi/wqy-microhei/wqy-microhei.ttc",
+        "/usr/share/fonts/noto/NotoSansSymbols2-Regular.ttf", "/usr/share/fonts/truetype/noto/NotoSansSymbols2-Regular.ttf" }
+    #end
+}
+
+/// One font file rasterized at one size.
+class Face {
+    font: raylib.Font
+    generation: uint
+    // The code points the file has a glyph for
+    has: HashSet[i32]
+}
+
+struct Run {
+    face: Face
+    text: String
+}
+
+/// Loads fonts from memory at the sizes in use, with the characters that have been seen so far.
+/// A new character reloads the faces once; characters a font lacks come from fallback fonts.
+class Fonts {
+    window: ?Window (null)
+    faces: HashMap[u64, Face] (.{})
+    files: Map[String] (.{})
+    fallbacks: Array[String] (.{})
+    codepoints: Array[i32] (base_codepoints())
+    known: HashSet[i32] (.{})
+    generation: uint (0)
+
+    static fn new(extra_fallbacks: Array[String]) Fonts {
+        let f = Fonts{}
+        each f.codepoints as cp : f.known.add(cp)
+        each extra_fallbacks as path : f.fallbacks.append(path)
+        each system_fallback_fonts() as path {
+            if fs.is_file(path) : f.fallbacks.append(path)
+        }
+        return f
+    }
+
+    /// Adds the characters of `text` that no atlas has yet.
+    fn see(text: String) {
+        let i: uint = 0
+        while i < text.length {
+            if text[i] < 0x80 {
+                i++
+                continue
+            }
+            let cp, len = decode_utf8(text, i)
+            i += len
+            let c = cp.to(i32)
+            if !this.known.has(c) {
+                this.known.add(c)
+                this.codepoints.append(c)
+                this.generation++
+            }
+        }
+    }
+
+    /// The face of a font family at a size, `fallback` 0 for the family itself and 1.. for the
+    /// fallback fonts.
+    fn face(font: ResolvedFont, fallback: uint) Face {
+        let px = font_pixels(font)
+        let key = fallback == 0 ? font_key(font, px) : (fallback.to(u64) << 40) + px.to(u64)
+        let cached = this.faces.get(key) !? null
+        if isset(cached) && cached.generation == this.generation : return cached
+        if isset(cached) : raylib.unload_font(cached.font)
+        let data = fallback == 0 ? this.family_file(font.name, font.weight, font.italic) : this.file(this.fallbacks.get(fallback - 1) !? "")
+        let f = load_font_memory(data, px, this.codepoints)
+        raylib.set_texture_filter(f.texture, .bilinear)
+        let face = Face{ font: f, generation: this.generation, has: glyph_set(f) }
+        this.faces.set(key, face)
+        return face
+    }
+
+    /// The text cut into parts that one face draws.
+    fn runs(text: String, font: ResolvedFont) Array[Run] {
+        this.see(text)
+        let primary = this.face(font, 0)
+        let result = Array[Run]{}
+        if is_ascii(text) {
+            result.append(.{ face: primary, text: text })
+            return result
+        }
+        let start: uint = 0
+        let current = primary
+        let i: uint = 0
+        while i < text.length {
+            let cp, len = decode_utf8(text, i)
+            let face = this.face_for(font, primary, cp.to(i32))
+            if face != current {
+                if i > start : result.append(.{ face: current, text: text.range(start, i - start) })
+                start = i
+                current = face
+            }
+            i += len
+        }
+        if text.length > start : result.append(.{ face: current, text: text.range(start, text.length - start) })
+        return result
+    }
+
+    - fn face_for(font: ResolvedFont, primary: Face, cp: i32) Face {
+        if cp < 0x80 || primary.has.has(cp) : return primary
+        each this.fallbacks as path, i {
+            let face = this.face(font, i + 1)
+            if face.has.has(cp) : return face
+        }
+        return primary
+    }
+
+    fn width(text: String, font: ResolvedFont) f32 {
+        let size = draw_size(font)
+        let w: f32 = 0
+        each this.runs(text, font) as run : w += raylib.measure_text_ex(run.face.font, run.text, size, 0).x
+        return w
+    }
+
+    fn draw(text: String, font: ResolvedFont, x: f32, y: f32, color: raylib.Color) {
+        let size = draw_size(font)
+        let pos = x
+        each this.runs(text, font) as run {
+            raylib.draw_text_ex(run.face.font, run.text, .{ x: pos, y: y }, size, 0, color)
+            pos += raylib.measure_text_ex(run.face.font, run.text, size, 0).x
+        }
+    }
+
+    /// Where the middle of a capital letter is below the top of the text, in logical pixels.
+    fn cap_middle(font: ResolvedFont) f32 {
+        let f = this.face(font, 0).font
+        let h = raylib.get_glyph_info(f, 72)
+        return (h.offset_y.to(f32) + h.image.height.to(f32) / 2) / dpi_scale()
+    }
+
+    /// For text made only of symbols, such as "+" or "×": the middle of its ink below the top of
+    /// the text, in logical pixels. Symbols sit at different heights, so they center on themselves.
+    fn symbol_middle(font: ResolvedFont, text: String) ?f32 {
+        let top: f32 = INF
+        let bottom: f32 = -INF
+        each this.runs(text, font) as run {
+            let i: uint = 0
+            while i < run.text.length {
+                let cp, len = decode_utf8(run.text, i)
+                i += len
+                if cp == ' ' : continue
+                if !is_symbol(cp) : return null
+                let g = raylib.get_glyph_info(run.face.font, cp.to(i32))
+                if g.image.height <= 0 : continue
+                top = top.min(g.offset_y.to(f32))
+                bottom = bottom.max((g.offset_y + g.image.height).to(f32))
+            }
+        }
+        if top > bottom : return null
+        return (top + bottom) / 2 / dpi_scale()
+    }
+
+    // The bytes of the closest weight added for a family, or the built-in font
+    - fn family_file(name: String, weight: FontWeight, italic: bool) String {
+        if name == "" : return builtin_font(weight, italic)
+        let win = this.window ?! return builtin_font(weight, italic)
+        let best: ?String = null
+        let best_distance: int = 100
+        each win.fonts as f {
+            if f.name != name : continue
+            let d = (f.weight.to(int) - weight.to(int)).abs()
+            if d < best_distance {
+                best = f.path
+                best_distance = d
+            }
+        }
+        if !isset(best) : return builtin_font(weight, italic)
+        return this.file(best)
+    }
+
+    - fn file(path: String) String {
+        let cached = this.files.get(path) !? null
+        if isset(cached) : return cached
+        let data = ttc_first_font(fs.read(path) !? "")
+        this.files.set(path, data)
+        return data
+    }
+
+    fn unload() {
+        each this.faces as face : raylib.unload_font(face.font)
+    }
+}
+
+// The code points the font has real glyphs for
+fn glyph_set(f: raylib.Font) HashSet[i32] {
+    let set = HashSet[i32]{}
+    if f.glyph_count <= 0 : return set
+    let glyphs = f.glyphs ?! return set
+    let list = glyphs.@cast(*[raylib.GlyphInfo])
+    each 0 .. f.glyph_count.to(uint) as i {
+        @unsafe
+        let g = list[i]
+        if g.value == 32 || g.advance_x > 0 || g.image.width > 0 : set.add(g.value)
+    }
+    return set
+}
+
+/// A font collection (.ttc) turned into a plain font file of its first font: that font's table
+/// directory is written over the collection header. Table offsets count from the file start, so
+/// they stay valid.
+fn ttc_first_font(data: String) String {
+    if data.length < 16 || data.range(0, 4) != "ttcf" : return data
+    let offset = read_u32(data, 12).to(uint)
+    if offset + 12 > data.length : return data
+    let tables = read_u16(data, offset + 4).to(uint)
+    let dir = 12 + 16 * tables
+    if offset + dir > data.length : return data
+    return data.range(offset, dir) + data.range(dir, data.length - dir)
+}
+
+fn read_u32(d: String, at: uint) u32 {
+    return (d[at].to(u32) << 24) | (d[at + 1].to(u32) << 16) | (d[at + 2].to(u32) << 8) | d[at + 3].to(u32)
+}
+fn read_u16(d: String, at: uint) u32 {
+    return (d[at].to(u32) << 8) | d[at + 1].to(u32)
+}
+
+fn is_ascii(text: String) bool {
+    each text as b {
+        if b >= 0x80 : return false
+    }
+    return true
+}
+
+/// Punctuation, math and arrows: not letters or digits.
+fn is_symbol(cp: u32) bool {
+    if cp < 0x80 : return !((cp >= '0' && cp <= '9') || (cp >= 'a' && cp <= 'z') || (cp >= 'A' && cp <= 'Z'))
+    return cp == 0xd7 || cp == 0xf7 || cp == 0xb1 || (cp >= 0x2000 && cp < 0x2c00)
+}
+
+/// The code point at byte `i` and its length in bytes.
+fn decode_utf8(text: String, i: uint) (u32, uint) {
+    let b = text[i].to(u32)
+    if b < 0x80 : return (b, 1)
+    let len: uint = b >= 0xf0 ? 4 : (b >= 0xe0 ? 3 : 2)
+    if i + len > text.length : return (0xfffd, 1)
+    let cp = b & (len == 2 ? 0x1f : (len == 3 ? 0x0f : 0x07))
+    each 1 .. len - 1 as k : cp = (cp << 6) | (text[i + k].to(u32) & 0x3f)
+    return (cp, len)
+}
+
+fn font_key(font: ResolvedFont, px: i32) u64 {
+    return font.name.hash().to(u64) * 31 + font.weight.to(u64) * 100003 + (font.italic ? 7919 : 0) + px.to(u64)
+}
+
+fn dpi_scale() f32 { return raylib.get_window_scale_dpi().x.max(1) }
+
+/// The size of the font's atlas in device pixels.
+fn font_pixels(font: ResolvedFont) i32 {
+    return round32(font.size * EM_SCALE * dpi_scale()).to(i32).max(4)
+}
+
+/// The size text is drawn at: exactly the atlas size, so glyphs are not resampled.
+fn draw_size(font: ResolvedFont) f32 {
+    return font_pixels(font).to(f32) / dpi_scale()
+}
+
+fn load_font_memory(data: local &[u8], px: i32, codepoints: local &[i32]) raylib.Font {
+    @unsafe
+    return LoadFontFromMemory(".ttf".data_cstring, data.data, data.length.to(i32), px, codepoints.data, codepoints.length.to(i32))
+}
+
+fn builtin_font(weight: FontWeight, italic: bool) String {
+    if italic : return #embed("assets/fonts/Inter-Italic.ttf")
+    return match weight : String {
+        .normal => #embed("assets/fonts/Inter-Regular.ttf")
+        .medium => #embed("assets/fonts/Inter-Medium.ttf")
+        .semibold => #embed("assets/fonts/Inter-SemiBold.ttf")
+        .bold => #embed("assets/fonts/Inter-Bold.ttf")
+    }
+}
+
+// Latin-1 and common punctuation, arrows and symbols; others are added when text uses them
+fn base_codepoints() Array[i32] {
+    let list = Array[i32]{}
+    each 32 .. 95 as c : list.append(c.to(i32))
+    each 160 .. 96 as c : list.append(c.to(i32))
+    each Array[i32]{ 0x2013, 0x2014, 0x2018, 0x2019, 0x201c, 0x201d, 0x2022, 0x2026, 0x20ac, 0x2122,
+        0x2190, 0x2191, 0x2192, 0x2193, 0x2212, 0x2713, 0x2715, 0x25b2, 0x25bc, 0x25b6, 0x25c0 } as c : list.append(c)
+    return list
+}

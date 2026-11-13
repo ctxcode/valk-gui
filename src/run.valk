@@ -1,11 +1,5 @@
-
 use raylib
 use valk.core
-
-extern fn LoadFontFromMemory(file_type: ?cstring, file_data: ?ptr, data_size: i32, font_size: i32, codepoints: ?*[i32], codepoint_count: i32) raylib.Font;
-
-// stb_truetype sizes fonts by ascent to descent; this makes the em the requested size
-value EM_SCALE (1.21)
 
 /// Opens a window, shows `root` in it and handles input until the window closes.
 + fn run(root: Render, options: WindowOptions (WindowOptions{})) {
@@ -21,23 +15,42 @@ value EM_SCALE (1.21)
     raylib.set_exit_key(.none)
     raylib.set_target_fps(60)
 
-    let platform = RaylibPlatform{}
+    let fonts = Fonts.new(options.fallback_fonts)
+    let platform = RaylibPlatform{ fonts: fonts }
     let sdf = Sdf.load()
     let win = Window.new(root, raylib.get_screen_width().to(f32), raylib.get_screen_height().to(f32), platform, options.theme)
     win.title = options.title
     each options.fonts as f : win.fonts.append(f)
-    platform.window = win
+    fonts.window = win
 
     let shot: ?String = options.screenshot.length > 0 ? options.screenshot : env_screenshot()
     let shot_after = (core.getenv("VALK_GUI_SCREENSHOT_AFTER") !? "0").to(f64) !? 0
     let input = RaylibInput{}
+    let first = true
     while !raylib.window_should_close() && !win.quit_requested {
         win.time = raylib.get_time()
-        if raylib.is_window_resized() : win.resize(raylib.get_screen_width().to(f32), raylib.get_screen_height().to(f32))
-        input.poll(win)
+        let changed = first || isset(shot)
+        first = false
+        if raylib.is_window_resized() {
+            win.resize(raylib.get_screen_width().to(f32), raylib.get_screen_height().to(f32))
+            changed = true
+        }
+        if input.poll(win) : changed = true
+        if win.tick() : changed = true
         if win.title_changed {
             raylib.set_window_title(win.title)
             win.title_changed = false
+        }
+        if !changed && !win.frame_requested && !win.dirty {
+            // Nothing to draw: sleep until input, or until the next timer when one is pending
+            if win.busy() {
+                raylib.disable_event_waiting()
+                raylib.wait_time((win.next_due() - win.time).max(0.001).min(1.0 / 60.0))
+            } else {
+                raylib.enable_event_waiting()
+            }
+            raylib.poll_input_events()
+            continue
         }
         win.frame_requested = false
         win.draw()
@@ -55,15 +68,16 @@ value EM_SCALE (1.21)
             raylib.end_drawing()
             break
         }
-        raylib.end_drawing()
-
-        if win.frame_requested || win.dirty || isset(shot) {
+        // Drawing ends by reading input; without anything pending it waits for some
+        if win.busy() || isset(shot) {
             raylib.disable_event_waiting()
         } else {
             raylib.enable_event_waiting()
         }
+        raylib.end_drawing()
     }
     sdf.unload()
+    fonts.unload()
     platform.unload()
     raylib.close_window()
 }
@@ -81,18 +95,10 @@ fn env_hidden() ?String {
 }
 
 class RaylibPlatform is Platform {
-    window: ?Window (null)
-    fonts: HashMap[u64, raylib.Font] (.{})
-    // Per font: the middle of a capital letter below the top of a drawn line, in device pixels
-    cap_middles: HashMap[u64, f32] (.{})
+    fonts: Fonts
     textures: Map[raylib.Texture] (.{})
-    font_data: Map[String] (.{})
-    clip: String ("")
 
-    fn text_width(text: String, font: ResolvedFont) f32 {
-        let f = this.font(font)
-        return raylib.measure_text_ex(f, text, draw_size(font), 0).x
-    }
+    fn text_width(text: String, font: ResolvedFont) f32 { return this.fonts.width(text, font) }
 
     fn image_size(path: String) Point {
         let t = this.texture(path)
@@ -115,151 +121,20 @@ class RaylibPlatform is Platform {
         return cached
     }
 
-    fn font(font: ResolvedFont) raylib.Font {
-        let px = font_pixels(font)
-        let key = font_key(font, px)
-        let cached = this.fonts.get(key) ! {
-            let f = this.load(font.name, font.weight, px)
-            this.fonts.set(key, f)
-            let h = raylib.get_glyph_info(f, 72)
-            this.cap_middles.set(key, h.offset_y.to(f32) + h.image.height.to(f32) / 2)
-            return f
-        }
-        return cached
-    }
-
-    /// For text made only of symbols, such as "+" or "×": the middle of its ink below the top of
-    /// the text, in logical pixels. Symbols sit at different heights, so they center on themselves.
-    fn symbol_middle(font: ResolvedFont, text: String) ?f32 {
-        let f = this.font(font)
-        let top: f32 = INF
-        let bottom: f32 = -INF
-        let i: uint = 0
-        while i < text.length {
-            let cp, len = decode_utf8(text, i)
-            i += len
-            if cp == ' ' : continue
-            if !is_symbol(cp) : return null
-            let g = raylib.get_glyph_info(f, cp.to(i32))
-            if g.image.height <= 0 : continue
-            top = top.min(g.offset_y.to(f32))
-            bottom = bottom.max((g.offset_y + g.image.height).to(f32))
-        }
-        if top > bottom : return null
-        return (top + bottom) / 2 / dpi_scale()
-    }
-
-    /// Where the middle of a capital letter is below the top of the text, in logical pixels.
-    fn cap_middle(font: ResolvedFont) f32 {
-        this.font(font)
-        let key = font_key(font, font_pixels(font))
-        return (this.cap_middles.get(key) !? font_pixels(font).to(f32) * 0.4) / dpi_scale()
-    }
-
-    fn load(name: String, weight: FontWeight, px: i32) raylib.Font {
-        let codepoints = font_codepoints()
-        let path = this.font_path(name, weight)
-        let f: raylib.Font = .{}
-        if isset(path) {
-            f = raylib.load_font_ex(path, px, codepoints)
-        } else {
-            f = load_font_memory(builtin_font(weight), px, codepoints)
-        }
-        raylib.set_texture_filter(f.texture, .bilinear)
-        return f
-    }
-
-    // The file of the closest weight added for a family, null for the built-in font
-    fn font_path(name: String, weight: FontWeight) ?String {
-        if name == "" : return null
-        let win = this.window ?! return null
-        let best: ?String = null
-        let best_distance: int = 100
-        each win.fonts as f {
-            if f.name != name : continue
-            let d = (f.weight.to(int) - weight.to(int)).abs()
-            if d < best_distance {
-                best = f.path
-                best_distance = d
-            }
-        }
-        return best
-    }
-
     fn unload() {
-        each this.fonts as f : raylib.unload_font(f)
         each this.textures as t : raylib.unload_texture(t)
     }
-}
-
-/// Punctuation, math and arrows: not letters or digits.
-fn is_symbol(cp: u32) bool {
-    if cp < 0x80 : return !((cp >= '0' && cp <= '9') || (cp >= 'a' && cp <= 'z') || (cp >= 'A' && cp <= 'Z'))
-    return cp == 0xd7 || cp == 0xf7 || cp == 0xb1 || (cp >= 0x2000 && cp < 0x2c00)
-}
-
-/// The code point at byte `i` and its length in bytes.
-fn decode_utf8(text: String, i: uint) (u32, uint) {
-    let b = text[i].to(u32)
-    if b < 0x80 : return (b, 1)
-    let len: uint = b >= 0xf0 ? 4 : (b >= 0xe0 ? 3 : 2)
-    let cp = b & (len == 2 ? 0x1f : (len == 3 ? 0x0f : 0x07))
-    each 1 .. len - 1 as k : cp = (cp << 6) | (text[i + k].to(u32) & 0x3f)
-    return (cp, len)
-}
-
-fn font_key(font: ResolvedFont, px: i32) u64 {
-    return font.name.hash().to(u64) * 31 + font.weight.to(u64) * 100003 + px.to(u64)
-}
-
-fn dpi_scale() f32 { return raylib.get_window_scale_dpi().x.max(1) }
-
-/// The size of the font's atlas in device pixels.
-fn font_pixels(font: ResolvedFont) i32 {
-    return round32(font.size * EM_SCALE * dpi_scale()).to(i32).max(4)
-}
-
-/// The size text is drawn at: exactly the atlas size, so glyphs are not resampled.
-fn draw_size(font: ResolvedFont) f32 {
-    return font_pixels(font).to(f32) / dpi_scale()
-}
-
-fn load_font_memory(data: local &[u8], px: i32, codepoints: local &[i32]) raylib.Font {
-    @unsafe
-    return LoadFontFromMemory(".ttf".data_cstring, data.data, data.length.to(i32), px, codepoints.data, codepoints.length.to(i32))
-}
-
-fn builtin_font(weight: FontWeight) String {
-    return match weight : String {
-        .normal => #embed("assets/fonts/Inter-Regular.ttf")
-        .medium => #embed("assets/fonts/Inter-Medium.ttf")
-        .semibold => #embed("assets/fonts/Inter-SemiBold.ttf")
-        .bold => #embed("assets/fonts/Inter-Bold.ttf")
-    }
-}
-
-global codepoint_table: ?Array[i32] (null)
-
-// Latin-1 and common punctuation, arrows and symbols
-fn font_codepoints() Array[i32] {
-    let cached = codepoint_table
-    if isset(cached) : return cached
-    let list = Array[i32]{}
-    each 32 .. 95 as c : list.append(c.to(i32))
-    each 160 .. 96 as c : list.append(c.to(i32))
-    each 0x100 .. 0x80 as c : list.append(c.to(i32))
-    each Array[i32]{ 0x2013, 0x2014, 0x2018, 0x2019, 0x201c, 0x201d, 0x2022, 0x2026, 0x20ac, 0x2122,
-        0x2190, 0x2191, 0x2192, 0x2193, 0x2212, 0x2713, 0x2715, 0x25b2, 0x25bc, 0x25b6, 0x25c0 } as c : list.append(c)
-    codepoint_table = list
-    return list
 }
 
 class RaylibInput {
     last_x: f32 (-1)
     last_y: f32 (-1)
+    last_mods: Modifiers (.{})
     cursor: Cursor (.default)
 
-    fn poll(win: Window) {
+    /// Hands the window the input since the last poll. True when there was any.
+    fn poll(win: Window) bool {
+        let any = false
         let mods = modifiers()
         let pos = raylib.get_mouse_position()
         let x = pos.x
@@ -272,11 +147,18 @@ class RaylibInput {
             this.last_x = x
             this.last_y = y
             win.mouse_move(x, y, mods)
+            any = true
         }
         each Array[MouseButton]{ .left, .right, .middle } as button {
             let rb = to_rl_button(button)
-            if raylib.is_mouse_button_pressed(rb) : win.mouse_down(x, y, button, mods)
-            if raylib.is_mouse_button_released(rb) : win.mouse_up(x, y, button, mods)
+            if raylib.is_mouse_button_pressed(rb) {
+                win.mouse_down(x, y, button, mods)
+                any = true
+            }
+            if raylib.is_mouse_button_released(rb) {
+                win.mouse_up(x, y, button, mods)
+                any = true
+            }
         }
         let wheel = raylib.get_mouse_wheel_move_v()
         if wheel.x != 0 || wheel.y != 0 {
@@ -287,15 +169,20 @@ class RaylibInput {
                 dy = 0
             }
             win.scroll(dx, dy, mods)
+            any = true
         }
         while true {
             let code = raylib.get_key_pressed()
             if code == 0 : break
+            any = true
             let key = key_from_code(code)
             if key != .unknown : win.key_down(key, mods)
         }
         each Array[raylib.KeyboardKey]{ .backspace, .delete, .left, .right, .up, .down, .page_up, .page_down, .enter, .tab, .z, .y } as rk {
-            if raylib.is_key_pressed_repeat(rk) : win.key_down(key_from_code(rk.to(i32)), mods, true)
+            if raylib.is_key_pressed_repeat(rk) {
+                win.key_down(key_from_code(rk.to(i32)), mods, true)
+                any = true
+            }
         }
         let typed = ""
         while true {
@@ -303,7 +190,20 @@ class RaylibInput {
             if cp <= 0 : break
             typed += codepoint_text(cp.to(u32))
         }
-        if typed.length > 0 : win.input(typed)
+        if typed.length > 0 {
+            win.input(typed)
+            any = true
+        }
+        // Modifier changes alone, such as Shift for a drag, also need a frame
+        if mods.shift != this.last_mods.shift || mods.ctrl != this.last_mods.ctrl || mods.alt != this.last_mods.alt || mods.cmd != this.last_mods.cmd {
+            this.last_mods = mods
+            any = true
+        }
+        if raylib.is_file_dropped() {
+            win.drop_files(dropped_files())
+            any = true
+        }
+        return any
     }
 
     fn set_cursor(cursor: Cursor) {
@@ -376,80 +276,19 @@ fn key_from_code(code: i32) Key {
     }
 }
 
-fn to_rl(c: Color) raylib.Color { return .{ r: c.r, g: c.g, b: c.b, a: c.a } }
 
-fn rect(b: Bounds) raylib.Rectangle { return .{ x: b.x, y: b.y, width: b.w, height: b.h } }
-
-fn draw_scene(win: Window, p: RaylibPlatform, sdf: Sdf) {
-    let scale = raylib.get_window_scale_dpi().x.max(1)
-    // Texts in a row share the text shader, so they draw in one batch
-    let in_text = false
-    each win.scene.items as item {
-        if (item.kind == .text) != in_text {
-            in_text = !in_text
-            if in_text : raylib.begin_shader_mode(sdf.text)
-            else : raylib.end_shader_mode()
-        }
-        match item.kind {
-            .quad => draw_quad(item, sdf)
-            .shadow => sdf.shadow(item.bounds, item.radius, item.width, item.color)
-            .text => {
-                let f = p.font(item.font)
-                let size = draw_size(item.font)
-                // Whole device pixels keep the glyphs sharp
-                let x = round32(item.bounds.x * scale) / scale
-                // Capitals and digits centered in the line box
-                let middle = p.symbol_middle(item.font, item.text) ?? p.cap_middle(item.font)
-                let y = round32((item.bounds.y + item.font.line_height / 2 - middle) * scale) / scale
-                raylib.draw_text_ex(f, item.text, .{ x: x, y: y }, size, 0, to_rl(item.color))
-            }
-            .image => {
-                let t = p.texture(item.text)
-                if t.id != 0 {
-                    raylib.draw_texture_pro(t, .{ width: t.width.to(f32), height: t.height.to(f32) }, rect(item.bounds), .{}, 0, to_rl(item.color))
-                }
-            }
-            .line => sdf.line(item.points[0], item.points[1], item.width, item.color)
-            .circle => sdf.box(item.bounds, item.radius, item.color, 0, item.color)
-            .ring => sdf.box(item.bounds, item.radius, transparent(), item.width, item.color)
-            .triangle => {
-                let a = item.points[0]
-                let b = item.points[1]
-                let c = item.points[2]
-                // raylib wants counter-clockwise corners
-                if (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x) > 0 {
-                    raylib.draw_triangle(.{ x: a.x, y: a.y }, .{ x: c.x, y: c.y }, .{ x: b.x, y: b.y }, to_rl(item.color))
-                } else {
-                    raylib.draw_triangle(.{ x: a.x, y: a.y }, .{ x: b.x, y: b.y }, .{ x: c.x, y: c.y }, to_rl(item.color))
-                }
-            }
-            .clip => {
-                let b = item.bounds
-                let x = floor32(b.x)
-                let y = floor32(b.y)
-                raylib.begin_scissor_mode(x.to(i32), y.to(i32), (ceil32(b.x + b.w) - x).to(i32), (ceil32(b.y + b.h) - y).to(i32))
-            }
-            .unclip => raylib.end_scissor_mode()
+fn dropped_files() Array[String] {
+    let list = raylib.load_dropped_files()
+    let result = Array[String]{}
+    let paths = list.paths
+    if isset(paths) {
+        let items = paths.@cast(*[?cstring])
+        each 0 .. list.count.to(uint) as i {
+            @unsafe
+            let p = items[i]
+            if isset(p) : result.append(p.to_string())
         }
     }
-    if in_text : raylib.end_shader_mode()
-}
-
-fn draw_quad(item: Primitive, sdf: Sdf) {
-    let b = item.bounds
-    if b.w <= 0 || b.h <= 0 : return
-    let border = item.border
-    let has_border = !border.is_zero() && !item.border_color.is_transparent()
-    if item.radius > 0 || (has_border && border.is_uniform()) {
-        sdf.box(b, item.radius, item.color, has_border ? border.top : 0, item.border_color)
-        return
-    }
-    if !item.color.is_transparent() : raylib.draw_rectangle_rec(rect(b), to_rl(item.color))
-    if has_border {
-        let c = to_rl(item.border_color)
-        if border.top > 0 : raylib.draw_rectangle_rec(.{ x: b.x, y: b.y, width: b.w, height: border.top }, c)
-        if border.bottom > 0 : raylib.draw_rectangle_rec(.{ x: b.x, y: b.bottom - border.bottom, width: b.w, height: border.bottom }, c)
-        if border.left > 0 : raylib.draw_rectangle_rec(.{ x: b.x, y: b.y + border.top, width: border.left, height: b.h - border.top - border.bottom }, c)
-        if border.right > 0 : raylib.draw_rectangle_rec(.{ x: b.right - border.right, y: b.y + border.top, width: border.right, height: b.h - border.top - border.bottom }, c)
-    }
+    raylib.unload_dropped_files(list)
+    return result
 }

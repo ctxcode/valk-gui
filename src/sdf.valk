@@ -1,6 +1,6 @@
 use raylib
 
-// Rounded rectangles, borders, shadows, circles and lines drawn with a signed distance field
+// Boxes, borders, shadows, circles, lines and rounded images drawn with a signed distance field
 // in a fragment shader (assets/shaders/sdf.*): smooth edges at any size, without multisampling.
 
 class Sdf {
@@ -8,18 +8,23 @@ class Sdf {
     // Draws glyphs with steeper edges
     text: raylib.Shader
     rect: i32
-    radius: i32
+    radii: i32
     border: i32
     blur: i32
     mode: i32
     fill: i32
+    fill2: i32
+    gradient: i32
+    angle: i32
     stroke: i32
 
     static fn load() Sdf {
         let s = raylib.load_shader_from_memory(#embed("assets/shaders/sdf.vs"), #embed("assets/shaders/sdf.fs"))
         return Sdf{
-            shader: s, text: raylib.load_shader_from_memory("", #embed("assets/shaders/text.fs")), rect: s.location("rect"), radius: s.location("radius"), border: s.location("border"),
-            blur: s.location("blur"), mode: s.location("mode"), fill: s.location("fill"), stroke: s.location("stroke")
+            shader: s, text: raylib.load_shader_from_memory("", #embed("assets/shaders/text.fs")),
+            rect: s.location("rect"), radii: s.location("radii"), border: s.location("border"),
+            blur: s.location("blur"), mode: s.location("mode"), fill: s.location("fill"), fill2: s.location("fill2"),
+            gradient: s.location("gradient"), angle: s.location("angle"), stroke: s.location("stroke")
         }
     }
 
@@ -29,33 +34,58 @@ class Sdf {
     }
 
     /// A box with rounded corners and a border inside its edge.
-    fn box(b: Bounds, radius: f32, fill: Color, border: f32, stroke: Color) {
-        this.draw(0, .{ x: b.x, y: b.y, z: b.w, w: b.h }, radius, border, 0, fill, stroke, b.grow(1))
+    fn box(b: Bounds, corners: Corners, fill: Color, border: f32, stroke: Color) {
+        this.begin(0, b, corners, border, 0, fill, stroke)
+        raylib.draw_rectangle_rec(rect(b.grow(1)), raylib.WHITE)
+        raylib.end_shader_mode()
     }
 
-    fn shadow(b: Bounds, radius: f32, blur: f32, color: Color) {
-        this.draw(1, .{ x: b.x, y: b.y, z: b.w, w: b.h }, radius, 0, blur, color, color, b.grow(blur * 1.5 + 1))
+    fn gradient_box(b: Bounds, corners: Corners, from: Color, to: Color, angle: f32, border: f32, stroke: Color) {
+        this.begin(0, b, corners, border, 0, from, stroke)
+        let s = this.shader
+        s.set_int(this.gradient, 1)
+        s.set_color(this.fill2, to_rl(to))
+        s.set_float(this.angle, angle * 0.017453292)
+        raylib.draw_rectangle_rec(rect(b.grow(1)), raylib.WHITE)
+        raylib.end_shader_mode()
+    }
+
+    fn shadow(b: Bounds, corners: Corners, blur: f32, color: Color) {
+        this.begin(1, b, corners, 0, blur, color, color)
+        raylib.draw_rectangle_rec(rect(b.grow(blur * 1.5 + 1)), raylib.WHITE)
+        raylib.end_shader_mode()
     }
 
     fn line(a: Point, b: Point, width: f32, color: Color) {
-        let x = a.x.min(b.x)
-        let y = a.y.min(b.y)
-        let area = Bounds{ x: x, y: y, w: (a.x - b.x).abs(), h: (a.y - b.y).abs() }.grow(width / 2 + 1)
-        this.draw(2, .{ x: a.x, y: a.y, z: b.x, w: b.y }, 0, width, 0, color, color, area)
+        let area = Bounds{ x: a.x.min(b.x), y: a.y.min(b.y), w: (a.x - b.x).abs(), h: (a.y - b.y).abs() }.grow(width / 2 + 1)
+        let s = this.shader
+        raylib.begin_shader_mode(s)
+        s.set_int(this.mode, 2)
+        s.set_vec4(this.rect, .{ x: a.x, y: a.y, z: b.x, w: b.y })
+        s.set_float(this.border, width)
+        s.set_color(this.fill, to_rl(color))
+        raylib.draw_rectangle_rec(rect(area), raylib.WHITE)
+        raylib.end_shader_mode()
     }
 
-    - fn draw(mode: i32, shape: raylib.Vector4, radius: f32, border: f32, blur: f32, fill: Color, stroke: Color, area: Bounds) {
+    /// A texture drawn from `source` into `dest`, cut to the rounded box `clip`.
+    fn image(t: raylib.Texture, source: raylib.Rectangle, dest: Bounds, clip: Bounds, corners: Corners, tint: Color) {
+        this.begin(3, clip, corners, 0, 0, tint, tint)
+        raylib.draw_texture_pro(t, source, rect(dest), .{}, 0, to_rl(tint))
+        raylib.end_shader_mode()
+    }
+
+    // Every draw has its own uniforms: switching the shader draws what was batched before
+    - fn begin(mode: i32, b: Bounds, corners: Corners, border: f32, blur: f32, fill: Color, stroke: Color) {
         let s = this.shader
-        // Every draw has its own uniforms: switching the shader draws what was batched before
         raylib.begin_shader_mode(s)
         s.set_int(this.mode, mode)
-        s.set_vec4(this.rect, shape)
-        s.set_float(this.radius, radius)
+        s.set_int(this.gradient, 0)
+        s.set_vec4(this.rect, .{ x: b.x, y: b.y, z: b.w, w: b.h })
+        s.set_vec4(this.radii, .{ x: corners.top_left, y: corners.top_right, z: corners.bottom_right, w: corners.bottom_left })
         s.set_float(this.border, border)
         s.set_float(this.blur, blur)
         s.set_color(this.fill, to_rl(fill))
         s.set_color(this.stroke, to_rl(stroke))
-        raylib.draw_rectangle_rec(rect(area), raylib.WHITE)
-        raylib.end_shader_mode()
     }
 }

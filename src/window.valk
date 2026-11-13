@@ -18,6 +18,9 @@
     + antialias: bool (true)
     + theme: Theme (Theme.dark())
     + fonts: Array[FontFile] (.{})
+    /// Font files tried, before the system's, for characters the fonts in use lack (such as
+    /// Chinese or Japanese). `.ttf`, `.otf` or the first font of a `.ttc`.
+    + fallback_fonts: Array[String] (.{})
     /// Saves the third frame to this PNG file and closes the window, for tests and images.
     + screenshot: String ("")
     /// Opens the window hidden.
@@ -48,22 +51,33 @@
     ~+ dirty: bool (false)
     ~+ frames: uint (0)
 
-    - root: Render
-    - tree: ?Div (null)
-    - hover_keys: HashSet[u64] (.{})
-    - pressed_keys: HashSet[u64] (.{})
-    - pressed_key: u64 (0)
-    - pressed_button: ?MouseButton (null)
-    - scroll_state: HashMap[u64, Point] (.{})
-    - clip_stack: Array[Bounds] (.{})
-    - deferred_nodes: Array[Div] (.{})
-    - paint_later: Array[(Div, f32)] (.{})
-    - last_click_time: f64 (-10)
-    - last_click: Point (.{})
-    - click_count: uint (1)
-    - bar_drag_key: u64 (0)
-    - bar_drag_vertical: bool (true)
-    - bar_drag_offset: f32 (0)
+    root: Render
+    tree: ?Div (null)
+    hover_keys: HashSet[u64] (.{})
+    pressed_keys: HashSet[u64] (.{})
+    pressed_key: u64 (0)
+    pressed_button: ?MouseButton (null)
+    scroll_state: HashMap[u64, Point] (.{})
+    clip_stack: Array[Bounds] (.{})
+    deferred_nodes: Array[Div] (.{})
+    paint_later: Array[(Div, f32)] (.{})
+    last_click_time: f64 (-10)
+    last_click: Point (.{})
+    click_count: uint (1)
+    bar_drag_key: u64 (0)
+    bar_drag_vertical: bool (true)
+    bar_drag_offset: f32 (0)
+    timers: Array[Timer] (.{})
+    tasks: Array[Pending] (.{})
+    transitions: Map[Transition] (.{})
+    // A wake-up for something time-based, such as a tooltip appearing
+    wake_at: f64 (INF)
+    drag_state: ?DragState (null)
+    drop_key: u64 (0)
+    bindings: Array[Binding] (.{})
+    tooltip_key: u64 (0)
+    tooltip_since: f64 (0)
+    tooltip: String ("")
 
     + static fn new(root: Render, width: f32, height: f32, platform: Platform, theme: Theme (Theme.dark())) Window {
         return Window{ root: root, width: width, height: height, platform: platform, theme: theme }
@@ -111,8 +125,8 @@
         this.dirty = false
         let root = this.root.render(this)
         this.deferred_nodes = Array[Div]{}
-        this.prepare(root, null, 0)
-        let layout = Layout{ platform: this.platform }
+        this.prepare(root, null, 0, 1)
+        let layout = Layout{ platform: this.platform, window_w: this.width, window_h: this.height }
         layout.place(root, 0, 0, this.width, this.height)
         this.save_scroll(root)
         this.tree = root
@@ -137,6 +151,7 @@
         if !hovered.equals(this.hover_keys) : this.dirty = true
         this.hover_keys = hovered
         this.cursor = cursor
+        this.update_tooltip(hit)
 
         this.scene.clear()
         this.clip_stack.clear()
@@ -148,9 +163,22 @@
             this.paint(node, alpha, true)
             i++
         }
+        this.paint_overlays()
     }
 
-    - fn prepare(n: Div, parent: ?Div, index: uint) {
+    /// Lays out and paints an element that is not part of the tree, such as a tooltip or a drag
+    /// preview, with its top-left corner near `x`, `y` but inside the window.
+    fn paint_overlay(n: Div, x: f32, y: f32, key: u64) {
+        this.prepare(n, null, 0, key)
+        let layout = Layout{ platform: this.platform, window_w: this.width, window_h: this.height }
+        let w, h = layout.measure(n, UNKNOWN, UNKNOWN, this.width, this.height, this.width, this.height)
+        let px = clamp32(x, 0, (this.width - w).max(0))
+        let py = clamp32(y, 0, (this.height - h).max(0))
+        layout.place(n, px, py, w, h)
+        this.paint(n, 1, true)
+    }
+
+    fn prepare(n: Div, parent: ?Div, index: uint, root_key: u64) {
         n.parent = parent
         if isset(parent) {
             let name = n.name
@@ -161,8 +189,10 @@
             n.text_align = parent.text_align
             n.nowrap = parent.nowrap
             n.ellipsis = parent.ellipsis
+            n.decor_underline = parent.decor_underline
+            n.decor_strike = parent.decor_strike
         } else {
-            n.key = 1
+            n.key = root_key
             n.resolved_font = .{ size: this.theme.font_size, line_height: round32(this.theme.font_size * 1.4) }
             n.resolved_color = this.theme.text
         }
@@ -171,7 +201,8 @@
             let fh = n.focus_handle
             if isset(fh) : focused = fh.is_focused()
             let active = isset(this.pressed_button) && this.pressed_keys.has(n.key)
-            apply_state_styles(n, this.hover_keys.has(n.key), active, focused)
+            let drag_over = this.drop_key != 0 && this.drop_key == n.key
+            apply_state_styles(n, this.hover_keys.has(n.key), active, focused, drag_over)
         }
         let s = n.style
         let size = s.font_size
@@ -193,6 +224,12 @@
         if isset(nowrap) : n.nowrap = nowrap
         let ellipsis = s.ellipsis
         if isset(ellipsis) : n.ellipsis = ellipsis
+        let italic = s.font_italic
+        if isset(italic) : n.resolved_font.italic = italic
+        let underline = s.text_underline
+        if isset(underline) : n.decor_underline = underline
+        let strike = s.text_strike
+        if isset(strike) : n.decor_strike = strike
         if s.overflow_x == .scroll || s.overflow_y == .scroll {
             let st = this.scroll_state.get(n.key) !? Point{}
             n.scroll_x = st.x
@@ -200,10 +237,10 @@
         }
         if s.display_none : return
         if s.on_top : this.deferred_nodes.append(n)
-        each n.child_nodes as child, i : this.prepare(child, n, i)
+        each n.child_nodes as child, i : this.prepare(child, n, i, 0)
     }
 
-    - fn save_scroll(n: Div) {
+    fn save_scroll(n: Div) {
         let s = n.style
         if s.overflow_x == .scroll || s.overflow_y == .scroll {
             this.scroll_state.set(n.key, .{ x: n.scroll_x, y: n.scroll_y })
@@ -213,7 +250,7 @@
 
     // ---- Painting ----
 
-    - fn paint(n: Div, alpha: f32, top: bool) {
+    fn paint(n: Div, alpha: f32, top: bool) {
         let s = n.style
         if s.display_none || !s.visible : return
         if s.on_top && !top {
@@ -231,32 +268,42 @@
             let clip = this.clip_stack.last() !!
             if b.x >= clip.right || b.y >= clip.bottom || b.right <= clip.x || b.bottom <= clip.y : return
         }
-        let radius = s.radius.min(b.w / 2).min(b.h / 2)
+        let corners = s.corners().clamp(b.w, b.h)
         let shadow = s.box_shadow
         if isset(shadow) {
             let sb = Bounds{ x: b.x + shadow.x - shadow.spread, y: b.y + shadow.y - shadow.spread, w: b.w + shadow.spread * 2, h: b.h + shadow.spread * 2 }
-            this.scene.add(.{ kind: .shadow, bounds: sb, color: shadow.color.fade(a), width: shadow.blur, radius: radius + shadow.spread })
+            this.scene.add(.{ kind: .shadow, bounds: sb, color: shadow.color.fade(a), width: shadow.blur, corners: corners.grow(shadow.spread) })
         }
         let bg = s.background ?? transparent()
-        if !bg.is_transparent() || (!s.border_widths.is_zero() && !s.border_tint.is_transparent()) {
-            this.scene.add(.{ kind: .quad, bounds: b, color: bg.fade(a), border: s.border_widths, border_color: s.border_tint.fade(a), radius: radius })
+        let gradient = s.gradient
+        if isset(gradient) {
+            this.scene.add(.{ kind: .quad, bounds: b, color: gradient.from.fade(a), color2: gradient.to.fade(a), gradient: true, angle: gradient.angle, border: s.border_widths, border_color: s.border_tint.fade(a), corners: corners })
+        } else if !bg.is_transparent() || (!s.border_widths.is_zero() && !s.border_tint.is_transparent()) {
+            this.scene.add(.{ kind: .quad, bounds: b, color: bg.fade(a), border: s.border_widths, border_color: s.border_tint.fade(a), corners: corners })
         }
         let inner = b.inset(s.padding.add(s.border_widths))
         if n.kind == .text {
             let y = inner.y
+            let font = n.resolved_font
+            let color = n.resolved_color.fade(a)
             let lines = n.lines ?? Array[String]{ n.content }
             each lines as line {
-                let lw = isset(n.lines) ? this.platform.text_width(line, n.resolved_font) : n.natural_w
+                let lw = isset(n.lines) ? this.platform.text_width(line, font) : n.natural_w
                 let x = inner.x
                 if n.text_align == .center : x += (inner.w - lw) / 2
                 else if n.text_align == .right : x += inner.w - lw
-                this.scene.add(.{ kind: .text, bounds: .{ x: x, y: y, w: lw, h: n.resolved_font.line_height }, color: n.resolved_color.fade(a), text: line, font: n.resolved_font })
-                y += n.resolved_font.line_height
+                this.scene.add(.{ kind: .text, bounds: .{ x: x, y: y, w: lw, h: font.line_height }, color: color, text: line, font: font })
+                let thickness = (font.size / 14).max(1)
+                // Measured from the middle of the line, where capitals are centered
+                let middle = y + font.line_height / 2
+                if n.decor_underline : this.scene.add(.{ kind: .quad, bounds: .{ x: x, y: round32(middle + font.size * 0.46), w: lw, h: thickness }, color: color })
+                if n.decor_strike : this.scene.add(.{ kind: .quad, bounds: .{ x: x, y: round32(middle + font.size * 0.08 - thickness / 2), w: lw, h: thickness }, color: color })
+                y += font.line_height
             }
             return
         }
         if n.kind == .image {
-            this.scene.add(.{ kind: .image, bounds: inner, color: white().fade(a), text: n.content, radius: radius })
+            this.scene.add(.{ kind: .image, bounds: inner, color: white().fade(a), text: n.content, corners: corners, fit: s.image_fit })
             return
         }
         if n.kind == .canvas {
@@ -281,10 +328,10 @@
         if clips : this.pop_clip()
     }
 
-    - fn paint_scrollbar(n: Div, vertical: bool, alpha: f32) {
+    fn paint_scrollbar(n: Div, vertical: bool, alpha: f32) {
         let thumb = scroll_thumb(n, vertical) ?! return
         let color = this.theme.text.fade(this.hover_keys.has(n.key) || this.bar_drag_key == n.key ? 0.35 : 0.18)
-        this.scene.add(.{ kind: .quad, bounds: thumb, color: color.fade(alpha), radius: 3 })
+        this.scene.add(.{ kind: .quad, bounds: thumb, color: color.fade(alpha), corners: Corners.all(3) })
     }
 
     fn push_clip(b: Bounds) {
@@ -331,7 +378,7 @@
     }
 
     /// Hover state from the last frame's layout, so the next frame styles what is under the mouse.
-    - fn update_hover() {
+    fn update_hover() {
         let hovered = HashSet[u64]{}
         let node = this.hit_test(this.mouse_x, this.mouse_y)
         while isset(node) {
@@ -341,7 +388,7 @@
         this.hover_keys = hovered
     }
 
-    - fn node_by_key(key: u64) ?Div {
+    fn node_by_key(key: u64) ?Div {
         let root = this.tree ?! return null
         return find_key(root, key)
     }
@@ -352,6 +399,7 @@
         this.mouse_x = x
         this.mouse_y = y
         this.update_hover()
+        if this.move_drag(x, y) : return
         if this.bar_drag_key != 0 {
             let node = this.node_by_key(this.bar_drag_key)
             if isset(node) : this.drag_scrollbar(node, x, y)
@@ -406,6 +454,7 @@
             n = n.parent
         }
         if this.pressed_key == 0 && isset(hit) : this.pressed_key = hit.key
+        if button == .left : this.start_drag(hit, x, y)
 
         // Focus the innermost focusable element, or nothing
         if button == .left {
@@ -441,6 +490,12 @@
         if this.bar_drag_key != 0 {
             this.bar_drag_key = 0
             this.pressed_button = null
+            return
+        }
+        if button == .left && this.end_drag(x, y) {
+            this.pressed_button = null
+            this.pressed_keys.clear()
+            this.pressed_key = 0
             return
         }
         let hit = this.hit_test(x, y)
@@ -494,6 +549,12 @@
     }
 
     + fn key_down(key: Key, modifiers: Modifiers (.{}), repeat: bool (false)) {
+        if key == .escape && isset(this.drag_state) {
+            this.drag_state = null
+            this.drop_key = 0
+            return
+        }
+        if !repeat && this.run_binding(key, modifiers) : return
         let e = KeyEvent{ key: key, modifiers: modifiers, repeat: repeat }
         let n = this.focused_node()
         while isset(n) {
@@ -505,6 +566,7 @@
             n = n.parent
         }
         if key == .tab : this.focus_next(!modifiers.shift)
+        if key == .escape : this.dismiss()
     }
 
     /// Typed text, delivered to the innermost focused element with an `on_input` handler.
@@ -521,7 +583,7 @@
     }
 
     /// The element whose handle has focus, or the root when none has.
-    - fn focused_node() ?Div {
+    fn focused_node() ?Div {
         let root = this.tree ?! return null
         let fh = this.focused ?! return root
         return find_focus(root, fh) ?? root
@@ -551,7 +613,7 @@
         this.focused = handles.get(next) !!
     }
 
-    - fn start_scrollbar_drag(hit: ?Div, x: f32, y: f32) bool {
+    fn start_scrollbar_drag(hit: ?Div, x: f32, y: f32) bool {
         let n = hit
         while isset(n) {
             each Array[bool]{ true, false } as vertical {
@@ -575,7 +637,7 @@
         return false
     }
 
-    - fn drag_scrollbar(n: Div, x: f32, y: f32) {
+    fn drag_scrollbar(n: Div, x: f32, y: f32) {
         let inner = n.bounds.inset(n.style.border_widths)
         let thumb = scroll_thumb(n, this.bar_drag_vertical) ?! return
         if this.bar_drag_vertical {

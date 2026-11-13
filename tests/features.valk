@@ -1,0 +1,235 @@
+use gui
+
+test "Layout: flex_wrap continues on a new line" {
+    let win = gui.headless(view(fn(win) {
+        let row = gui.div().flex().flex_wrap().gap(10).w(100)
+        each 0 .. 5 as i : row.child(gui.div().id("w%i").w(40).h(20))
+        return gui.div().items_start().child(row.id("row"))
+    }), 300, 300)
+    assert(box(bounds(win, "w0"), 0, 0, 40, 20))
+    assert(box(bounds(win, "w1"), 50, 0, 40, 20))
+    assert(box(bounds(win, "w2"), 0, 30, 40, 20))
+    assert(box(bounds(win, "w4"), 0, 60, 40, 20))
+    assert(same(bounds(win, "row").h, 80))
+}
+
+test "Layout: grids place cells in equal columns" {
+    let win = gui.headless(view(fn(win) {
+        let grid = gui.div().grid(3).gap(10).p(10)
+        grid.child(gui.div().id("wide").col_span(2).h(30))
+        grid.child(gui.div().id("c0"))
+        each 1 .. 3 as i : grid.child(gui.div().id("c%i").h(20 + i.to(f32) * 10))
+        return gui.div().child(grid)
+    }), 340, 300)
+    // (320 - 20) / 3 = 100 per column; a cell without a height takes its row's
+    assert(box(bounds(win, "wide"), 10, 10, 210, 30))
+    assert(box(bounds(win, "c0"), 230, 10, 100, 30))
+    assert(box(bounds(win, "c1"), 10, 50, 100, 30))
+    assert(box(bounds(win, "c3"), 230, 50, 100, 50))
+}
+
+test "Paint: corners, gradients, decorations" {
+    let win = gui.headless(view(fn(win) {
+        return gui.div().p(10).gap(10)
+            .child(gui.div().h(40).rounded(8).rounded_tl(0).bg(gui.rgb(0x112233)))
+            .child(gui.div().h(40).bg_gradient(gui.rgb(0xff0000), gui.rgb(0x0000ff), 90))
+            .child(gui.div().underline().child("under"))
+            .child(gui.div().line_through().italic().child("struck"))
+    }), 200, 300)
+    let quads = win.scene.items.filter(fn(p: gui.Primitive) bool { return p.kind == .quad })
+    let first = quads.get(0) ! return
+    assert(first.corners.top_left == 0 && first.corners.top_right == 8 && first.corners.bottom_left == 8)
+    let grad = quads.get(1) ! return
+    assert(grad.gradient && grad.color.r == 255 && grad.color2.b == 255 && grad.angle == 90)
+    // One decoration line under each of the two texts
+    assert(quads.length == 4)
+    let struck = win.scene.find_text("struck") ?! return
+    assert(struck.font.italic)
+}
+
+class Clock is gui.Render {
+    ticks: uint (0)
+    once: uint (0)
+    timer: ?gui.Timer (null)
+    fn render(win: gui.Window) gui.Div {
+        if !isset(this.timer) {
+            this.timer = win.every(1, fn() { this.ticks++ })
+            win.after(2.5, fn() { this.once++ })
+        }
+        return gui.div().child("ticks %{this.ticks}")
+    }
+}
+
+test "Timers: after and every run on the window's clock" {
+    let app = Clock{}
+    let win = gui.headless(app, 200, 100)
+    win.advance(0.5)
+    assert(app.ticks == 0)
+    win.advance(0.6)
+    assert(app.ticks == 1 && win.scene.has_text("ticks 1"))
+    win.advance(1.0)
+    win.advance(1.0)
+    assert(app.ticks == 3 && app.once == 1)
+    let t = app.timer ?! return
+    t.cancel()
+    win.advance(5)
+    assert(app.ticks == 3 && app.once == 1)
+}
+
+class Loader is gui.Render {
+    result: int (0)
+    fn render(win: gui.Window) gui.Div {
+        return gui.div().id("go").h(20).on_click(fn(e) {
+            win.spawn[int](fn() int {
+                let total = 0
+                each 0 .. 1000 as i : total += i
+                return total
+            }, fn(v) { this.result = v }) _
+        }).child("result %{this.result}")
+    }
+}
+
+test "Tasks: spawn runs work on a thread and hands back the result" {
+    let app = Loader{}
+    let win = gui.headless(app, 200, 100)
+    win.click_on("go")
+    win.wait_tasks()
+    assert(app.result == 499500)
+    assert(win.scene.has_text("result 499500"))
+}
+
+test "Transitions: values move to their target over time" {
+    let target: f32 = 0
+    let values = Array[f32]{}
+    let state = Array[f32]{ 0 }
+    let win = gui.headless(view(fn(win) {
+        values.append(win.transition("x", state[0], 1))
+        return gui.div()
+    }), 100, 100)
+    state[0] = 100
+    win.draw()
+    win.advance(0.5)
+    win.advance(0.6)
+    let v0 = values.get(0) ! return
+    let v1 = values.get(1) ! return
+    let mid = values.get(2) ! return
+    let end = values.last() ! return
+    assert(v0 == 0 && v1 == 0)
+    assert(mid > 50 && mid < 100)
+    assert(end == 100)
+}
+
+class Editor2 is gui.Render {
+    saves: uint (0)
+    palette: uint (0)
+    dismissed: uint (0)
+    fn render(win: gui.Window) gui.Div {
+        return gui.div()
+            .on_action("save", fn() { this.saves++ })
+            .on_action("palette", fn() { this.palette++ })
+            .child(gui.div().id("dialog").h(20).on_dismiss(fn() { this.dismissed++ }))
+    }
+}
+
+test "Actions: key bindings dispatch to handlers" {
+    let app = Editor2{}
+    let win = gui.headless(app, 200, 100)
+    win.bind("secondary-s", "save") !! 
+    win.bind("ctrl+shift+p", "palette") !!
+    #if OS == "macos"
+    win.press(.s, .{ cmd: true })
+    #else
+    win.press(.s, .{ ctrl: true })
+    #end
+    win.press(.p, .{ ctrl: true, shift: true })
+    win.press(.p, .{ ctrl: true })
+    assert(app.saves == 1 && app.palette == 1)
+    assert(win.dispatch("save") && !win.dispatch("missing"))
+    assert(app.saves == 2)
+    assert(win.shortcut("palette") == "Ctrl+Shift+P")
+    win.press(.escape)
+    assert(app.dismissed == 1)
+}
+
+test "Actions: bad key names are syntax errors" {
+    let win = gui.headless(view(fn(win) { return gui.div() }), 100, 100)
+    let ok = true
+    win.bind("ctrl-nothing", "x") ! { ok = false }
+    assert(!ok)
+}
+
+class Board is gui.Render {
+    left: Array[String] (.{ "a", "b" })
+    right: Array[String] (.{})
+    dropped: Array[String] (.{})
+
+    fn column(win: gui.Window, id: String, cards: Array[String], other: Array[String]) gui.Div {
+        let col = gui.div().id(id).w(100).h(200).gap(4)
+            .drag_over(fn(s) { s.bg(gui.rgb(0x00ff00)) })
+            .on_drop(fn(payload) {
+                other.remove_value(payload)
+                cards.append(payload)
+            })
+        each cards as card : col.child(gui.div().id("card-" + card).h(30).draggable(card).child(card))
+        return col
+    }
+
+    fn render(win: gui.Window) gui.Div {
+        return gui.div().flex().gap(20)
+            .on_drop_files(fn(paths) { each paths as p : this.dropped.append(p) })
+            .child(this.column(win, "left", this.left, this.right))
+            .child(this.column(win, "right", this.right, this.left))
+    }
+}
+
+test "Drag and drop moves payloads between drop targets" {
+    let app = Board{}
+    let win = gui.headless(app, 300, 300)
+    let card = bounds(win, "card-a")
+    let right = bounds(win, "right")
+    win.mouse_move(card.x + 5, card.y + 5)
+    win.draw()
+    win.mouse_down(card.x + 5, card.y + 5)
+    win.draw()
+    win.mouse_move(right.x + 50, right.y + 50)
+    win.draw()
+    assert(win.dragging() == "a")
+    // The target shows it, and a preview follows the mouse
+    let green = win.scene.items.any(fn(p: gui.Primitive) bool { return p.kind == .quad && p.color.g == 255 && p.color.r == 0 })
+    assert(green)
+    win.mouse_up(right.x + 50, right.y + 50)
+    win.draw()
+    assert(app.left == .{ "b" } && app.right == .{ "a" })
+    assert(!isset(win.dragging()))
+    // A small move is a click, not a drag
+    let b = bounds(win, "card-b")
+    win.drag(b.x + 5, b.y + 5, b.x + 6, b.y + 6)
+    assert(app.left == .{ "b" })
+    win.mouse_move(10, 10)
+    win.drop_files(.{ "/tmp/x.png" })
+    assert(app.dropped == .{ "/tmp/x.png" })
+}
+
+test "Tooltips appear after the mouse rests" {
+    let win = gui.headless(view(fn(win) {
+        return gui.div().child(gui.div().id("btn").size(40).tooltip("Saves the file"))
+    }), 300, 200)
+    win.move_to(10, 10)
+    assert(!win.scene.has_text("Saves the file"))
+    win.advance(0.6)
+    let tip = win.scene.find_text("Saves the file") ?! return
+    assert(tip.bounds.x > 10 && tip.bounds.y > 10)
+    win.move_to(200, 150)
+    assert(!win.scene.has_text("Saves the file"))
+}
+
+test "Anchored popovers stay inside the window" {
+    let win = gui.headless(view(fn(win) {
+        return gui.div()
+            .child(gui.anchored(250, 20).child(gui.div().id("right").w(100).h(50)))
+            .child(gui.anchored(10, 180, 150).child(gui.div().id("low").w(100).h(50)))
+    }), 300, 200)
+    // Flipped to the left of the point, and above `above`
+    assert(box(bounds(win, "right"), 150, 20, 100, 50))
+    assert(box(bounds(win, "low"), 10, 100, 100, 50))
+}

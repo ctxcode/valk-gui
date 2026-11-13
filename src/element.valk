@@ -30,6 +30,14 @@ enum NodeKind { div, text, canvas, image }
     on_scroll_fn: ?fn(ScrollEvent)() (null)
     on_key_down_fn: ?fn(KeyEvent)() (null)
     on_input_fn: ?fn(String)() (null)
+    on_drop_files_fn: ?fn(Array[String])() (null)
+    drag_payload: ?String (null)
+    drag_preview: ?fn()(Div) (null)
+    on_drop_fn: ?fn(String)() (null)
+    drag_over_style: ?fn(Style)() (null)
+    actions: ?Map[fn()()] (null)
+    tooltip_text: ?String (null)
+    on_dismiss_fn: ?fn()() (null)
 
     // Filled in every frame
     ~+ key: u64 (0)
@@ -44,6 +52,8 @@ enum NodeKind { div, text, canvas, image }
     text_align: TextAlign (.left)
     nowrap: bool (false)
     ellipsis: bool (false)
+    decor_underline: bool (false)
+    decor_strike: bool (false)
     // null when the text is one line
     lines: ?Array[String] (null)
     cache: ?Array[LayoutCache] (null)
@@ -101,13 +111,47 @@ enum NodeKind { div, text, canvas, image }
     + fn on_key_down(handler: fn(KeyEvent)()) SELF { this.on_key_down_fn = handler; return this }
     /// Runs with typed text while the element, or one of its children, has focus.
     + fn on_input(handler: fn(String)()) SELF { this.on_input_fn = handler; return this }
+    /// Runs with the paths of files dropped on the element from outside the program.
+    + fn on_drop_files(handler: fn(Array[String])()) SELF { this.on_drop_files_fn = handler; return this }
+
+    /// Lets the element be dragged onto elements with `on_drop`, which receive `payload`. While
+    /// dragging, `preview` (or a plain box the size of the element) follows the mouse.
+    + fn draggable(payload: String, preview: ?fn()(Div) (null)) SELF {
+        this.drag_payload = payload
+        this.drag_preview = preview
+        return this
+    }
+
+    /// Runs with the payload of a `draggable` element dropped on this one.
+    + fn on_drop(handler: fn(String)()) SELF { this.on_drop_fn = handler; return this }
+
+    /// Style changes while something draggable is held over this drop target.
+    + fn drag_over(refine: fn(Style)()) SELF { this.drag_over_style = refine; return this }
+
+    /// Runs `handler` for the action `name` while the element or one of its children has focus,
+    /// or always for the root element. Actions come from key bindings (`Window.bind`) and from
+    /// `Window.dispatch`.
+    + fn on_action(name: String, handler: fn()()) SELF {
+        let map = this.actions ?? Map[fn()()]{}
+        map.set(name, handler)
+        this.actions = map
+        return this
+    }
+
+    /// Text shown in a small box near the mouse after it rests on the element for half a second.
+    + fn tooltip(text: String) SELF { this.tooltip_text = text; return this }
+
+    /// Runs when Escape is pressed and nothing else used it, for the last element with this
+    /// handler in the tree: close a menu, dialog or popover.
+    + fn on_dismiss(handler: fn()()) SELF { this.on_dismiss_fn = handler; return this }
+
     /// The text of a text element.
     + get text: String { return this.content }
 
     + fn is_focusable() bool { return isset(this.focus_handle) }
 
     fn has_mouse_handlers() bool {
-        return isset(this.on_mouse_down_fn) || isset(this.on_mouse_up_fn) || isset(this.on_click_fn) || isset(this.on_drag_fn)
+        return isset(this.on_mouse_down_fn) || isset(this.on_mouse_up_fn) || isset(this.on_click_fn) || isset(this.on_drag_fn) || isset(this.drag_payload)
     }
 }
 
@@ -136,8 +180,8 @@ enum NodeKind { div, text, canvas, image }
 }
 
 /// The style the element uses this frame: its own with the state refinements applied.
-fn apply_state_styles(d: Div, hovered: bool, active: bool, focused: bool) {
-    if !hovered && !active && !focused : return
+fn apply_state_styles(d: Div, hovered: bool, active: bool, focused: bool, drag_over: bool) {
+    if !hovered && !active && !focused && !drag_over : return
     let s = d.style
     if hovered {
         let f = d.hover_style
@@ -160,9 +204,27 @@ fn apply_state_styles(d: Div, hovered: bool, active: bool, focused: bool) {
             f(s)
         }
     }
+    if drag_over {
+        let f = d.drag_over_style
+        if isset(f) {
+            if s == d.style : s = copy s
+            f(s)
+        }
+    }
     d.style = s
 }
 
 fn has_state_styles(d: Div) bool {
-    return isset(d.hover_style) || isset(d.active_style) || isset(d.focus_style)
+    return isset(d.hover_style) || isset(d.active_style) || isset(d.focus_style) || isset(d.drag_over_style)
+}
+
+/// An element placed at a point of the window, painted above everything else. It moves to stay
+/// inside the window, opening upwards or leftwards when there is no room below or to the right;
+/// upwards it ends at `above` when given, such as the top of the button that opened it. For menus
+/// and popovers.
++ fn anchored(x: f32, y: f32, above: f32 (-1)) Div {
+    let d = div().absolute().deferred().left(x).top(y)
+    d.style.anchor_window = true
+    d.style.anchor_above = above
+    return d
 }

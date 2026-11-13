@@ -1,0 +1,323 @@
+
+value TOOLTIP_DELAY (0.5)
+
+// A press on a draggable element; it becomes a drag when the mouse moves far enough
+class DragState {
+    payload: String
+    preview: ?fn()(Div)
+    start_x: f32
+    start_y: f32
+    offset_x: f32
+    offset_y: f32
+    w: f32
+    h: f32
+    active: bool (false)
+}
+
+/// A key combination bound to an action with `Window.bind`.
++ struct Binding {
+    + key: Key
+    + modifiers: Modifiers
+    + action: String
+}
+
+extend Window {
+    // ---- Keyboard shortcuts and actions ----
+
+    /// Binds a key combination to an action, such as `win.bind("secondary-s", "save")`. Modifiers
+    /// are `ctrl`, `shift`, `alt`, `cmd` and `secondary` (Command on macOS, Control elsewhere),
+    /// joined with `-` or `+`. Keys are letters, digits, `enter`, `escape`, `tab`, `space`,
+    /// `backspace`, `delete`, arrows (`up`, ...), `home`, `end`, `pageup`, `pagedown`, `f1` to `f12`,
+    /// and `,` `.` `/` `;` `'` `[` `]` `\` `` ` `` `minus` `equal`. A bound key runs the action
+    /// before the key reaches `on_key_down`, when an element on the focus path handles it.
+    + fn bind(keys: String, action: String) !SyntaxError {
+        let b = parse_binding(keys) !>
+        b.action = action
+        this.bindings.append(b)
+    }
+
+    /// Runs the action's handler on the focused element or the nearest parent that has one, or on
+    /// the root. Returns whether a handler ran.
+    + fn dispatch(action: String) bool {
+        let n = this.focused_node()
+        while isset(n) {
+            let map = n.actions
+            if isset(map) {
+                let handler = map.get(action) !? null
+                if isset(handler) {
+                    handler()
+                    return true
+                }
+            }
+            n = n.parent
+        }
+        // Actions of the root also work while focus is elsewhere
+        let root = this.tree ?! return false
+        let map = root.actions ?! return false
+        let handler = map.get(action) !? null
+        if !isset(handler) : return false
+        handler()
+        return true
+    }
+
+    /// The key combination bound to `action`, as text such as "Ctrl+Shift+P", or "" when none is.
+    + fn shortcut(action: String) String {
+        each this.bindings as b {
+            if b.action == action : return binding_text(b)
+        }
+        return ""
+    }
+
+    // Runs a bound action for the key; true when one ran
+    fn run_binding(key: Key, mods: Modifiers) bool {
+        each this.bindings as b {
+            if b.key == key && b.modifiers.shift == mods.shift && b.modifiers.ctrl == mods.ctrl && b.modifiers.alt == mods.alt && b.modifiers.cmd == mods.cmd {
+                if this.dispatch(b.action) : return true
+            }
+        }
+        return false
+    }
+
+    // Escape for the last element with `on_dismiss`
+    fn dismiss() bool {
+        let root = this.tree ?! return false
+        let found = last_dismiss(root) ?! return false
+        let handler = found.on_dismiss_fn ?! return false
+        handler()
+        return true
+    }
+
+    // ---- Files from outside ----
+
+    /// Files dropped on the window, for the innermost element under the mouse with
+    /// `on_drop_files`.
+    + fn drop_files(paths: Array[String]) {
+        let n = this.hit_test(this.mouse_x, this.mouse_y)
+        while isset(n) {
+            let handler = n.on_drop_files_fn
+            if isset(handler) {
+                handler(paths)
+                return
+            }
+            n = n.parent
+        }
+    }
+
+    // ---- Dragging between elements ----
+
+    /// The payload being dragged, or null.
+    + fn dragging() ?String {
+        let d = this.drag_state ?! return null
+        return d.active ? d.payload : null
+    }
+
+    fn start_drag(hit: ?Div, x: f32, y: f32) {
+        this.drag_state = null
+        let n = hit
+        while isset(n) {
+            let payload = n.drag_payload
+            if isset(payload) {
+                this.drag_state = DragState{
+                    payload: payload, preview: n.drag_preview, start_x: x, start_y: y,
+                    offset_x: x - n.bounds.x, offset_y: y - n.bounds.y, w: n.bounds.w, h: n.bounds.h
+                }
+                return
+            }
+            n = n.parent
+        }
+    }
+
+    // True while a drag is in progress, which then takes the mouse
+    fn move_drag(x: f32, y: f32) bool {
+        let d = this.drag_state ?! return false
+        if !d.active && (x - d.start_x).abs() + (y - d.start_y).abs() >= 4 : d.active = true
+        if !d.active : return false
+        this.drop_key = 0
+        let n = this.hit_test(x, y)
+        while isset(n) {
+            if isset(n.on_drop_fn) {
+                this.drop_key = n.key
+                break
+            }
+            n = n.parent
+        }
+        return true
+    }
+
+    // Ends a drag; true when it was one, so the release is not also a click
+    fn end_drag(x: f32, y: f32) bool {
+        let d = this.drag_state ?! return false
+        this.drag_state = null
+        this.drop_key = 0
+        if !d.active : return false
+        let n = this.hit_test(x, y)
+        while isset(n) {
+            let handler = n.on_drop_fn
+            if isset(handler) {
+                handler(d.payload)
+                break
+            }
+            n = n.parent
+        }
+        return true
+    }
+
+    // ---- Tooltips and overlays ----
+
+    fn update_tooltip(hit: ?Div) {
+        let n = hit
+        while isset(n) {
+            let text = n.tooltip_text
+            if isset(text) {
+                if n.key != this.tooltip_key {
+                    this.tooltip_key = n.key
+                    this.tooltip_since = this.time
+                }
+                this.tooltip = text
+                if this.time < this.tooltip_since + TOOLTIP_DELAY : this.wake_at = this.wake_at.min(this.tooltip_since + TOOLTIP_DELAY)
+                return
+            }
+            n = n.parent
+        }
+        this.tooltip_key = 0
+        this.tooltip = ""
+    }
+
+    fn paint_overlays() {
+        let d = this.drag_state
+        if isset(d) && d.active {
+            let build = d.preview
+            let ghost = isset(build) ? build() : div().w(d.w).h(d.h).rounded(this.theme.radius).bg(this.theme.elevated).border(1).border_color(this.theme.accent)
+            ghost.opacity(0.85).shadow_lg()
+            this.paint_overlay(ghost, this.mouse_x - d.offset_x, this.mouse_y - d.offset_y, 0xd5a6)
+            return
+        }
+        if this.tooltip_key != 0 && !isset(this.pressed_button) && this.time >= this.tooltip_since + TOOLTIP_DELAY {
+            let t = this.theme
+            let tip = div().px(8).py(4).rounded(t.radius).bg(t.elevated).border(1).border_color(t.border)
+                .shadow_md().text_xs().text_color(t.text).max_w(320).child(this.tooltip)
+            this.paint_overlay(tip, this.mouse_x + 12, this.mouse_y + 20, 0x7007)
+        }
+    }
+}
+
+fn last_dismiss(n: Div) ?Div {
+    if n.style.display_none : return null
+    let i = n.child_nodes.length
+    while i > 0 {
+        i--
+        let found = last_dismiss(n.child_nodes.get(i) !! )
+        if isset(found) : return found
+    }
+    return isset(n.on_dismiss_fn) ? n : null
+}
+
+fn parse_binding(keys: String) Binding !SyntaxError {
+    let mods = Modifiers{}
+    let parts = keys.lower().replace("+", "-").split("-")
+    let key: Key = .unknown
+    each parts as part, i {
+        if part == "" : continue
+        if i + 1 < parts.length {
+            match part {
+                "ctrl", "control" => mods.ctrl = true
+                "shift" => mods.shift = true
+                "alt", "option" => mods.alt = true
+                "cmd", "super", "meta", "win" => mods.cmd = true
+                "secondary" => {
+                    #if OS == "macos"
+                    mods.cmd = true
+                    #else
+                    mods.ctrl = true
+                    #end
+                }
+                default => throw .syntax
+            }
+            continue
+        }
+        key = key_from_name(part)
+    }
+    if key == .unknown : throw .syntax
+    return .{ key: key, modifiers: mods, action: "" }
+}
+
+fn key_from_name(name: String) Key {
+    if name.length == 1 {
+        let c = name[0]
+        if c >= 'a' && c <= 'z' : return Key.from_name(name) !? .unknown
+        if c >= '0' && c <= '9' : return Key.from_name("digit" + name) !? .unknown
+        return match c : Key {
+            ',' => .comma
+            '.' => .period
+            '/' => .slash
+            ';' => .semicolon
+            '\'' => .apostrophe
+            '[' => .left_bracket
+            ']' => .right_bracket
+            '\\' => .backslash
+            '`' => .grave
+            '=' => .equal
+            default => .unknown
+        }
+    }
+    return match name : Key {
+        "enter", "return" => .enter
+        "escape", "esc" => .escape
+        "pageup" => .page_up
+        "pagedown" => .page_down
+        default => Key.from_name(name) !? .unknown
+    }
+}
+
+fn binding_text(b: Binding) String {
+    let parts = Array[String]{}
+    #if OS == "macos"
+    if b.modifiers.ctrl : parts.append("Ctrl")
+    if b.modifiers.alt : parts.append("Option")
+    if b.modifiers.shift : parts.append("Shift")
+    if b.modifiers.cmd : parts.append("Cmd")
+    #else
+    if b.modifiers.ctrl : parts.append("Ctrl")
+    if b.modifiers.alt : parts.append("Alt")
+    if b.modifiers.shift : parts.append("Shift")
+    if b.modifiers.cmd : parts.append("Super")
+    #end
+    parts.append(key_label(b.key))
+    return parts.join("+")
+}
+
+/// A short label for a key, as shown in menus.
++ fn key_label(key: Key) String {
+    let name = key.name()
+    if name.length == 1 : return name.upper()
+    if name.starts_with("digit") : return name.range(5, 1)
+    if name.starts_with("f") && name.length <= 3 : return name.upper()
+    return match key : String {
+        .enter => "Enter"
+        .escape => "Esc"
+        .backspace => "Backspace"
+        .delete => "Del"
+        .tab => "Tab"
+        .space => "Space"
+        .left => "←"
+        .right => "→"
+        .up => "↑"
+        .down => "↓"
+        .page_up => "PgUp"
+        .page_down => "PgDn"
+        .home => "Home"
+        .end => "End"
+        .comma => ","
+        .period => "."
+        .slash => "/"
+        .semicolon => ";"
+        .apostrophe => "'"
+        .left_bracket => "["
+        .right_bracket => "]"
+        .backslash => "\\"
+        .grave => "`"
+        .minus => "-"
+        .equal => "="
+        default => name
+    }
+}

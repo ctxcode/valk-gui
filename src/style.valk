@@ -38,6 +38,35 @@
     }
 }
 
++ enum ImageFit { fill, contain, cover }
+
+/// A radius per corner.
++ struct Corners {
+    + top_left: f32 (0)
+    + top_right: f32 (0)
+    + bottom_right: f32 (0)
+    + bottom_left: f32 (0)
+
+    + static fn all(radius: f32) Corners { return .{ top_left: radius, top_right: radius, bottom_right: radius, bottom_left: radius } }
+
+    /// The radii, each no larger than half of the box.
+    + fn clamp(w: f32, h: f32) Corners {
+        let m = (w / 2).min(h / 2).max(0)
+        return .{ top_left: this.top_left.min(m), top_right: this.top_right.min(m), bottom_right: this.bottom_right.min(m), bottom_left: this.bottom_left.min(m) }
+    }
+    + fn is_zero() bool { return this.top_left == 0 && this.top_right == 0 && this.bottom_right == 0 && this.bottom_left == 0 }
+    + fn grow(amount: f32) Corners {
+        return .{ top_left: this.top_left + amount, top_right: this.top_right + amount, bottom_right: this.bottom_right + amount, bottom_left: this.bottom_left + amount }
+    }
+}
+
+/// A linear gradient. The angle follows CSS: 0 runs upwards, 90 to the right, 180 downwards.
++ struct Gradient {
+    + from: Color
+    + to: Color
+    + angle: f32 (180)
+}
+
 /// A drop shadow behind an element.
 + struct Shadow {
     + x: f32 (0)
@@ -77,12 +106,17 @@
     + overflow_y: Overflow (.visible)
     + display_none: bool (false)
     + on_top: bool (false)
+    + anchor_window: bool (false)
+    + anchor_above: f32 (-1)
     + visible: bool (true)
 
     + background: ?Color (null)
     + border_widths: Edges (.{})
     + border_tint: Color (.{ r: 0, g: 0, b: 0, a: 0 })
     + radius: f32 (0)
+    + corner_radii: ?Corners (null)
+    + gradient: ?Gradient (null)
+    + image_fit: ImageFit (.fill)
     + box_shadow: ?Shadow (null)
     + alpha: f32 (1)
     + cursor_style: ?Cursor (null)
@@ -95,6 +129,16 @@
     + text_align: ?TextAlign (null)
     + nowrap: ?bool (null)
     + ellipsis: ?bool (null)
+    + font_italic: ?bool (null)
+    + text_underline: ?bool (null)
+    + text_strike: ?bool (null)
+
+    + wrap: bool (false)
+    + grid_columns: uint (0)
+    + column_span: uint (1)
+
+    /// The corner radii, from `rounded` or the per-corner methods.
+    + fn corners() Corners { return this.corner_radii ?? Corners.all(this.radius) }
 
     + get style: Style { return this }
 
@@ -116,6 +160,12 @@
     + fn flex_shrink_0() SELF { this.style.shrink = 0; return this }
     /// Neither grows nor shrinks.
     + fn flex_none() SELF { this.style.grow = 0; this.style.shrink = 0; return this }
+    /// Lets children that do not fit continue on a new line (or column).
+    + fn flex_wrap() SELF { this.style.wrap = true; return this }
+    /// Places children in a grid of `columns` equal columns, row by row; `gap` spaces the cells.
+    + fn grid(columns: uint) SELF { this.style.grid_columns = columns; this.style.direction = .row; this.style.wrap = true; return this }
+    /// How many grid columns the element takes.
+    + fn col_span(columns: uint) SELF { this.style.column_span = columns; return this }
     + fn flex_basis(value: f32) SELF { this.style.basis = Length.px(value); return this }
     + fn items_start() SELF { this.style.align_items = .start; return this }
     + fn items_center() SELF { this.style.align_items = .center; return this }
@@ -213,9 +263,23 @@
     + fn border_l(width: f32) SELF { this.style.border_widths.left = width; return this }
     + fn border_color(color: Color) SELF { this.style.border_tint = color; return this }
     /// The corner radius.
-    + fn rounded(radius: f32) SELF { this.style.radius = radius; return this }
+    + fn rounded(radius: f32) SELF { this.style.radius = radius; this.style.corner_radii = null; return this }
     /// Corners as round as the element allows: a pill, or a circle for a square.
-    + fn rounded_full() SELF { this.style.radius = 100000; return this }
+    + fn rounded_full() SELF { this.style.radius = 100000; this.style.corner_radii = null; return this }
+    + fn rounded_t(radius: f32) SELF { let c = this.style.corners(); c.top_left = radius; c.top_right = radius; this.style.corner_radii = c; return this }
+    + fn rounded_b(radius: f32) SELF { let c = this.style.corners(); c.bottom_left = radius; c.bottom_right = radius; this.style.corner_radii = c; return this }
+    + fn rounded_l(radius: f32) SELF { let c = this.style.corners(); c.top_left = radius; c.bottom_left = radius; this.style.corner_radii = c; return this }
+    + fn rounded_r(radius: f32) SELF { let c = this.style.corners(); c.top_right = radius; c.bottom_right = radius; this.style.corner_radii = c; return this }
+    + fn rounded_tl(radius: f32) SELF { let c = this.style.corners(); c.top_left = radius; this.style.corner_radii = c; return this }
+    + fn rounded_tr(radius: f32) SELF { let c = this.style.corners(); c.top_right = radius; this.style.corner_radii = c; return this }
+    + fn rounded_br(radius: f32) SELF { let c = this.style.corners(); c.bottom_right = radius; this.style.corner_radii = c; return this }
+    + fn rounded_bl(radius: f32) SELF { let c = this.style.corners(); c.bottom_left = radius; this.style.corner_radii = c; return this }
+    /// A background that fades from one color to another; see `Gradient` for the angle.
+    + fn bg_gradient(from: Color, to: Color, angle: f32 (180)) SELF { this.style.gradient = Gradient{ from: from, to: to, angle: angle }; return this }
+    /// Scales an image to fit inside the element, keeping its aspect ratio.
+    + fn object_contain() SELF { this.style.image_fit = .contain; return this }
+    /// Scales an image to cover the element, keeping its aspect ratio and cutting off the rest.
+    + fn object_cover() SELF { this.style.image_fit = .cover; return this }
     + fn shadow(shadow: Shadow) SELF { this.style.box_shadow = shadow; return this }
     + fn shadow_sm() SELF { this.style.box_shadow = .{ y: 1, blur: 3, color: .{ a: 40 } }; return this }
     + fn shadow_md() SELF { this.style.box_shadow = .{ y: 4, blur: 10, color: .{ a: 50 } }; return this }
@@ -248,6 +312,11 @@
     + fn text_left() SELF { this.style.text_align = .left; return this }
     + fn text_center() SELF { this.style.text_align = .center; return this }
     + fn text_right() SELF { this.style.text_align = .right; return this }
+    + fn italic() SELF { this.style.font_italic = true; return this }
+    + fn not_italic() SELF { this.style.font_italic = false; return this }
+    + fn underline() SELF { this.style.text_underline = true; return this }
+    + fn line_through() SELF { this.style.text_strike = true; return this }
+    + fn no_underline() SELF { this.style.text_underline = false; this.style.text_strike = false; return this }
     /// Keeps text on one line.
     + fn whitespace_nowrap() SELF { this.style.nowrap = true; return this }
     /// Keeps text on one line and ends it with "…" when it does not fit.
