@@ -1,0 +1,75 @@
+
+use valk.math
+
+/// A point in logical pixels.
++ struct Point {
+    + x: f32 (0)
+    + y: f32 (0)
+}
+
+/// A rectangle in logical pixels, from its top-left corner.
++ struct Bounds {
+    + x: f32 (0)
+    + y: f32 (0)
+    + w: f32 (0)
+    + h: f32 (0)
+
+    + get right: f32 { return this.x + this.w }
+    + get bottom: f32 { return this.y + this.h }
+    + get center: Point { return .{ x: this.x + this.w / 2, y: this.y + this.h / 2 } }
+
+    /// Whether the point lies inside, counting the top and left edges but not the right and bottom.
+    + fn contains(x: f32, y: f32) bool {
+        return x >= this.x && y >= this.y && x < this.x + this.w && y < this.y + this.h
+    }
+
+    /// The overlap of two rectangles; zero-sized when they do not overlap.
+    + fn intersect(other: Bounds) Bounds {
+        let x = this.x.max(other.x)
+        let y = this.y.max(other.y)
+        let r = (this.x + this.w).min(other.x + other.w)
+        let b = (this.y + this.h).min(other.y + other.h)
+        return .{ x: x, y: y, w: (r - x).max(0), h: (b - y).max(0) }
+    }
+
+    /// The rectangle moved inwards by `edges`.
+    + fn inset(edges: Edges) Bounds {
+        return .{
+            x: this.x + edges.left, y: this.y + edges.top,
+            w: (this.w - edges.left - edges.right).max(0), h: (this.h - edges.top - edges.bottom).max(0)
+        }
+    }
+
+    /// The rectangle grown by `amount` on every side.
+    + fn grow(amount: f32) Bounds {
+        return .{ x: this.x - amount, y: this.y - amount, w: this.w + amount * 2, h: this.h + amount * 2 }
+    }
+}
+
+/// Values for the four sides of a box, used for padding, margins and border widths.
++ struct Edges {
+    + top: f32 (0)
+    + right: f32 (0)
+    + bottom: f32 (0)
+    + left: f32 (0)
+
+    + static fn all(value: f32) Edges { return .{ top: value, right: value, bottom: value, left: value } }
+
+    + get horizontal: f32 { return this.left + this.right }
+    + get vertical: f32 { return this.top + this.bottom }
+
+    + fn add(other: Edges) Edges {
+        return .{ top: this.top + other.top, right: this.right + other.right, bottom: this.bottom + other.bottom, left: this.left + other.left }
+    }
+    + fn is_uniform() bool {
+        return this.top == this.right && this.top == this.bottom && this.top == this.left
+    }
+    + fn is_zero() bool {
+        return this.top == 0 && this.right == 0 && this.bottom == 0 && this.left == 0
+    }
+}
+
+fn floor32(v: f32) f32 { return math.floor(v).to(f32) }
+fn round32(v: f32) f32 { return math.round(v).to(f32) }
+fn ceil32(v: f32) f32 { return math.ceil(v).to(f32) }
+fn clamp32(v: f32, lo: f32, hi: f32) f32 { return v.max(lo).min(hi) }

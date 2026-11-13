@@ -1,0 +1,38 @@
+
+/// The colors and sizes the window and the built-in components use. `win.theme` gives the
+/// current one; your own elements can use it too.
++ class Theme {
+    /// The window background.
+    + background: Color
+    /// Panels and cards on the background.
+    + surface: Color
+    /// Hovered or raised surfaces.
+    + elevated: Color
+    + border: Color
+    + text: Color
+    /// Secondary text.
+    + muted: Color
+    /// Buttons, selections and focus rings.
+    + accent: Color
+    /// Text on the accent color.
+    + accent_text: Color
+    + danger: Color
+    + radius: f32 (6)
+    + font_size: f32 (14)
+
+    + static fn dark() Theme {
+        return Theme{
+            background: rgb(0x1e1f22), surface: rgb(0x2b2d31), elevated: rgb(0x383a40),
+            border: rgb(0x45474f), text: rgb(0xe6e6e8), muted: rgb(0x9a9ca5),
+            accent: rgb(0x3b82f6), accent_text: rgb(0xffffff), danger: rgb(0xef4444)
+        }
+    }
+
+    + static fn light() Theme {
+        return Theme{
+            background: rgb(0xf7f7f8), surface: rgb(0xffffff), elevated: rgb(0xececef),
+            border: rgb(0xd4d4d8), text: rgb(0x18181b), muted: rgb(0x71717a),
+            accent: rgb(0x2563eb), accent_text: rgb(0xffffff), danger: rgb(0xdc2626)
+        }
+    }
+}

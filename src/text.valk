@@ -1,0 +1,156 @@
+
+/// The font a text is drawn with, after inheritance.
++ struct ResolvedFont {
+    /// The family name, "" for the built-in Inter.
+    + name: String ("")
+    + size: f32 (16)
+    + weight: FontWeight (.normal)
+    /// The height of one line in pixels.
+    + line_height: f32 (22)
+}
+
+/// What the window needs from the system it runs on: text metrics, images and the clipboard.
+/// `run` uses raylib; `headless` uses fixed-width metrics for tests.
++ interface Platform {
+    fn text_width(text: String, font: ResolvedFont) f32;
+    fn image_size(path: String) Point;
+    fn clipboard() String;
+    fn set_clipboard(text: String);
+}
+
+/// Text metrics without a window: every character is half the font size wide.
++ class HeadlessPlatform is Platform {
+    - clip: String ("")
+    + images: Map[Point] (.{})
+
+    + fn text_width(text: String, font: ResolvedFont) f32 {
+        return text.utf8.length.to(f32) * font.size * 0.5
+    }
+    + fn image_size(path: String) Point { return this.images[path] ?? Point{} }
+    + fn clipboard() String { return this.clip }
+    + fn set_clipboard(text: String) { this.clip = text }
+}
+
+value ELLIPSIS ("…")
+
+/// The lines `content` breaks into at `max_width`. Lines break between words; a word wider
+/// than `max_width` stays whole. `\n` always breaks.
+fn wrap_text(p: Platform, content: String, font: ResolvedFont, max_width: f32, nowrap: bool, ellipsis: bool) Array[String] {
+    let lines = Array[String]{}
+    if !content.contains("\n") {
+        let w = p.text_width(content, font)
+        if w <= max_width + 0.01 || (nowrap && !ellipsis) {
+            lines.append(content)
+            return lines
+        }
+    }
+    let paragraphs = content.split("\n")
+    if nowrap {
+        each paragraphs as para {
+            if ellipsis && p.text_width(para, font) > max_width {
+                lines.append(truncate_text(p, para, font, max_width))
+            } else {
+                lines.append(para)
+            }
+        }
+        return lines
+    }
+    let space = p.text_width(" ", font)
+    each paragraphs as para {
+        let line = ""
+        let line_w: f32 = 0
+        let started = false
+        each para.words() as word {
+            let ww = p.text_width(word, font)
+            if !started {
+                line = word
+                line_w = ww
+                started = true
+                continue
+            }
+            if line_w + space + ww <= max_width + 0.01 {
+                line = line + " " + word
+                line_w += space + ww
+            } else {
+                lines.append(line)
+                line = word
+                line_w = ww
+            }
+        }
+        lines.append(line)
+    }
+    return lines
+}
+
+/// The width of the widest line and the number of lines of `wrap_text`, without making the lines.
+fn text_extent(p: Platform, content: String, font: ResolvedFont, max_width: f32, nowrap: bool, ellipsis: bool) (f32, uint) {
+    if !content.contains("\n") {
+        let w = p.text_width(content, font)
+        if nowrap : return (ellipsis ? w.min(max_width.max(0)) : w, 1)
+        if w <= max_width + 0.01 : return (w, 1)
+    } else if nowrap {
+        let widest: f32 = 0
+        let count: uint = 0
+        each content.split("\n") as para {
+            widest = widest.max(p.text_width(para, font))
+            count++
+        }
+        return (ellipsis ? widest.min(max_width.max(0)) : widest, count)
+    }
+    let space = p.text_width(" ", font)
+    let widest: f32 = 0
+    let count: uint = 0
+    each content.split("\n") as para {
+        let line_w: f32 = 0
+        let started = false
+        each para.words() as word {
+            let ww = p.text_width(word, font)
+            if !started {
+                line_w = ww
+                started = true
+            } else if line_w + space + ww <= max_width + 0.01 {
+                line_w += space + ww
+            } else {
+                widest = widest.max(line_w)
+                count++
+                line_w = ww
+            }
+        }
+        widest = widest.max(line_w)
+        count++
+    }
+    return (widest, count)
+}
+
+/// `content` cut to fit `max_width` including a trailing "…".
+fn truncate_text(p: Platform, content: String, font: ResolvedFont, max_width: f32) String {
+    let room = max_width - p.text_width(ELLIPSIS, font)
+    let fit = ""
+    each content.utf8.chars() as ch {
+        let next = fit + ch
+        if p.text_width(next, font) > room : break
+        fit = next
+    }
+    return fit.trim() + ELLIPSIS
+}
+
+/// The UTF-8 text of one Unicode code point.
+fn codepoint_text(cp: u32) String {
+    let buf = ByteBuffer.new(4)
+    if cp < 0x80 {
+        buf.write_byte(cp.to(u8))
+    } else if cp < 0x800 {
+        buf.write_byte((0xc0 | (cp >> 6)).to(u8))
+        buf.write_byte((0x80 | (cp & 0x3f)).to(u8))
+    } else if cp < 0x10000 {
+        buf.write_byte((0xe0 | (cp >> 12)).to(u8))
+        buf.write_byte((0x80 | ((cp >> 6) & 0x3f)).to(u8))
+        buf.write_byte((0x80 | (cp & 0x3f)).to(u8))
+    } else {
+        buf.write_byte((0xf0 | (cp >> 18)).to(u8))
+        buf.write_byte((0x80 | ((cp >> 12) & 0x3f)).to(u8))
+        buf.write_byte((0x80 | ((cp >> 6) & 0x3f)).to(u8))
+        buf.write_byte((0x80 | (cp & 0x3f)).to(u8))
+    }
+    return buf.to_string()
+}

@@ -1,0 +1,98 @@
+
++ enum PrimitiveKind { quad, shadow, text, image, line, circle, ring, triangle, clip, unclip }
+
+/// One drawing command. Which fields matter depends on `kind`.
++ struct Primitive {
+    + kind: PrimitiveKind
+    + bounds: Bounds (.{})
+    + color: Color (.{})
+    + border_color: Color (.{})
+    + border: Edges (.{})
+    + radius: f32 (0)
+    /// The blur of a shadow, the width of a line or ring.
+    + width: f32 (0)
+    + text: String ("")
+    + font: ResolvedFont (.{})
+    /// Line end points, triangle corners.
+    + points: [Point x 3] ({ .{}, .{}, .{} })
+}
+
+/// What a frame draws, in order. The window rebuilds it every frame.
++ class Scene {
+    + items: Array[Primitive] (.{})
+
+    + fn clear() { this.items.clear() }
+
+    /// Every text drawn, in order.
+    + fn texts() Array[String] {
+        let result = Array[String]{}
+        each this.items as item {
+            if item.kind == .text : result.append(item.text)
+        }
+        return result
+    }
+
+    /// Whether a drawn text contains `part`.
+    + fn has_text(part: String) bool {
+        each this.items as item {
+            if item.kind == .text && item.text.contains(part) : return true
+        }
+        return false
+    }
+
+    /// The first text that contains `part`.
+    + fn find_text(part: String) ?Primitive {
+        each this.items as item {
+            if item.kind == .text && item.text.contains(part) : return item
+        }
+        return null
+    }
+
+    fn add(p: Primitive) { this.items.append(p) }
+}
+
+/// Draws into the scene from a `canvas` element. Coordinates are window coordinates; the
+/// canvas's bounds are given next to the painter.
++ class Painter {
+    window: Window
+    alpha: f32 (1)
+
+    + fn fill(bounds: Bounds, color: Color, radius: f32 (0)) {
+        this.window.scene.add(.{ kind: .quad, bounds: bounds, color: color.fade(this.alpha), radius: radius })
+    }
+
+    + fn stroke(bounds: Bounds, color: Color, width: f32 (1), radius: f32 (0)) {
+        this.window.scene.add(.{ kind: .quad, bounds: bounds, color: transparent(), border: Edges.all(width), border_color: color.fade(this.alpha), radius: radius })
+    }
+
+    + fn line(x1: f32, y1: f32, x2: f32, y2: f32, color: Color, width: f32 (1)) {
+        this.window.scene.add(.{ kind: .line, color: color.fade(this.alpha), width: width, points: { .{ x: x1, y: y1 }, .{ x: x2, y: y2 }, .{} } })
+    }
+
+    + fn circle(x: f32, y: f32, radius: f32, color: Color) {
+        this.window.scene.add(.{ kind: .circle, bounds: .{ x: x - radius, y: y - radius, w: radius * 2, h: radius * 2 }, color: color.fade(this.alpha), radius: radius })
+    }
+
+    + fn ring(x: f32, y: f32, radius: f32, color: Color, width: f32 (1)) {
+        this.window.scene.add(.{ kind: .ring, bounds: .{ x: x - radius, y: y - radius, w: radius * 2, h: radius * 2 }, color: color.fade(this.alpha), radius: radius, width: width })
+    }
+
+    /// A filled triangle; the corners may be in either order.
+    + fn triangle(a: Point, b: Point, c: Point, color: Color) {
+        this.window.scene.add(.{ kind: .triangle, color: color.fade(this.alpha), points: { a, b, c } })
+    }
+
+    /// One line of text in a line box 1.4 times the size high, with its top-left corner at `x`, `y`.
+    + fn text(x: f32, y: f32, content: String, color: Color, size: f32 (16), weight: FontWeight (.normal), font: String ("")) {
+        let f = ResolvedFont{ name: font, size: size, weight: weight, line_height: round32(size * 1.4) }
+        this.window.scene.add(.{ kind: .text, bounds: .{ x: x, y: y, w: this.window.platform.text_width(content, f), h: f.line_height }, color: color.fade(this.alpha), text: content, font: f })
+    }
+
+    + fn text_width(content: String, size: f32 (16), weight: FontWeight (.normal), font: String ("")) f32 {
+        return this.window.platform.text_width(content, .{ name: font, size: size, weight: weight })
+    }
+
+    /// Limits drawing to `bounds` until `unclip`.
+    + fn clip(bounds: Bounds) { this.window.push_clip(bounds) }
+    + fn unclip() { this.window.pop_clip() }
+}

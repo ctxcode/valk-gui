@@ -1,0 +1,247 @@
+
+/// A single-line text field. Keep it with your state and put `input.render(win)` in the tree.
+/// It supports selection with the mouse and Shift, word jumps, and copy, cut and paste.
++ class TextInput is Render {
+    + text: String ("")
+    + placeholder: String ("")
+    /// Called after every edit with the new text.
+    + on_change: ?fn(String)() (null)
+    /// Called when Enter is pressed.
+    + on_submit: ?fn(String)() (null)
+    /// Shows dots instead of the text.
+    + password: bool (false)
+    /// The text size; the theme's when unset.
+    + font_size: ?f32 (null)
+    /// The caret position as a byte offset.
+    ~+ cursor: uint (0)
+    /// The other end of the selection; equal to `cursor` when nothing is selected.
+    ~+ anchor: uint (0)
+    - handle: ?FocusHandle (null)
+    - scroll: f32 (0)
+    - size: f32 (14)
+
+    + static fn new(placeholder: String ("")) TextInput {
+        return TextInput{ placeholder: placeholder }
+    }
+
+    /// The focus handle of the field, for focusing it from code.
+    + fn focus_handle(win: Window) FocusHandle {
+        let h = this.handle
+        if isset(h) : return h
+        let created = win.focus_handle()
+        this.handle = created
+        return created
+    }
+
+    + fn set_text(text: String) {
+        this.text = text
+        this.cursor = text.length
+        this.anchor = this.cursor
+    }
+
+    + fn select_all() {
+        this.anchor = 0
+        this.cursor = this.text.length
+    }
+
+    + fn selected_text() String {
+        let a = this.anchor.min(this.cursor)
+        let b = this.anchor.max(this.cursor)
+        return this.text.range(a, b - a)
+    }
+
+    + fn render(win: Window) Div {
+        let theme = win.theme
+        let fh = this.focus_handle(win)
+        this.size = this.font_size ?? theme.font_size
+        let focused = fh.is_focused()
+        return div().h(round32(this.size * 2.3)).px(10).flex().items_center()
+            .bg(theme.surface).border(1).border_color(focused ? theme.accent : theme.border).rounded(theme.radius)
+            .cursor_text()
+            .track_focus(fh)
+            .on_key_down(fn(e) { this.key(win, e) })
+            .on_input(fn(t) { this.insert(t) })
+            .child(canvas(fn(p, b) { this.paint(win, p, b) }).flex_1().h_full()
+                .on_mouse_down(fn(e) {
+                    let at = this.index_at(win, e.local_x + this.scroll)
+                    if e.click_count == 2 {
+                        this.anchor = word_start(this.text, at)
+                        this.cursor = word_end(this.text, at)
+                    } else if e.click_count >= 3 {
+                        this.select_all()
+                    } else {
+                        this.cursor = at
+                        if !e.modifiers.shift : this.anchor = at
+                    }
+                })
+                .on_drag(fn(e) { this.cursor = this.index_at(win, e.local_x + this.scroll) }))
+    }
+
+    - fn shown() String {
+        if this.password : return "•".repeat(this.text.utf8.length)
+        return this.text
+    }
+
+    // The x of a byte offset in the shown text
+    - fn x_of(win: Window, offset: uint) f32 {
+        if this.password : return win.text_width("•".repeat(this.text.range(0, offset).utf8.length), this.size)
+        return win.text_width(this.text.range(0, offset), this.size)
+    }
+
+    - fn index_at(win: Window, x: f32) uint {
+        let best: uint = 0
+        let best_distance: f32 = x.abs()
+        let i: uint = 0
+        while i < this.text.length {
+            i = next_boundary(this.text, i)
+            let d = (this.x_of(win, i) - x).abs()
+            if d < best_distance {
+                best = i
+                best_distance = d
+            }
+        }
+        return best
+    }
+
+    - fn paint(win: Window, p: Painter, b: Bounds) {
+        let theme = win.theme
+        let focused = this.focus_handle(win).is_focused()
+        let line = round32(this.size * 1.4)
+        let caret = this.x_of(win, this.cursor)
+        if caret - this.scroll > b.w - 2 : this.scroll = caret - b.w + 2
+        if caret - this.scroll < 0 : this.scroll = caret
+        let full = this.x_of(win, this.text.length)
+        if full - this.scroll < b.w - 2 : this.scroll = (full - b.w + 2).max(0)
+        let x = b.x - this.scroll
+        let top = b.y + (b.h - line) / 2
+        if this.anchor != this.cursor {
+            let x1 = this.x_of(win, this.anchor.min(this.cursor))
+            let x2 = this.x_of(win, this.anchor.max(this.cursor))
+            p.fill(.{ x: x + x1, y: top, w: x2 - x1, h: line }, theme.accent.opacity(focused ? 0.4 : 0.2))
+        }
+        if this.text.length == 0 {
+            if this.placeholder.length > 0 : p.text(b.x, top, this.placeholder, theme.muted, this.size)
+        } else {
+            p.text(x, top, this.shown(), theme.text, this.size)
+        }
+        if focused : p.fill(.{ x: x + caret, y: top, w: 1.5, h: line }, theme.text)
+    }
+
+    /// Replaces the selection with `t`.
+    + fn insert(t: String) {
+        let clean = t.replace("\r", "").replace("\n", " ")
+        let a = this.anchor.min(this.cursor)
+        let b = this.anchor.max(this.cursor)
+        this.text = this.text.range(0, a) + clean + this.text.range(b, this.text.length - b)
+        this.cursor = a + clean.length
+        this.anchor = this.cursor
+        this.changed()
+    }
+
+    - fn changed() {
+        let f = this.on_change
+        if isset(f) : f(this.text)
+    }
+
+    - fn move_to(offset: uint, select: bool) {
+        this.cursor = offset
+        if !select : this.anchor = offset
+    }
+
+    - fn key(win: Window, e: KeyEvent) {
+        let m = e.modifiers
+        let has_selection = this.anchor != this.cursor
+        let word = m.ctrl || m.alt
+        if m.secondary && !m.alt {
+            let handled = true
+            if e.key == .a {
+                this.select_all()
+            } else if e.key == .c {
+                if has_selection && !this.password : win.set_clipboard(this.selected_text())
+            } else if e.key == .x {
+                if has_selection && !this.password {
+                    win.set_clipboard(this.selected_text())
+                    this.insert("")
+                }
+            } else if e.key == .v {
+                this.insert(win.clipboard())
+            } else {
+                handled = false
+            }
+            if handled {
+                e.stop_propagation()
+                return
+            }
+        }
+        match e.key {
+            .left => {
+                if has_selection && !m.shift {
+                    this.move_to(this.anchor.min(this.cursor), false)
+                } else {
+                    this.move_to(word ? word_start(this.text, prev_boundary(this.text, this.cursor)) : prev_boundary(this.text, this.cursor), m.shift)
+                }
+            }
+            .right => {
+                if has_selection && !m.shift {
+                    this.move_to(this.anchor.max(this.cursor), false)
+                } else {
+                    this.move_to(word ? word_end(this.text, next_boundary(this.text, this.cursor)) : next_boundary(this.text, this.cursor), m.shift)
+                }
+            }
+            .home, .up => this.move_to(0, m.shift)
+            .end, .down => this.move_to(this.text.length, m.shift)
+            .backspace => {
+                if !has_selection {
+                    this.anchor = word ? word_start(this.text, prev_boundary(this.text, this.cursor)) : prev_boundary(this.text, this.cursor)
+                }
+                this.insert("")
+            }
+            .delete => {
+                if !has_selection {
+                    this.anchor = word ? word_end(this.text, next_boundary(this.text, this.cursor)) : next_boundary(this.text, this.cursor)
+                }
+                this.insert("")
+            }
+            .enter => {
+                let f = this.on_submit
+                if isset(f) : f(this.text)
+            }
+            default => return
+        }
+        e.stop_propagation()
+    }
+}
+
+fn prev_boundary(text: String, i: uint) uint {
+    if i == 0 : return 0
+    let j = i - 1
+    while j > 0 && (text[j] & 0xc0) == 0x80 : j--
+    return j
+}
+
+fn next_boundary(text: String, i: uint) uint {
+    if i >= text.length : return text.length
+    let j = i + 1
+    while j < text.length && (text[j] & 0xc0) == 0x80 : j++
+    return j
+}
+
+fn is_word_byte(b: u8) bool {
+    return b >= 0x80 || (b >= '0' && b <= '9') || (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || b == '_'
+}
+
+/// The start of the word at or before `i`.
+fn word_start(text: String, i: uint) uint {
+    let j = i.min(text.length)
+    while j > 0 && !is_word_byte(text[j - 1]) && !is_word_byte(text[j]) : j--
+    while j > 0 && is_word_byte(text[j - 1]) : j--
+    return j
+}
+
+/// The end of the word at or after `i`.
+fn word_end(text: String, i: uint) uint {
+    let j = i.min(text.length)
+    while j < text.length && !is_word_byte(text[j]) : j++
+    while j < text.length && is_word_byte(text[j]) : j++
+    return j
+}

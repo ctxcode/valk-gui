@@ -1,0 +1,255 @@
+
+/// The axis children are placed along.
++ enum Direction { row, column }
+
+/// How children are placed on the cross axis (`items_*`, `self_*`).
++ enum Align { start, center, end, stretch }
+
+/// How free space on the main axis is shared (`justify_*`).
++ enum Justify { start, center, end, between, around, evenly }
+
++ enum Position { relative, absolute }
+
++ enum Overflow { visible, hidden, scroll }
+
++ enum TextAlign { left, center, right }
+
++ enum FontWeight { normal, medium, semibold, bold }
+
+/// The mouse cursor shown over an element.
++ enum Cursor { default, pointer, text, crosshair, not_allowed, resize_ew, resize_ns, move }
+
++ enum LengthKind { auto, px, fraction }
+
+/// A size: automatic, in pixels, or a fraction of the parent's size.
++ struct Length {
+    + kind: LengthKind (.auto)
+    + value: f32 (0)
+
+    + static fn auto() Length { return .{ kind: .auto } }
+    + static fn px(value: f32) Length { return .{ kind: .px, value: value } }
+    + static fn fraction(value: f32) Length { return .{ kind: .fraction, value: value } }
+
+    /// The size in pixels, or -1 when it is automatic or the parent's size is unknown.
+    + fn resolve(parent: f32) f32 {
+        if this.kind == .px : return this.value
+        if this.kind == .fraction && parent >= 0 : return this.value * parent
+        return -1
+    }
+}
+
+/// A drop shadow behind an element.
++ struct Shadow {
+    + x: f32 (0)
+    + y: f32 (0)
+    + blur: f32 (0)
+    + spread: f32 (0)
+    + color: Color (.{ r: 0, g: 0, b: 0, a: 64 })
+}
+
+/// Everything that decides how an element is laid out and painted. Elements, and the
+/// closures given to `hover`, `active` and `focus`, change it through the `Styled` methods.
+/// Text properties left `null` are inherited from the parent.
++ class Style {
+    + direction: Direction (.column)
+    + align_items: Align (.stretch)
+    + align_self: ?Align (null)
+    + justify: Justify (.start)
+    + width: Length (.{})
+    + height: Length (.{})
+    + min_width: ?f32 (null)
+    + min_height: ?f32 (null)
+    + max_width: ?f32 (null)
+    + max_height: ?f32 (null)
+    + grow: f32 (0)
+    + shrink: f32 (1)
+    + basis: Length (.{})
+    + column_gap: f32 (0)
+    + row_gap: f32 (0)
+    + padding: Edges (.{})
+    + margin: Edges (.{})
+    + position: Position (.relative)
+    + inset_top: ?f32 (null)
+    + inset_right: ?f32 (null)
+    + inset_bottom: ?f32 (null)
+    + inset_left: ?f32 (null)
+    + overflow_x: Overflow (.visible)
+    + overflow_y: Overflow (.visible)
+    + display_none: bool (false)
+    + on_top: bool (false)
+    + visible: bool (true)
+
+    + background: ?Color (null)
+    + border_widths: Edges (.{})
+    + border_tint: Color (.{ r: 0, g: 0, b: 0, a: 0 })
+    + radius: f32 (0)
+    + box_shadow: ?Shadow (null)
+    + alpha: f32 (1)
+    + cursor_style: ?Cursor (null)
+
+    + color: ?Color (null)
+    + font_size: ?f32 (null)
+    + weight: ?FontWeight (null)
+    + font_name: ?String (null)
+    + leading: ?f32 (null)
+    + text_align: ?TextAlign (null)
+    + nowrap: ?bool (null)
+    + ellipsis: ?bool (null)
+
+    + get style: Style { return this }
+
+    use Styled
+}
+
+/// The fluent style methods shared by `Div` and `Style`. Sizes are logical pixels.
++ trait Styled {
+    // Layout direction and alignment
+    /// Places children in a row.
+    + fn flex() SELF { this.style.direction = .row; return this }
+    + fn flex_row() SELF { this.style.direction = .row; return this }
+    /// Places children in a column, the default.
+    + fn flex_col() SELF { this.style.direction = .column; return this }
+    /// Grows and shrinks from a zero base size, sharing space with its siblings.
+    + fn flex_1() SELF { this.style.grow = 1; this.style.shrink = 1; this.style.basis = Length.px(0); return this }
+    /// Grows into free space, from its content size.
+    + fn flex_grow() SELF { this.style.grow = 1; return this }
+    + fn flex_shrink_0() SELF { this.style.shrink = 0; return this }
+    /// Neither grows nor shrinks.
+    + fn flex_none() SELF { this.style.grow = 0; this.style.shrink = 0; return this }
+    + fn flex_basis(value: f32) SELF { this.style.basis = Length.px(value); return this }
+    + fn items_start() SELF { this.style.align_items = .start; return this }
+    + fn items_center() SELF { this.style.align_items = .center; return this }
+    + fn items_end() SELF { this.style.align_items = .end; return this }
+    + fn items_stretch() SELF { this.style.align_items = .stretch; return this }
+    + fn self_start() SELF { this.style.align_self = .start; return this }
+    + fn self_center() SELF { this.style.align_self = .center; return this }
+    + fn self_end() SELF { this.style.align_self = .end; return this }
+    + fn self_stretch() SELF { this.style.align_self = .stretch; return this }
+    + fn justify_start() SELF { this.style.justify = .start; return this }
+    + fn justify_center() SELF { this.style.justify = .center; return this }
+    + fn justify_end() SELF { this.style.justify = .end; return this }
+    + fn justify_between() SELF { this.style.justify = .between; return this }
+    + fn justify_around() SELF { this.style.justify = .around; return this }
+    + fn justify_evenly() SELF { this.style.justify = .evenly; return this }
+    /// Centers children on both axes.
+    + fn center() SELF { this.style.align_items = .center; this.style.justify = .center; return this }
+    /// Space between children on both axes.
+    + fn gap(value: f32) SELF { this.style.column_gap = value; this.style.row_gap = value; return this }
+    + fn gap_x(value: f32) SELF { this.style.column_gap = value; return this }
+    + fn gap_y(value: f32) SELF { this.style.row_gap = value; return this }
+
+    // Sizes
+    + fn w(value: f32) SELF { this.style.width = Length.px(value); return this }
+    + fn h(value: f32) SELF { this.style.height = Length.px(value); return this }
+    + fn size(value: f32) SELF { this.style.width = Length.px(value); this.style.height = Length.px(value); return this }
+    /// Width as a fraction of the parent's, such as 0.5 for half.
+    + fn w_frac(value: f32) SELF { this.style.width = Length.fraction(value); return this }
+    + fn h_frac(value: f32) SELF { this.style.height = Length.fraction(value); return this }
+    + fn w_full() SELF { this.style.width = Length.fraction(1); return this }
+    + fn h_full() SELF { this.style.height = Length.fraction(1); return this }
+    + fn size_full() SELF { this.style.width = Length.fraction(1); this.style.height = Length.fraction(1); return this }
+    + fn w_auto() SELF { this.style.width = Length.auto(); return this }
+    + fn h_auto() SELF { this.style.height = Length.auto(); return this }
+    + fn min_w(value: f32) SELF { this.style.min_width = value; return this }
+    + fn min_h(value: f32) SELF { this.style.min_height = value; return this }
+    + fn max_w(value: f32) SELF { this.style.max_width = value; return this }
+    + fn max_h(value: f32) SELF { this.style.max_height = value; return this }
+
+    // Spacing
+    + fn p(value: f32) SELF { this.style.padding = Edges.all(value); return this }
+    + fn px(value: f32) SELF { this.style.padding.left = value; this.style.padding.right = value; return this }
+    + fn py(value: f32) SELF { this.style.padding.top = value; this.style.padding.bottom = value; return this }
+    + fn pt(value: f32) SELF { this.style.padding.top = value; return this }
+    + fn pr(value: f32) SELF { this.style.padding.right = value; return this }
+    + fn pb(value: f32) SELF { this.style.padding.bottom = value; return this }
+    + fn pl(value: f32) SELF { this.style.padding.left = value; return this }
+    + fn m(value: f32) SELF { this.style.margin = Edges.all(value); return this }
+    + fn mx(value: f32) SELF { this.style.margin.left = value; this.style.margin.right = value; return this }
+    + fn my(value: f32) SELF { this.style.margin.top = value; this.style.margin.bottom = value; return this }
+    + fn mt(value: f32) SELF { this.style.margin.top = value; return this }
+    + fn mr(value: f32) SELF { this.style.margin.right = value; return this }
+    + fn mb(value: f32) SELF { this.style.margin.bottom = value; return this }
+    + fn ml(value: f32) SELF { this.style.margin.left = value; return this }
+
+    // Positioning
+    /// Takes the element out of the flow, placed with `top`, `right`, `bottom` and `left`
+    /// inside its parent. It is painted above its in-flow siblings.
+    + fn absolute() SELF { this.style.position = .absolute; return this }
+    + fn relative() SELF { this.style.position = .relative; return this }
+    + fn top(value: f32) SELF { this.style.inset_top = value; return this }
+    + fn right(value: f32) SELF { this.style.inset_right = value; return this }
+    + fn bottom(value: f32) SELF { this.style.inset_bottom = value; return this }
+    + fn left(value: f32) SELF { this.style.inset_left = value; return this }
+    + fn inset(value: f32) SELF {
+        this.style.inset_top = value; this.style.inset_right = value
+        this.style.inset_bottom = value; this.style.inset_left = value
+        return this
+    }
+
+    // Overflow and visibility
+    /// Clips children to the padding box.
+    + fn overflow_hidden() SELF { this.style.overflow_x = .hidden; this.style.overflow_y = .hidden; return this }
+    /// Scrolls vertically when the children are taller. Give the element an `id` to keep its
+    /// scroll position when the tree changes shape.
+    + fn overflow_y_scroll() SELF { this.style.overflow_y = .scroll; this.style.overflow_x = .hidden; return this }
+    + fn overflow_x_scroll() SELF { this.style.overflow_x = .scroll; this.style.overflow_y = .hidden; return this }
+    + fn overflow_scroll() SELF { this.style.overflow_x = .scroll; this.style.overflow_y = .scroll; return this }
+    /// Removes the element from layout and painting.
+    + fn hidden() SELF { this.style.display_none = true; return this }
+    /// Keeps the element's space but does not paint it.
+    + fn invisible() SELF { this.style.visible = false; return this }
+    /// Paints the element after everything else and without the clipping of its parents, and
+    /// lets it take the mouse first: for menus, popovers and dialogs. Its layout is unchanged;
+    /// combine it with `absolute`.
+    + fn deferred() SELF { this.style.on_top = true; return this }
+
+    // Painting
+    + fn bg(color: Color) SELF { this.style.background = color; return this }
+    /// The border width on every side; `border_color` sets the color.
+    + fn border(width: f32) SELF { this.style.border_widths = Edges.all(width); return this }
+    + fn border_t(width: f32) SELF { this.style.border_widths.top = width; return this }
+    + fn border_r(width: f32) SELF { this.style.border_widths.right = width; return this }
+    + fn border_b(width: f32) SELF { this.style.border_widths.bottom = width; return this }
+    + fn border_l(width: f32) SELF { this.style.border_widths.left = width; return this }
+    + fn border_color(color: Color) SELF { this.style.border_tint = color; return this }
+    /// The corner radius.
+    + fn rounded(radius: f32) SELF { this.style.radius = radius; return this }
+    /// Corners as round as the element allows: a pill, or a circle for a square.
+    + fn rounded_full() SELF { this.style.radius = 100000; return this }
+    + fn shadow(shadow: Shadow) SELF { this.style.box_shadow = shadow; return this }
+    + fn shadow_sm() SELF { this.style.box_shadow = .{ y: 1, blur: 3, color: .{ a: 40 } }; return this }
+    + fn shadow_md() SELF { this.style.box_shadow = .{ y: 4, blur: 10, color: .{ a: 50 } }; return this }
+    + fn shadow_lg() SELF { this.style.box_shadow = .{ y: 10, blur: 24, color: .{ a: 60 } }; return this }
+    + fn shadow_none() SELF { this.style.box_shadow = null; return this }
+    /// Paints the element and its children with this opacity (0 to 1).
+    + fn opacity(value: f32) SELF { this.style.alpha = value; return this }
+    + fn cursor(cursor: Cursor) SELF { this.style.cursor_style = cursor; return this }
+    + fn cursor_pointer() SELF { this.style.cursor_style = .pointer; return this }
+    + fn cursor_text() SELF { this.style.cursor_style = .text; return this }
+
+    // Text, inherited by children
+    + fn text_color(color: Color) SELF { this.style.color = color; return this }
+    + fn text_size(size: f32) SELF { this.style.font_size = size; return this }
+    + fn text_xs() SELF { this.style.font_size = 12; return this }
+    + fn text_sm() SELF { this.style.font_size = 14; return this }
+    + fn text_base() SELF { this.style.font_size = 16; return this }
+    + fn text_lg() SELF { this.style.font_size = 18; return this }
+    + fn text_xl() SELF { this.style.font_size = 20; return this }
+    + fn text_2xl() SELF { this.style.font_size = 24; return this }
+    + fn text_3xl() SELF { this.style.font_size = 30; return this }
+    + fn font_weight(weight: FontWeight) SELF { this.style.weight = weight; return this }
+    + fn font_medium() SELF { this.style.weight = .medium; return this }
+    + fn font_semibold() SELF { this.style.weight = .semibold; return this }
+    + fn font_bold() SELF { this.style.weight = .bold; return this }
+    /// A font family added with `Window.add_font` or `WindowOptions.fonts`.
+    + fn font(name: String) SELF { this.style.font_name = name; return this }
+    /// The line height as a multiple of the text size.
+    + fn line_height(factor: f32) SELF { this.style.leading = factor; return this }
+    + fn text_left() SELF { this.style.text_align = .left; return this }
+    + fn text_center() SELF { this.style.text_align = .center; return this }
+    + fn text_right() SELF { this.style.text_align = .right; return this }
+    /// Keeps text on one line.
+    + fn whitespace_nowrap() SELF { this.style.nowrap = true; return this }
+    /// Keeps text on one line and ends it with "…" when it does not fit.
+    + fn truncate() SELF { this.style.nowrap = true; this.style.ellipsis = true; return this }
+}

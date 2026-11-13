@@ -1,0 +1,113 @@
+use gui
+
+// The examples from the README, kept compiling and working
+
+class ReadmeCounter is gui.Render {
+    count: int (0)
+
+    fn render(win: gui.Window) gui.Div {
+        return gui.div().size_full().center().gap(16).text_xl()
+            .child("Hello, Valk!")
+            .child(gui.div().flex().items_center().gap(12)
+                .child(gui.button(win, "−").w(40).on_click(fn(e) { this.count-- }))
+                .child(gui.div().w(60).text_center().child("%{this.count}"))
+                .child(gui.button_primary(win, "+").id("increment").w(40).on_click(fn(e) { this.count++ })))
+    }
+}
+
+class Editor is gui.Render {
+    focus: ?gui.FocusHandle (null)
+    saved: uint (0)
+    typed: String ("")
+
+    fn save() { this.saved++ }
+    fn insert(text: String) { this.typed += text }
+
+    fn render(win: gui.Window) gui.Div {
+        let focus = this.focus ?? win.focus_handle()
+        this.focus = focus
+        return gui.div().track_focus(focus)
+            .focus(fn(s) { s.border_color(win.theme.accent) })
+            .on_key_down(fn(e) {
+                if e.key == .s && e.modifiers.secondary : this.save()
+            })
+            .on_input(fn(text) { this.insert(text) })
+    }
+}
+
+class Login is gui.Render {
+    name: gui.TextInput (gui.TextInput.new("Your name"))
+    greeted: String ("")
+
+    fn render(win: gui.Window) gui.Div {
+        this.name.on_submit = fn(text: String) { this.greeted = "Hello " + text }
+        return gui.div().p(20).gap(10)
+            .child(this.name.render(win))
+            .child(gui.button_primary(win, "Continue").on_click(fn(e) { println(this.name.text) }))
+    }
+}
+
+class Files is gui.Render {
+    files: Array[String] (.{ "a.txt", "b.txt" })
+
+    fn render(win: gui.Window) gui.Div {
+        let gray = gui.rgb(0x333333)
+        let light_gray = gray.lighten(0.2)
+        let dark_gray = gray.darken(0.2)
+        let blue = gui.rgb(0x3b82f6)
+        let selected = true
+        return gui.div()
+            .child(gui.div().flex().items_center().gap(8).px(12).h(40)
+                .bg(gui.rgb(0x2b2d31)).rounded(8).border(1).border_color(gui.rgb(0x45474f))
+                .text_sm().font_medium().text_color(gui.white())
+                .child(gui.div().size(16).rounded_full().bg(gui.rgb(0x22c55e)))
+                .child("Online"))
+            .child(gui.div().bg(gray)
+                .hover(fn(s) { s.bg(light_gray) })
+                .active(fn(s) { s.bg(dark_gray) })
+                .when(selected, fn(d) { d.border(2).border_color(blue) }))
+            .child(gui.uniform_list(win, "files", this.files.length, 28, fn(i) {
+                return gui.div().px(8).child(this.files[i])
+            }).flex_1())
+            .child(gui.canvas(fn(p, b) {
+                p.fill(b, gui.rgb(0x1e1f22), 6)
+                p.line(b.x, b.bottom, b.right, b.y, gui.rgb(0x3b82f6), 2)
+                p.circle(b.center.x, b.center.y, 10, gui.white())
+                p.text(b.x + 8, b.y + 8, "Chart", gui.white(), 14)
+            }).h(100))
+            .child(gui.div().font("mono").child("let x = 1"))
+    }
+}
+
+test "README: the counter counts" {
+    let app = ReadmeCounter{}
+    let win = gui.headless(app, 480, 320)
+    win.click_on("increment")
+    assert(app.count == 1)
+    assert(win.scene.has_text("1"))
+    win.press(.tab)
+    win.type_text("hello")
+}
+
+test "README: focus, keys and the text input" {
+    let editor = Editor{}
+    let win = gui.headless(editor, 300, 200)
+    win.click(10, 10)
+    win.type_text("abc")
+    win.press(.s, .{ ctrl: true, cmd: true })
+    assert(editor.typed == "abc" && editor.saved == 1)
+
+    let login = Login{}
+    let win2 = gui.headless(login, 300, 200)
+    win2.press(.tab)
+    win2.type_text("Ada")
+    win2.press(.enter)
+    assert(login.greeted == "Hello Ada")
+}
+
+test "README: styles, lists and drawing" {
+    let win = gui.headless(Files{}, 400, 400)
+    assert(win.scene.has_text("Online") && win.scene.has_text("b.txt") && win.scene.has_text("Chart"))
+    let options = gui.WindowOptions{ fonts: .{ .{ name: "mono", path: "fonts/JetBrainsMono-Regular.ttf" } } }
+    assert(options.fonts.length == 1)
+}

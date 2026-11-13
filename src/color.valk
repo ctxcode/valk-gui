@@ -1,0 +1,75 @@
+
+/// An RGBA color, 8 bits per channel.
++ struct Color {
+    + r: u8 (0)
+    + g: u8 (0)
+    + b: u8 (0)
+    + a: u8 (255)
+
+    /// The same color with its alpha set to `alpha` (0 to 1).
+    + fn opacity(alpha: f32) Color {
+        return .{ r: this.r, g: this.g, b: this.b, a: channel(alpha * 255) }
+    }
+
+    /// The color with its alpha multiplied by `factor` (0 to 1).
+    + fn fade(factor: f32) Color {
+        return .{ r: this.r, g: this.g, b: this.b, a: channel(this.a.to(f32) * factor) }
+    }
+
+    /// The color `t` of the way to `other` (0 gives this color, 1 gives `other`).
+    + fn mix(other: Color, t: f32) Color {
+        return .{
+            r: mix_channel(this.r, other.r, t), g: mix_channel(this.g, other.g, t),
+            b: mix_channel(this.b, other.b, t), a: mix_channel(this.a, other.a, t)
+        }
+    }
+
+    /// The color mixed with white by `amount` (0 to 1).
+    + fn lighten(amount: f32) Color { return this.mix(.{ r: 255, g: 255, b: 255, a: this.a }, amount) }
+
+    /// The color mixed with black by `amount` (0 to 1).
+    + fn darken(amount: f32) Color { return this.mix(.{ r: 0, g: 0, b: 0, a: this.a }, amount) }
+
+    + fn is_transparent() bool { return this.a == 0 }
+}
+
+/// A color from a hex number such as `0x3b82f6`, fully opaque.
++ fn rgb(hex: u32) Color {
+    return .{ r: ((hex >> 16) & 0xff).to(u8), g: ((hex >> 8) & 0xff).to(u8), b: (hex & 0xff).to(u8), a: 255 }
+}
+
+/// A color from a hex number with alpha in the lowest byte, such as `0x3b82f680`.
++ fn rgba(hex: u32) Color {
+    return .{ r: ((hex >> 24) & 0xff).to(u8), g: ((hex >> 16) & 0xff).to(u8), b: ((hex >> 8) & 0xff).to(u8), a: (hex & 0xff).to(u8) }
+}
+
+/// A color from hue (0 to 360), saturation, lightness and alpha (0 to 1).
++ fn hsla(h: f32, s: f32, l: f32, a: f32) Color {
+    let hue = h - floor32(h / 360) * 360
+    let c = (1 - (2 * l - 1).abs()) * s
+    let hp = hue / 60
+    let x = c * (1 - ((hp - floor32(hp / 2) * 2) - 1).abs())
+    let r: f32 = 0
+    let g: f32 = 0
+    let b: f32 = 0
+    if hp < 1 { r = c; g = x }
+    else if hp < 2 { r = x; g = c }
+    else if hp < 3 { g = c; b = x }
+    else if hp < 4 { g = x; b = c }
+    else if hp < 5 { r = x; b = c }
+    else { r = c; b = x }
+    let m = l - c / 2
+    return .{ r: channel((r + m) * 255), g: channel((g + m) * 255), b: channel((b + m) * 255), a: channel(a * 255) }
+}
+
++ fn white() Color { return .{ r: 255, g: 255, b: 255 } }
++ fn black() Color { return .{ r: 0, g: 0, b: 0 } }
++ fn transparent() Color { return .{ r: 0, g: 0, b: 0, a: 0 } }
+
+fn channel(v: f32) u8 {
+    return round32(clamp32(v, 0, 255)).to(u8)
+}
+
+fn mix_channel(a: u8, b: u8, t: f32) u8 {
+    return channel(a.to(f32) + (b.to(f32) - a.to(f32)) * t)
+}

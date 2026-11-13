@@ -1,0 +1,221 @@
+use gui
+
+test "Layout: row with fixed children and gap" {
+    let win = gui.headless(view(fn(win) {
+        return gui.div().flex().p(10).gap(5)
+            .child(gui.div().id("a").w(50).h(20))
+            .child(gui.div().id("b").w(50).h(20))
+            .child(gui.div().id("c").w(50).h(20))
+    }), 300, 100)
+    assert(box(bounds(win, "a"), 10, 10, 50, 20))
+    assert(box(bounds(win, "b"), 65, 10, 50, 20))
+    assert(box(bounds(win, "c"), 120, 10, 50, 20))
+}
+
+test "Layout: flex_1 shares the free space" {
+    let win = gui.headless(view(fn(win) {
+        return gui.div().flex().gap(10)
+            .child(gui.div().id("a").flex_1())
+            .child(gui.div().id("b").flex_1())
+            .child(gui.div().id("c").w(40))
+    }), 300, 100)
+    assert(box(bounds(win, "a"), 0, 0, 120, 100))
+    assert(box(bounds(win, "b"), 130, 0, 120, 100))
+    assert(box(bounds(win, "c"), 260, 0, 40, 100))
+}
+
+test "Layout: max width stops growth, the rest goes to siblings" {
+    let win = gui.headless(view(fn(win) {
+        return gui.div().flex()
+            .child(gui.div().id("a").flex_1().max_w(50))
+            .child(gui.div().id("b").flex_1())
+    }), 300, 100)
+    assert(box(bounds(win, "a"), 0, 0, 50, 100))
+    assert(box(bounds(win, "b"), 50, 0, 250, 100))
+}
+
+test "Layout: columns stretch children and stack them" {
+    let win = gui.headless(view(fn(win) {
+        return gui.div().p(8).gap(4)
+            .child(gui.div().id("a").h(30))
+            .child(gui.div().id("b").h(30).mx(10))
+    }), 200, 200)
+    assert(box(bounds(win, "a"), 8, 8, 184, 30))
+    assert(box(bounds(win, "b"), 18, 42, 164, 30))
+}
+
+test "Layout: justify and align" {
+    let win = gui.headless(view(fn(win) {
+        return gui.div()
+            .child(gui.div().id("between").flex().justify_between().h(50)
+                .child(gui.div().id("b1").size(10))
+                .child(gui.div().id("b2").size(10))
+                .child(gui.div().id("b3").size(10)))
+            .child(gui.div().id("centered").flex().center().h(50)
+                .child(gui.div().id("c1").size(10)))
+            .child(gui.div().flex().justify_end().items_end().h(50)
+                .child(gui.div().id("e1").size(10)))
+    }), 100, 150)
+    assert(box(bounds(win, "b1"), 0, 0, 10, 10))
+    assert(box(bounds(win, "b2"), 45, 0, 10, 10))
+    assert(box(bounds(win, "b3"), 90, 0, 10, 10))
+    assert(box(bounds(win, "c1"), 45, 70, 10, 10))
+    assert(box(bounds(win, "e1"), 90, 140, 10, 10))
+}
+
+test "Layout: fractions of the parent" {
+    let win = gui.headless(view(fn(win) {
+        return gui.div().flex().p(10)
+            .child(gui.div().id("half").w_frac(0.5).h_frac(0.5))
+    }), 220, 120)
+    assert(box(bounds(win, "half"), 10, 10, 100, 50))
+}
+
+test "Layout: content sizes with padding and text" {
+    // Headless text: 7 px per character at the default 14 px, lines of 20 px
+    let win = gui.headless(view(fn(win) {
+        return gui.div().flex().items_start()
+            .child(gui.div().id("chip").p(8).child("hello"))
+    }), 300, 100)
+    assert(box(bounds(win, "chip"), 0, 0, 51, 36))
+}
+
+test "Layout: text wraps at the available width" {
+    let win = gui.headless(view(fn(win) {
+        return gui.div().items_start()
+            .child(gui.div().id("narrow").w(60).child("aaaa bbbb cccc"))
+            .child(gui.div().id("wide").w(200).child("aaaa bbbb cccc"))
+    }), 300, 200)
+    assert(box(bounds(win, "narrow"), 0, 0, 60, 60))
+    assert(box(bounds(win, "wide"), 0, 60, 200, 20))
+    assert(win.scene.texts() == .{ "aaaa", "bbbb", "cccc", "aaaa bbbb cccc" })
+}
+
+test "Layout: wrapped text in a row next to a fixed sibling" {
+    let win = gui.headless(view(fn(win) {
+        return gui.div().flex().items_start()
+            .child(gui.div().id("icon").size(20).flex_shrink_0())
+            .child(gui.div().id("label").flex_1().child("one two three four"))
+    }), 100, 200)
+    // 80 px left: "one two" (49) fits, "one two three" (91) does not
+    assert(box(bounds(win, "label"), 20, 0, 80, 40))
+    assert(win.scene.texts() == .{ "one two", "three four" })
+}
+
+test "Layout: truncate ends long text with an ellipsis" {
+    let win = gui.headless(view(fn(win) {
+        return gui.div().child(gui.div().w(70).truncate().child("abcdefghijklmnop"))
+    }), 300, 100)
+    assert(win.scene.texts() == .{ "abcdefghi…" })
+}
+
+test "Layout: nested auto sizes" {
+    let win = gui.headless(view(fn(win) {
+        return gui.div().flex().items_start()
+            .child(gui.div().id("outer").p(4).flex().gap(2)
+                .child(gui.div().id("x").p(2).child("ab"))
+                .child(gui.div().id("y").size(10)))
+    }), 300, 100)
+    // x: 14 + 4 wide, 20 + 4 high; outer: 18 + 2 + 10 + 8 wide
+    assert(box(bounds(win, "x"), 4, 4, 18, 24))
+    assert(box(bounds(win, "y"), 24, 4, 10, 10))
+    assert(box(bounds(win, "outer"), 0, 0, 38, 32))
+}
+
+test "Layout: absolute children are placed by their insets" {
+    let win = gui.headless(view(fn(win) {
+        return gui.div().p(10)
+            .child(gui.div().id("flow").h(30))
+            .child(gui.div().id("badge").absolute().top(5).right(5).size(20))
+            .child(gui.div().id("cover").absolute().inset(0))
+    }), 300, 100)
+    assert(box(bounds(win, "flow"), 10, 10, 280, 30))
+    assert(box(bounds(win, "badge"), 275, 5, 20, 20))
+    assert(box(bounds(win, "cover"), 0, 0, 300, 100))
+}
+
+test "Layout: hidden children take no space" {
+    let win = gui.headless(view(fn(win) {
+        return gui.div().flex()
+            .child(gui.div().id("a").w(30).hidden())
+            .child(gui.div().id("b").w(30))
+    }), 300, 100)
+    assert(box(bounds(win, "b"), 0, 0, 30, 100))
+}
+
+test "Layout: flex children shrink, but not below their content" {
+    let win = gui.headless(view(fn(win) {
+        return gui.div().flex().items_start()
+            .child(gui.div().id("a").w(80).h(10))
+            .child(gui.div().id("b").w(80).h(10))
+            .child(gui.div().id("word").child("unbreakable"))
+    }), 120, 100)
+    // "unbreakable" is 77 px and keeps it; the two boxes shrink equally into the remaining 43
+    assert(same(bounds(win, "word").w, 77))
+    assert(same(bounds(win, "a").w, 21.5))
+    assert(same(bounds(win, "b").x, 21.5))
+}
+
+test "Layout: a scroll container keeps its size and offsets its children" {
+    let win = gui.headless(view(fn(win) {
+        let list = gui.div().id("list").h(100).overflow_y_scroll()
+        each 0 .. 10 as i : list.child(gui.div().id("row%i").h(30).flex_shrink_0())
+        return gui.div().child(list)
+    }), 200, 300)
+    assert(box(bounds(win, "list"), 0, 0, 200, 100))
+    assert(box(bounds(win, "row9"), 0, 270, 200, 30))
+    win.scroll_at(50, 50, 0, 50)
+    assert(same(bounds(win, "row0").y, -50))
+    // Clamped at the end
+    win.scroll_at(50, 50, 0, 1000)
+    assert(same(bounds(win, "row9").y, 70))
+    win.scroll_at(50, 50, 0, -2000)
+    assert(same(bounds(win, "row0").y, 0))
+}
+
+test "Layout: a flex_1 scroll area fills the rest of a column" {
+    let win = gui.headless(view(fn(win) {
+        let list = gui.div().id("list").flex_1().overflow_y_scroll()
+        each 0 .. 20 as i : list.child(gui.div().h(30))
+        return gui.div()
+            .child(gui.div().id("header").h(40))
+            .child(list)
+            .child(gui.div().id("footer").h(20))
+    }), 200, 300)
+    assert(box(bounds(win, "list"), 0, 40, 200, 240))
+    assert(box(bounds(win, "footer"), 0, 280, 200, 20))
+}
+
+test "Layout: only what is inside a scroll container is painted" {
+    let win = gui.headless(view(fn(win) {
+        let list = gui.div().h(100).overflow_y_scroll()
+        each 0 .. 50 as i : list.child(gui.div().h(30).flex_shrink_0().child("row %i"))
+        return gui.div().child(list)
+    }), 200, 300)
+    assert(win.scene.texts() == .{ "row 0", "row 1", "row 2", "row 3" })
+}
+
+test "Layout: uniform_list builds only the visible rows" {
+    let built = Array[uint]{}
+    let win = gui.headless(view(fn(win) {
+        return gui.div().p(10).child(gui.uniform_list(win, "items", 100000, 25, fn(i) {
+            built.append(i)
+            return gui.div().child("item %i")
+        }).flex_1())
+    }), 200, 120)
+    // The first frame does not know the list's height yet; the second does
+    win.draw()
+    built.clear()
+    win.draw()
+    assert(built == .{ 0, 1, 2, 3, 4 })
+    assert(win.scene.texts() == .{ "item 0", "item 1", "item 2", "item 3" })
+    win.scroll_at(50, 50, 0, 1000)
+    assert(win.scene.texts() == .{ "item 40", "item 41", "item 42", "item 43" })
+    let b = bounds(win, "items/40")
+    assert(same(b.y, 10) && same(b.h, 25))
+    // To the end
+    win.scroll_at(50, 50, 0, 100000000)
+    assert(win.scene.has_text("item 99999"))
+    let last = bounds(win, "items/99999")
+    assert(same(last.y + last.h, 110))
+}

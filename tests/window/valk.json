@@ -1,0 +1,14 @@
+{
+    "src": ".",
+    "dependencies": {
+        "gui": {
+            "src": "../../"
+        },
+        "raylib": {
+            "src": "github.com/ctxcode/valk-raylib",
+            "version": "0.1.x",
+            "current": "0.1.4",
+            "current_hash": "bf9c486ff1f834597ba424f5061bbaac60c87dcc"
+        }
+    }
+}

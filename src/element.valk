@@ -1,0 +1,168 @@
+
+enum NodeKind { div, text, canvas, image }
+
+/// Something that draws itself as an element tree. The root of a window is one, and so is
+/// every component with state of its own.
++ interface Render {
+    fn render(win: Window) Div;
+}
+
+/// The element everything is built from: a box with a style, children, and event handlers.
+/// `text`, `canvas` and `img` make the other kinds.
++ class Div {
+    + style: Style (Style{})
+    ~+ child_nodes: Array[Div] (.{})
+    ~+ name: ?String (null)
+    ~+ kind: NodeKind (.div)
+    ~+ content: String ("")
+    painter: ?fn(Painter, Bounds)() (null)
+
+    // Handlers and state styles
+    hover_style: ?fn(Style)() (null)
+    active_style: ?fn(Style)() (null)
+    focus_style: ?fn(Style)() (null)
+    focus_handle: ?FocusHandle (null)
+    on_mouse_down_fn: ?fn(MouseEvent)() (null)
+    on_mouse_up_fn: ?fn(MouseEvent)() (null)
+    on_click_fn: ?fn(MouseEvent)() (null)
+    on_mouse_move_fn: ?fn(MouseEvent)() (null)
+    on_drag_fn: ?fn(MouseEvent)() (null)
+    on_scroll_fn: ?fn(ScrollEvent)() (null)
+    on_key_down_fn: ?fn(KeyEvent)() (null)
+    on_input_fn: ?fn(String)() (null)
+
+    // Filled in every frame
+    ~+ key: u64 (0)
+    ~+ parent: ?Div (null)
+    ~+ bounds: Bounds (.{})
+    ~+ content_w: f32 (0)
+    ~+ content_h: f32 (0)
+    ~+ scroll_x: f32 (0)
+    ~+ scroll_y: f32 (0)
+    resolved_font: ResolvedFont (.{})
+    resolved_color: Color (.{})
+    text_align: TextAlign (.left)
+    nowrap: bool (false)
+    ellipsis: bool (false)
+    // null when the text is one line
+    lines: ?Array[String] (null)
+    cache: ?Array[LayoutCache] (null)
+    natural_w: f32 (-1)
+
+    use Styled
+
+    /// Names the element. An id keeps the element's scroll position and pressed state while
+    /// the tree around it changes, and lets tests find it with `Window.bounds_of`.
+    + fn id(name: String) SELF { this.name = name; return this }
+
+    /// Adds a child element, or a text when given a `String`.
+    + fn child(item: Div | String) SELF {
+        match item {
+            Div as d => this.child_nodes.append(d)
+            String as s => this.child_nodes.append(text(s))
+        }
+        return this
+    }
+
+    + fn children(items: Array[Div]) SELF {
+        each items as item : this.child_nodes.append(item)
+        return this
+    }
+
+    /// Calls `build` with the element when `condition` holds, for styles that depend on state.
+    + fn when(condition: bool, build: fn(Div)()) SELF {
+        if condition : build(this)
+        return this
+    }
+
+    /// Style changes while the mouse is over the element.
+    + fn hover(refine: fn(Style)()) SELF { this.hover_style = refine; return this }
+    /// Style changes while the mouse button is held on the element.
+    + fn active(refine: fn(Style)()) SELF { this.active_style = refine; return this }
+    /// Style changes while the element's focus handle has focus.
+    + fn focus(refine: fn(Style)()) SELF { this.focus_style = refine; return this }
+
+    /// Makes the element focusable: clicking it focuses `handle`, Tab moves to it, and its key
+    /// handlers receive key presses while it is focused.
+    + fn track_focus(handle: FocusHandle) SELF { this.focus_handle = handle; return this }
+
+    + fn on_mouse_down(handler: fn(MouseEvent)()) SELF { this.on_mouse_down_fn = handler; return this }
+    + fn on_mouse_up(handler: fn(MouseEvent)()) SELF { this.on_mouse_up_fn = handler; return this }
+    /// Runs when the left button is pressed and released on the element. Only the innermost
+    /// element with a click handler runs.
+    + fn on_click(handler: fn(MouseEvent)()) SELF { this.on_click_fn = handler; return this }
+    + fn on_mouse_move(handler: fn(MouseEvent)()) SELF { this.on_mouse_move_fn = handler; return this }
+    /// Runs on every mouse move while the button that was pressed on the element is held, also
+    /// when the mouse is outside it.
+    + fn on_drag(handler: fn(MouseEvent)()) SELF { this.on_drag_fn = handler; return this }
+    + fn on_scroll(handler: fn(ScrollEvent)()) SELF { this.on_scroll_fn = handler; return this }
+    /// Runs for key presses while the element, or one of its children, has focus. The root
+    /// element also receives them when nothing has focus.
+    + fn on_key_down(handler: fn(KeyEvent)()) SELF { this.on_key_down_fn = handler; return this }
+    /// Runs with typed text while the element, or one of its children, has focus.
+    + fn on_input(handler: fn(String)()) SELF { this.on_input_fn = handler; return this }
+    /// The text of a text element.
+    + get text: String { return this.content }
+
+    + fn is_focusable() bool { return isset(this.focus_handle) }
+
+    fn has_mouse_handlers() bool {
+        return isset(this.on_mouse_down_fn) || isset(this.on_mouse_up_fn) || isset(this.on_click_fn) || isset(this.on_drag_fn)
+    }
+}
+
+/// A new empty element.
++ fn div() Div { return Div{} }
+
+/// A text element. It takes its color, size and weight from its parents unless set on it.
++ fn text(content: String) Div {
+    let d = Div{ kind: .text }
+    d.content = content
+    return d
+}
+
+/// An element that paints itself with `paint`, which gets the element's bounds. Give it a size.
++ fn canvas(paint: fn(Painter, Bounds)()) Div {
+    let d = Div{ kind: .canvas }
+    d.painter = paint
+    return d
+}
+
+/// An image from a file (PNG, JPG, BMP, QOI). It is as large as the image unless sized.
++ fn img(path: String) Div {
+    let d = Div{ kind: .image }
+    d.content = path
+    return d
+}
+
+/// The style the element uses this frame: its own with the state refinements applied.
+fn apply_state_styles(d: Div, hovered: bool, active: bool, focused: bool) {
+    if !hovered && !active && !focused : return
+    let s = d.style
+    if hovered {
+        let f = d.hover_style
+        if isset(f) {
+            s = copy s
+            f(s)
+        }
+    }
+    if focused {
+        let f = d.focus_style
+        if isset(f) {
+            if s == d.style : s = copy s
+            f(s)
+        }
+    }
+    if active {
+        let f = d.active_style
+        if isset(f) {
+            if s == d.style : s = copy s
+            f(s)
+        }
+    }
+    d.style = s
+}
+
+fn has_state_styles(d: Div) bool {
+    return isset(d.hover_style) || isset(d.active_style) || isset(d.focus_style)
+}

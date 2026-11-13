@@ -1,0 +1,22 @@
+/// A scrolling list of `count` rows of equal height that only builds the rows in view, so it
+/// stays fast with any number of rows. `row` builds the row at an index. `id` names the list;
+/// it must be unique in the window.
++ fn uniform_list(win: Window, id: String, count: uint, row_height: f32, row: fn(uint)(Div)) Div {
+    let scroll: f32 = 0
+    let viewport = win.height
+    let prev = win.find(id)
+    if isset(prev) {
+        scroll = prev.scroll_y
+        viewport = prev.bounds.inset(prev.style.padding.add(prev.style.border_widths)).h
+    }
+    let first = floor32(scroll / row_height).to(uint).min(count)
+    let last = (first + ceil32(viewport / row_height).to(uint) + 1).min(count)
+    let list = div().id(id).overflow_y_scroll()
+        .child(div().h(first.to(f32) * row_height).flex_shrink_0())
+    each first .. last - first as i {
+        let r = row(i).h(row_height).flex_shrink_0()
+        if !isset(r.name) : r.id(id + "/" + i)
+        list.child(r)
+    }
+    return list.child(div().h((count - last).to(f32) * row_height).flex_shrink_0())
+}

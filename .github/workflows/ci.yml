@@ -1,0 +1,53 @@
+name: ci
+
+on:
+  push:
+    branches: [ main ]
+    paths-ignore:
+      - '**/*.md'
+  pull_request:
+    branches: [ main ]
+
+env:
+  VALK_VERSION: "0.8.7"
+  RAYLIB_VERSION: "6.0"
+
+jobs:
+  test:
+    name: "Test on linux-x64"
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install vman
+        run: |
+          curl -fL -o vman.tar.gz https://files.valk-cdn.dev/releases/vman/vman-linux-x64.tar.gz
+          mkdir -p "$HOME/vman"
+          tar -xf vman.tar.gz -C "$HOME/vman"
+          echo "$HOME/vman/bin" >> "$GITHUB_PATH"
+          echo "$HOME/.vman/bin" >> "$GITHUB_PATH"
+
+      - name: Install valk and the dependencies
+        run: |
+          vman use "$VALK_VERSION"
+          vman install
+
+      # raylib's own build of the library; Xvfb and Mesa give the window test a display
+      - name: Install raylib
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libx11-6 xvfb libgl1-mesa-dri
+          make raylib
+
+      - name: Run the tests
+        run: make test
+
+      - name: Run the window test
+        run: xvfb-run -a -s "-screen 0 1280x720x24" make test-window
+
+      - name: Check that the api docs match the source
+        run: |
+          make docs
+          git diff --exit-code docs || { echo "The api docs are out of date, run 'make docs'"; exit 1; }

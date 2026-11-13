@@ -1,0 +1,96 @@
+use gui
+
+class Task {
+    title: String
+    done: bool (false)
+}
+
+class TodoApp is gui.Render {
+    tasks: Array[Task] (.{})
+    input: gui.TextInput (gui.TextInput.new("What needs to be done?"))
+    filter: String ("All")
+    dark: bool (true)
+
+    fn add() {
+        let title = this.input.text.trim()
+        if title.length == 0 : return
+        this.tasks.append(Task{ title: title })
+        this.input.set_text("")
+    }
+
+    fn render(win: gui.Window) gui.Div {
+        win.theme = this.dark ? gui.Theme.dark() : gui.Theme.light()
+        let t = win.theme
+        this.input.on_submit = fn(text: String) { this.add() }
+
+        let sidebar = gui.div().w(180).flex_shrink_0().p(12).gap(4).bg(t.surface).border_r(1).border_color(t.border)
+            .child(gui.div().px(8).pb(8).text_xs().font_semibold().text_color(t.muted).child("FILTER"))
+        each Array[String]{ "All", "Open", "Done" } as name {
+            let selected = this.filter == name
+            sidebar.child(gui.div().id("filter-" + name).flex().justify_between().px(8).py(6).rounded(t.radius).cursor_pointer()
+                .when(selected, fn(d) { d.bg(t.elevated).font_medium() })
+                .hover(fn(s) { s.bg(t.elevated) })
+                .on_click(fn(e) { this.filter = name })
+                .child(name)
+                .child(gui.div().text_color(t.muted).child("%{this.count(name)}")))
+        }
+        sidebar.child(gui.div().flex_1())
+            .child(gui.div().flex().items_center().justify_between().px(8)
+                .child("Dark")
+                .child(gui.switch(win, this.dark).id("theme").on_click(fn(e) { this.dark = !this.dark })))
+
+        let list = gui.div().id("list").flex_1().overflow_y_scroll().gap(2)
+        each this.tasks as task, i {
+            if this.filter == "Open" && task.done : continue
+            if this.filter == "Done" && !task.done : continue
+            list.child(gui.div().id("task-%i").flex().items_center().gap(10).px(10).py(8).rounded(t.radius)
+                .hover(fn(s) { s.bg(t.surface) })
+                .child(gui.checkbox(win, task.done, "").on_click(fn(e) { task.done = !task.done }))
+                .child(gui.div().flex_1().truncate().when(task.done, fn(d) { d.text_color(t.muted) }).child(task.title))
+                .child(gui.div().px(8).py(2).rounded(4).text_color(t.muted).cursor_pointer()
+                    .hover(fn(s) { s.text_color(t.danger).bg(t.danger.opacity(0.12)) })
+                    .on_click(fn(e) { this.tasks.remove_value(task) })
+                    .child("Delete")))
+        }
+        if this.tasks.length == 0 {
+            list.child(gui.div().flex_1().center().text_color(t.muted).child("Nothing to do yet"))
+        }
+
+        let done = this.count("Done")
+        let main = gui.div().flex_1().p(20).gap(14)
+            .child(gui.div().text_2xl().font_bold().child("Tasks"))
+            .child(gui.div().flex().gap(8)
+                .child(gui.div().flex_1().child(this.input.render(win)))
+                .child(gui.button_primary(win, "Add").id("add").on_click(fn(e) { this.add() })))
+            .child(list)
+            .child(gui.div().gap(6)
+                .child(gui.div().flex().justify_between().text_sm().text_color(t.muted)
+                    .child("%done of %{this.tasks.length} done")
+                    .child(gui.div().cursor_pointer().hover(fn(s) { s.text_color(t.text) })
+                        .on_click(fn(e) { this.tasks.remove_where(fn(task) { return task.done }) })
+                        .child("Clear done")))
+                .child(gui.progress(win, this.tasks.length == 0 ? 0 : done.to(f32) / this.tasks.length.to(f32))))
+
+        return gui.div().size_full().flex().bg(t.background).text_color(t.text)
+            .child(sidebar)
+            .child(main)
+    }
+
+    fn count(filter: String) uint {
+        let n: uint = 0
+        each this.tasks as task {
+            if filter == "All" || (filter == "Done" && task.done) || (filter == "Open" && !task.done) : n++
+        }
+        return n
+    }
+}
+
+fn main() {
+    let app = TodoApp{}
+    each Array[String]{ "Write the layout engine", "Hook up raylib", "Add a text input", "Ship valk-gui" } as title {
+        app.tasks.append(Task{ title: title })
+    }
+    app.tasks[0].done = true
+    app.tasks[1].done = true
+    gui.run(app, .{ title: "Tasks", width: 760, height: 520 })
+}

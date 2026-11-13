@@ -1,0 +1,766 @@
+
+/// A font file for a family used with `Styled.font`.
++ struct FontFile {
+    + name: String
+    + path: String
+    + weight: FontWeight (.normal)
+}
+
+/// How `run` opens the window.
++ class WindowOptions {
+    + title: String ("Valk")
+    + width: i32 (800)
+    + height: i32 (600)
+    + min_width: i32 (200)
+    + min_height: i32 (150)
+    + resizable: bool (true)
+    /// Smooths the edges of shapes.
+    + antialias: bool (true)
+    + theme: Theme (Theme.dark())
+    + fonts: Array[FontFile] (.{})
+    /// Saves the third frame to this PNG file and closes the window, for tests and images.
+    + screenshot: String ("")
+    /// Opens the window hidden.
+    + hidden: bool (false)
+}
+
+/// A window and everything that lives across frames: focus, hover, scroll positions and
+/// the last frame's elements. The root's `render` gets it every frame.
++ class Window {
+    + width: f32
+    + height: f32
+    + theme: Theme
+    + platform: Platform
+    /// What the last frame drew.
+    + scene: Scene (Scene{})
+    /// Seconds since the window opened.
+    ~+ time: f64 (0)
+    ~+ mouse_x: f32 (-1)
+    ~+ mouse_y: f32 (-1)
+    ~+ title: String ("Valk")
+    ~+ focused: ?FocusHandle (null)
+    ~+ cursor: Cursor (.default)
+    ~+ fonts: Array[FontFile] (.{})
+    ~+ quit_requested: bool (false)
+    ~+ frame_requested: bool (false)
+    ~+ title_changed: bool (false)
+    /// Whether the last frame changed hover state, so another frame should follow.
+    ~+ dirty: bool (false)
+    ~+ frames: uint (0)
+
+    - root: Render
+    - tree: ?Div (null)
+    - hover_keys: HashSet[u64] (.{})
+    - pressed_keys: HashSet[u64] (.{})
+    - pressed_key: u64 (0)
+    - pressed_button: ?MouseButton (null)
+    - scroll_state: HashMap[u64, Point] (.{})
+    - clip_stack: Array[Bounds] (.{})
+    - deferred_nodes: Array[Div] (.{})
+    - paint_later: Array[(Div, f32)] (.{})
+    - last_click_time: f64 (-10)
+    - last_click: Point (.{})
+    - click_count: uint (1)
+    - bar_drag_key: u64 (0)
+    - bar_drag_vertical: bool (true)
+    - bar_drag_offset: f32 (0)
+
+    + static fn new(root: Render, width: f32, height: f32, platform: Platform, theme: Theme (Theme.dark())) Window {
+        return Window{ root: root, width: width, height: height, platform: platform, theme: theme }
+    }
+
+    /// A new handle for an element that takes keyboard focus.
+    + fn focus_handle() FocusHandle { return FocusHandle{ window: this } }
+
+    /// Draws another frame after this one, for animations. Without it the window sleeps until
+    /// the next input event.
+    + fn request_frame() { this.frame_requested = true }
+
+    /// Closes the window after this frame.
+    + fn quit() { this.quit_requested = true }
+
+    + fn set_title(title: String) {
+        this.title = title
+        this.title_changed = true
+    }
+
+    /// Adds a font family for `Styled.font`. Add one file per weight that is used; others fall
+    /// back to the closest added weight.
+    + fn add_font(name: String, path: String, weight: FontWeight (.normal)) {
+        this.fonts.append(.{ name: name, path: path, weight: weight })
+    }
+
+    + fn clipboard() String { return this.platform.clipboard() }
+    + fn set_clipboard(text: String) { this.platform.set_clipboard(text) }
+
+    /// The width of `content` in the given font.
+    + fn text_width(content: String, size: f32 (16), weight: FontWeight (.normal), font: String ("")) f32 {
+        return this.platform.text_width(content, .{ name: font, size: size, weight: weight })
+    }
+
+    + fn resize(width: f32, height: f32) {
+        this.width = width
+        this.height = height
+    }
+
+    // ---- Frames ----
+
+    /// Renders the root, lays it out and paints it into `scene`.
+    + fn draw() {
+        this.frames++
+        this.dirty = false
+        let root = this.root.render(this)
+        this.deferred_nodes = Array[Div]{}
+        this.prepare(root, null, 0)
+        let layout = Layout{ platform: this.platform }
+        layout.place(root, 0, 0, this.width, this.height)
+        this.save_scroll(root)
+        this.tree = root
+
+        let hovered = HashSet[u64]{}
+        let hit = this.hit_test(this.mouse_x, this.mouse_y)
+        let cursor: Cursor = .default
+        let found_cursor = false
+        let node = hit
+        while isset(node) {
+            hovered.add(node.key)
+            if !found_cursor {
+                let c = node.style.cursor_style
+                if isset(c) {
+                    cursor = c
+                    found_cursor = true
+                }
+            }
+            node = node.parent
+        }
+        if this.bar_drag_key != 0 : cursor = .default
+        if !hovered.equals(this.hover_keys) : this.dirty = true
+        this.hover_keys = hovered
+        this.cursor = cursor
+
+        this.scene.clear()
+        this.clip_stack.clear()
+        this.paint_later.clear()
+        this.paint(root, 1, false)
+        let i: uint = 0
+        while i < this.paint_later.length {
+            let node, alpha = this.paint_later.get(i) !!
+            this.paint(node, alpha, true)
+            i++
+        }
+    }
+
+    - fn prepare(n: Div, parent: ?Div, index: uint) {
+        n.parent = parent
+        if isset(parent) {
+            let name = n.name
+            let v: u64 = isset(name) ? name.hash().to(u64) : index.to(u64) + 1
+            n.key = mix_key(parent.key, v)
+            n.resolved_font = parent.resolved_font
+            n.resolved_color = parent.resolved_color
+            n.text_align = parent.text_align
+            n.nowrap = parent.nowrap
+            n.ellipsis = parent.ellipsis
+        } else {
+            n.key = 1
+            n.resolved_font = .{ size: this.theme.font_size, line_height: round32(this.theme.font_size * 1.4) }
+            n.resolved_color = this.theme.text
+        }
+        if has_state_styles(n) {
+            let focused = false
+            let fh = n.focus_handle
+            if isset(fh) : focused = fh.is_focused()
+            let active = isset(this.pressed_button) && this.pressed_keys.has(n.key)
+            apply_state_styles(n, this.hover_keys.has(n.key), active, focused)
+        }
+        let s = n.style
+        let size = s.font_size
+        let leading = s.leading
+        if isset(size) || isset(leading) {
+            let fs = size ?? n.resolved_font.size
+            n.resolved_font.size = fs
+            n.resolved_font.line_height = round32(fs * (leading ?? 1.4))
+        }
+        let weight = s.weight
+        if isset(weight) : n.resolved_font.weight = weight
+        let font_name = s.font_name
+        if isset(font_name) : n.resolved_font.name = font_name
+        let color = s.color
+        if isset(color) : n.resolved_color = color
+        let align = s.text_align
+        if isset(align) : n.text_align = align
+        let nowrap = s.nowrap
+        if isset(nowrap) : n.nowrap = nowrap
+        let ellipsis = s.ellipsis
+        if isset(ellipsis) : n.ellipsis = ellipsis
+        if s.overflow_x == .scroll || s.overflow_y == .scroll {
+            let st = this.scroll_state.get(n.key) !? Point{}
+            n.scroll_x = st.x
+            n.scroll_y = st.y
+        }
+        if s.display_none : return
+        if s.on_top : this.deferred_nodes.append(n)
+        each n.child_nodes as child, i : this.prepare(child, n, i)
+    }
+
+    - fn save_scroll(n: Div) {
+        let s = n.style
+        if s.overflow_x == .scroll || s.overflow_y == .scroll {
+            this.scroll_state.set(n.key, .{ x: n.scroll_x, y: n.scroll_y })
+        }
+        each n.child_nodes as child : this.save_scroll(child)
+    }
+
+    // ---- Painting ----
+
+    - fn paint(n: Div, alpha: f32, top: bool) {
+        let s = n.style
+        if s.display_none || !s.visible : return
+        if s.on_top && !top {
+            this.paint_later.append((n, alpha))
+            return
+        }
+        if top {
+            this.clip_stack.clear()
+            this.scene.add(.{ kind: .unclip })
+        }
+        let a = alpha * s.alpha
+        let b = n.bounds
+        // Outside the clip: nothing of it shows, unless children overflow it
+        if this.clip_stack.length > 0 {
+            let clip = this.clip_stack.last() !!
+            if b.x >= clip.right || b.y >= clip.bottom || b.right <= clip.x || b.bottom <= clip.y : return
+        }
+        let radius = s.radius.min(b.w / 2).min(b.h / 2)
+        let shadow = s.box_shadow
+        if isset(shadow) {
+            let sb = Bounds{ x: b.x + shadow.x - shadow.spread, y: b.y + shadow.y - shadow.spread, w: b.w + shadow.spread * 2, h: b.h + shadow.spread * 2 }
+            this.scene.add(.{ kind: .shadow, bounds: sb, color: shadow.color.fade(a), width: shadow.blur, radius: radius + shadow.spread })
+        }
+        let bg = s.background ?? transparent()
+        if !bg.is_transparent() || (!s.border_widths.is_zero() && !s.border_tint.is_transparent()) {
+            this.scene.add(.{ kind: .quad, bounds: b, color: bg.fade(a), border: s.border_widths, border_color: s.border_tint.fade(a), radius: radius })
+        }
+        let inner = b.inset(s.padding.add(s.border_widths))
+        if n.kind == .text {
+            let y = inner.y
+            let lines = n.lines ?? Array[String]{ n.content }
+            each lines as line {
+                let lw = isset(n.lines) ? this.platform.text_width(line, n.resolved_font) : n.natural_w
+                let x = inner.x
+                if n.text_align == .center : x += (inner.w - lw) / 2
+                else if n.text_align == .right : x += inner.w - lw
+                this.scene.add(.{ kind: .text, bounds: .{ x: x, y: y, w: lw, h: n.resolved_font.line_height }, color: n.resolved_color.fade(a), text: line, font: n.resolved_font })
+                y += n.resolved_font.line_height
+            }
+            return
+        }
+        if n.kind == .image {
+            this.scene.add(.{ kind: .image, bounds: inner, color: white().fade(a), text: n.content, radius: radius })
+            return
+        }
+        if n.kind == .canvas {
+            let paint = n.painter
+            if isset(paint) {
+                this.push_clip(b)
+                paint(Painter{ window: this, alpha: a }, b)
+                this.pop_clip()
+            }
+            return
+        }
+        let clips = s.overflow_x != .visible || s.overflow_y != .visible
+        if clips : this.push_clip(b.inset(s.border_widths))
+        each n.child_nodes as child {
+            if child.style.position != .absolute : this.paint(child, a, false)
+        }
+        each n.child_nodes as child {
+            if child.style.position == .absolute : this.paint(child, a, false)
+        }
+        if s.overflow_y == .scroll : this.paint_scrollbar(n, true, a)
+        if s.overflow_x == .scroll : this.paint_scrollbar(n, false, a)
+        if clips : this.pop_clip()
+    }
+
+    - fn paint_scrollbar(n: Div, vertical: bool, alpha: f32) {
+        let thumb = scroll_thumb(n, vertical) ?! return
+        let color = this.theme.text.fade(this.hover_keys.has(n.key) || this.bar_drag_key == n.key ? 0.35 : 0.18)
+        this.scene.add(.{ kind: .quad, bounds: thumb, color: color.fade(alpha), radius: 3 })
+    }
+
+    fn push_clip(b: Bounds) {
+        let clip = b
+        if this.clip_stack.length > 0 : clip = b.intersect(this.clip_stack.last() !! )
+        this.clip_stack.append(clip)
+        this.scene.add(.{ kind: .clip, bounds: clip })
+    }
+
+    fn pop_clip() {
+        this.clip_stack.pop_last() _
+        if this.clip_stack.length > 0 {
+            this.scene.add(.{ kind: .clip, bounds: this.clip_stack.last() !! })
+        } else {
+            this.scene.add(.{ kind: .unclip })
+        }
+    }
+
+    // ---- Hit testing ----
+
+    /// The topmost element at a point in the last frame.
+    + fn hit_test(x: f32, y: f32) ?Div {
+        let root = this.tree ?! return null
+        let screen = Bounds{ w: this.width, h: this.height }
+        let i = this.deferred_nodes.length
+        while i > 0 {
+            i--
+            let found = hit_node(this.deferred_nodes.get(i) !!, x, y, screen, true)
+            if isset(found) : return found
+        }
+        return hit_node(root, x, y, screen, false)
+    }
+
+    /// The element with this `id` in the last frame.
+    + fn find(id: String) ?Div {
+        let root = this.tree ?! return null
+        return find_node(root, id)
+    }
+
+    /// The bounds of the element with this `id` in the last frame.
+    + fn bounds_of(id: String) ?Bounds {
+        let node = this.find(id) ?! return null
+        return node.bounds
+    }
+
+    /// Hover state from the last frame's layout, so the next frame styles what is under the mouse.
+    - fn update_hover() {
+        let hovered = HashSet[u64]{}
+        let node = this.hit_test(this.mouse_x, this.mouse_y)
+        while isset(node) {
+            hovered.add(node.key)
+            node = node.parent
+        }
+        this.hover_keys = hovered
+    }
+
+    - fn node_by_key(key: u64) ?Div {
+        let root = this.tree ?! return null
+        return find_key(root, key)
+    }
+
+    // ---- Input ----
+
+    + fn mouse_move(x: f32, y: f32, modifiers: Modifiers (.{})) {
+        this.mouse_x = x
+        this.mouse_y = y
+        this.update_hover()
+        if this.bar_drag_key != 0 {
+            let node = this.node_by_key(this.bar_drag_key)
+            if isset(node) : this.drag_scrollbar(node, x, y)
+            return
+        }
+        let button = this.pressed_button
+        if isset(button) {
+            let pressed = this.node_by_key(this.pressed_key)
+            let n = pressed
+            while isset(n) {
+                let handler = n.on_drag_fn
+                if isset(handler) {
+                    handler(MouseEvent{ x: x, y: y, button: button, modifiers: modifiers, bounds: n.bounds })
+                    break
+                }
+                n = n.parent
+            }
+        }
+        let e = MouseEvent{ x: x, y: y, modifiers: modifiers }
+        let n = this.hit_test(x, y)
+        while isset(n) {
+            let handler = n.on_mouse_move_fn
+            if isset(handler) {
+                e.bounds = n.bounds
+                handler(e)
+                if e.stopped : break
+            }
+            n = n.parent
+        }
+    }
+
+    + fn mouse_down(x: f32, y: f32, button: MouseButton (.left), modifiers: Modifiers (.{})) {
+        this.mouse_x = x
+        this.mouse_y = y
+        let hit = this.hit_test(x, y)
+        if button == .left && this.start_scrollbar_drag(hit, x, y) : return
+        if this.time - this.last_click_time < 0.4 && (x - this.last_click.x).abs() < 4 && (y - this.last_click.y).abs() < 4 {
+            this.click_count++
+        } else {
+            this.click_count = 1
+        }
+        this.last_click_time = this.time
+        this.last_click = .{ x: x, y: y }
+
+        this.pressed_keys.clear()
+        this.pressed_button = button
+        this.pressed_key = 0
+        let n = hit
+        while isset(n) {
+            this.pressed_keys.add(n.key)
+            if this.pressed_key == 0 && n.has_mouse_handlers() : this.pressed_key = n.key
+            n = n.parent
+        }
+        if this.pressed_key == 0 && isset(hit) : this.pressed_key = hit.key
+
+        // Focus the innermost focusable element, or nothing
+        if button == .left {
+            let target: ?FocusHandle = null
+            n = hit
+            while isset(n) {
+                let fh = n.focus_handle
+                if isset(fh) {
+                    target = fh
+                    break
+                }
+                n = n.parent
+            }
+            this.focused = target
+        }
+
+        let e = MouseEvent{ x: x, y: y, button: button, modifiers: modifiers, click_count: this.click_count }
+        n = hit
+        while isset(n) {
+            let handler = n.on_mouse_down_fn
+            if isset(handler) {
+                e.bounds = n.bounds
+                handler(e)
+                if e.stopped : break
+            }
+            n = n.parent
+        }
+    }
+
+    + fn mouse_up(x: f32, y: f32, button: MouseButton (.left), modifiers: Modifiers (.{})) {
+        this.mouse_x = x
+        this.mouse_y = y
+        if this.bar_drag_key != 0 {
+            this.bar_drag_key = 0
+            this.pressed_button = null
+            return
+        }
+        let hit = this.hit_test(x, y)
+        let e = MouseEvent{ x: x, y: y, button: button, modifiers: modifiers, click_count: this.click_count }
+        let n = hit
+        while isset(n) {
+            let handler = n.on_mouse_up_fn
+            if isset(handler) {
+                e.bounds = n.bounds
+                handler(e)
+                if e.stopped : break
+            }
+            n = n.parent
+        }
+        if button == .left {
+            n = hit
+            while isset(n) {
+                let handler = n.on_click_fn
+                if isset(handler) {
+                    if this.pressed_keys.has(n.key) {
+                        e.bounds = n.bounds
+                        handler(e)
+                    }
+                    break
+                }
+                n = n.parent
+            }
+        }
+        this.pressed_button = null
+        this.pressed_keys.clear()
+        this.pressed_key = 0
+    }
+
+    /// Scrolls by `dx`, `dy` pixels at the mouse position; positive `dy` moves towards the end.
+    + fn scroll(dx: f32, dy: f32, modifiers: Modifiers (.{})) {
+        let e = ScrollEvent{ x: this.mouse_x, y: this.mouse_y, dx: dx, dy: dy, modifiers: modifiers }
+        let n = this.hit_test(this.mouse_x, this.mouse_y)
+        while isset(n) {
+            let handler = n.on_scroll_fn
+            if isset(handler) {
+                e.bounds = n.bounds
+                handler(e)
+                if e.stopped : return
+            }
+            if scroll_by(n, e.dx, e.dy) {
+                this.scroll_state.set(n.key, .{ x: n.scroll_x, y: n.scroll_y })
+                return
+            }
+            n = n.parent
+        }
+    }
+
+    + fn key_down(key: Key, modifiers: Modifiers (.{}), repeat: bool (false)) {
+        let e = KeyEvent{ key: key, modifiers: modifiers, repeat: repeat }
+        let n = this.focused_node()
+        while isset(n) {
+            let handler = n.on_key_down_fn
+            if isset(handler) {
+                handler(e)
+                if e.stopped : return
+            }
+            n = n.parent
+        }
+        if key == .tab : this.focus_next(!modifiers.shift)
+    }
+
+    /// Typed text, delivered to the innermost focused element with an `on_input` handler.
+    + fn input(text: String) {
+        let n = this.focused_node()
+        while isset(n) {
+            let handler = n.on_input_fn
+            if isset(handler) {
+                handler(text)
+                return
+            }
+            n = n.parent
+        }
+    }
+
+    /// The element whose handle has focus, or the root when none has.
+    - fn focused_node() ?Div {
+        let root = this.tree ?! return null
+        let fh = this.focused ?! return root
+        return find_focus(root, fh) ?? root
+    }
+
+    /// Moves the focus to the next (or previous) focusable element in tree order.
+    + fn focus_next(forward: bool (true)) {
+        let root = this.tree ?! return
+        let handles = Array[FocusHandle]{}
+        collect_focusable(root, handles)
+        if handles.length == 0 : return
+        let current = handles.length
+        let fh = this.focused
+        if isset(fh) {
+            each handles as h, i {
+                if h == fh : current = i
+            }
+        }
+        let next: uint = 0
+        if current == handles.length {
+            next = forward ? 0 : handles.length - 1
+        } else if forward {
+            next = (current + 1) % handles.length
+        } else {
+            next = current == 0 ? handles.length - 1 : current - 1
+        }
+        this.focused = handles.get(next) !!
+    }
+
+    - fn start_scrollbar_drag(hit: ?Div, x: f32, y: f32) bool {
+        let n = hit
+        while isset(n) {
+            each Array[bool]{ true, false } as vertical {
+                let thumb = scroll_thumb(n, vertical)
+                if !isset(thumb) : continue
+                let track = vertical ? Bounds{ x: thumb.x - 2, y: n.bounds.y, w: thumb.w + 4, h: n.bounds.h } : Bounds{ x: n.bounds.x, y: thumb.y - 2, w: n.bounds.w, h: thumb.h + 4 }
+                if !track.contains(x, y) : continue
+                this.bar_drag_key = n.key
+                this.bar_drag_vertical = vertical
+                this.pressed_button = .left
+                if thumb.contains(x, y) {
+                    this.bar_drag_offset = vertical ? y - thumb.y : x - thumb.x
+                } else {
+                    this.bar_drag_offset = vertical ? thumb.h / 2 : thumb.w / 2
+                    this.drag_scrollbar(n, x, y)
+                }
+                return true
+            }
+            n = n.parent
+        }
+        return false
+    }
+
+    - fn drag_scrollbar(n: Div, x: f32, y: f32) {
+        let inner = n.bounds.inset(n.style.border_widths)
+        let thumb = scroll_thumb(n, this.bar_drag_vertical) ?! return
+        if this.bar_drag_vertical {
+            let range = inner.h - thumb.h
+            let max = n.content_h - n.bounds.inset(n.style.padding.add(n.style.border_widths)).h
+            if range > 0 : n.scroll_y = clamp32((y - this.bar_drag_offset - inner.y) / range * max, 0, max)
+        } else {
+            let range = inner.w - thumb.w
+            let max = n.content_w - n.bounds.inset(n.style.padding.add(n.style.border_widths)).w
+            if range > 0 : n.scroll_x = clamp32((x - this.bar_drag_offset - inner.x) / range * max, 0, max)
+        }
+        this.scroll_state.set(n.key, .{ x: n.scroll_x, y: n.scroll_y })
+    }
+
+    // ---- Simulated input for tests ----
+
+    + fn move_to(x: f32, y: f32) {
+        this.mouse_move(x, y)
+        this.draw()
+    }
+
+    /// Presses and releases the left button at a point, then draws a frame.
+    + fn click(x: f32, y: f32, modifiers: Modifiers (.{})) {
+        this.mouse_move(x, y)
+        this.draw()
+        this.mouse_down(x, y, .left, modifiers)
+        this.draw()
+        this.mouse_up(x, y, .left, modifiers)
+        this.draw()
+    }
+
+    /// Clicks the center of the element with this `id`; false when there is none.
+    + fn click_on(id: String) bool {
+        let b = this.bounds_of(id) ?! return false
+        this.click(b.x + b.w / 2, b.y + b.h / 2)
+        return true
+    }
+
+    /// Presses a key, then draws a frame.
+    + fn press(key: Key, modifiers: Modifiers (.{})) {
+        this.key_down(key, modifiers)
+        this.draw()
+    }
+
+    /// Types text into the focused element, then draws a frame.
+    + fn type_text(text: String) {
+        this.input(text)
+        this.draw()
+    }
+
+    /// Scrolls at a point, then draws a frame.
+    + fn scroll_at(x: f32, y: f32, dx: f32, dy: f32) {
+        this.mouse_move(x, y)
+        this.scroll(dx, dy)
+        this.draw()
+    }
+
+    /// Drags with the left button from one point to another, then draws a frame.
+    + fn drag(x1: f32, y1: f32, x2: f32, y2: f32) {
+        this.mouse_move(x1, y1)
+        this.draw()
+        this.mouse_down(x1, y1)
+        this.draw()
+        this.mouse_move(x2, y2)
+        this.draw()
+        this.mouse_up(x2, y2)
+        this.draw()
+    }
+}
+
+/// A window without a screen, for tests: `draw` fills `scene`, and `click`, `press`,
+/// `type_text` and the others simulate input. Text is measured as if every character were half
+/// the font size wide.
++ fn headless(root: Render, width: f32 (800), height: f32 (600), theme: Theme (Theme.dark())) Window {
+    let win = Window.new(root, width, height, HeadlessPlatform{}, theme)
+    win.draw()
+    return win
+}
+
+fn mix_key(parent: u64, v: u64) u64 {
+    return (parent ^ v) * 0x100000001b3 + 0x9e3779b97f4a7c15
+}
+
+fn hit_node(n: Div, x: f32, y: f32, clip: Bounds, top: bool) ?Div {
+    let s = n.style
+    if s.display_none || !s.visible || (s.on_top && !top) : return null
+    let b = n.bounds
+    let inside = b.contains(x, y) && clip.contains(x, y)
+    if n.kind != .div : return inside ? n : null
+    let child_clip = clip
+    if s.overflow_x != .visible || s.overflow_y != .visible : child_clip = clip.intersect(b.inset(s.border_widths))
+    let i = n.child_nodes.length
+    while i > 0 {
+        i--
+        let child = n.child_nodes.get(i) !!
+        if child.style.position != .absolute : continue
+        let found = hit_node(child, x, y, child_clip, false)
+        if isset(found) : return found
+    }
+    i = n.child_nodes.length
+    while i > 0 {
+        i--
+        let child = n.child_nodes.get(i) !!
+        if child.style.position == .absolute : continue
+        let found = hit_node(child, x, y, child_clip, false)
+        if isset(found) : return found
+    }
+    return inside ? n : null
+}
+
+fn find_node(n: Div, id: String) ?Div {
+    let name = n.name
+    if isset(name) && name == id : return n
+    each n.child_nodes as child {
+        let found = find_node(child, id)
+        if isset(found) : return found
+    }
+    return null
+}
+
+fn find_key(n: Div, key: u64) ?Div {
+    if n.key == key : return n
+    each n.child_nodes as child {
+        let found = find_key(child, key)
+        if isset(found) : return found
+    }
+    return null
+}
+
+fn find_focus(n: Div, fh: FocusHandle) ?Div {
+    let own = n.focus_handle
+    if isset(own) && own == fh : return n
+    each n.child_nodes as child {
+        let found = find_focus(child, fh)
+        if isset(found) : return found
+    }
+    return null
+}
+
+fn collect_focusable(n: Div, handles: Array[FocusHandle]) {
+    if n.style.display_none : return
+    let fh = n.focus_handle
+    if isset(fh) : handles.append(fh)
+    each n.child_nodes as child : collect_focusable(child, handles)
+}
+
+/// The scrollbar thumb of a scroll container, when its content overflows on that axis.
+fn scroll_thumb(n: Div, vertical: bool) ?Bounds {
+    let s = n.style
+    let inner = n.bounds.inset(s.padding.add(s.border_widths))
+    let track = n.bounds.inset(s.border_widths)
+    if vertical {
+        if s.overflow_y != .scroll || n.content_h <= inner.h + 0.5 : return null
+        let h = (track.h * inner.h / n.content_h).max(24).min(track.h)
+        let max = n.content_h - inner.h
+        let y = track.y + (track.h - h) * n.scroll_y / max
+        return .{ x: track.right - 8, y: y, w: 6, h: h }
+    }
+    if s.overflow_x != .scroll || n.content_w <= inner.w + 0.5 : return null
+    let w = (track.w * inner.w / n.content_w).max(24).min(track.w)
+    let max = n.content_w - inner.w
+    let x = track.x + (track.w - w) * n.scroll_x / max
+    return .{ x: x, y: track.bottom - 8, w: w, h: 6 }
+}
+
+/// Scrolls a scroll container when it can still move in that direction.
+fn scroll_by(n: Div, dx: f32, dy: f32) bool {
+    let s = n.style
+    let inner = n.bounds.inset(s.padding.add(s.border_widths))
+    let moved = false
+    if s.overflow_y == .scroll && dy != 0 {
+        let max = (n.content_h - inner.h).max(0)
+        let next = clamp32(n.scroll_y + dy, 0, max)
+        if next != n.scroll_y {
+            n.scroll_y = next
+            moved = true
+        }
+    }
+    if s.overflow_x == .scroll && dx != 0 {
+        let max = (n.content_w - inner.w).max(0)
+        let next = clamp32(n.scroll_x + dx, 0, max)
+        if next != n.scroll_x {
+            n.scroll_x = next
+            moved = true
+        }
+    }
+    return moved
+}

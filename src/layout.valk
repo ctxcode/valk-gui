@@ -1,0 +1,394 @@
+
+// A flexbox subset: one line per container, sizes in border-box pixels. -1 means unknown.
+
+value UNKNOWN (-1.0)
+value INF (1000000000.0)
+
+struct LayoutCache {
+    iw: f32
+    ih: f32
+    aw: f32
+    ah: f32
+    w: f32
+    h: f32
+}
+
+class FlexItem {
+    node: Div
+    basis: f32 (0)
+    min: f32 (0)
+    max: f32 (INF)
+    hypo: f32 (0)
+    main: f32 (0)
+    cross: f32 (0)
+    known_cross: f32 (UNKNOWN)
+    cross_size: f32 (UNKNOWN)
+    mm_start: f32 (0)
+    mm_end: f32 (0)
+    mc_start: f32 (0)
+    mc_end: f32 (0)
+    align: Align (.stretch)
+    frozen: bool (false)
+}
+
+class Layout {
+    platform: Platform
+
+    /// The border-box size of `n`. `kw`/`kh` are sizes the parent decided, `pw`/`ph` the parent's
+    /// inner size for fractions, `aw`/`ah` the space available.
+    fn measure(n: Div, kw: f32, kh: f32, pw: f32, ph: f32, aw: f32, ah: f32) (f32, f32) {
+        let s = n.style
+        let pad = s.padding.add(s.border_widths)
+        let w = kw
+        let h = kh
+        if w < 0 {
+            w = s.width.resolve(pw)
+            if w >= 0 : w = clamp_size(w, s.min_width, s.max_width, pad.horizontal)
+        }
+        if h < 0 {
+            h = s.height.resolve(ph)
+            if h >= 0 : h = clamp_size(h, s.min_height, s.max_height, pad.vertical)
+        }
+        if w < 0 || h < 0 {
+            let iw = w >= 0 ? (w - pad.horizontal).max(0) : UNKNOWN
+            let ih = h >= 0 ? (h - pad.vertical).max(0) : UNKNOWN
+            let iaw = iw >= 0 ? iw : (aw - pad.horizontal).max(0)
+            let iah = ih >= 0 ? ih : (ah - pad.vertical).max(0)
+            let cw, ch = this.content_size(n, iw, ih, iaw, iah)
+            if w < 0 : w = clamp_size(cw + pad.horizontal, s.min_width, s.max_width, pad.horizontal)
+            if h < 0 : h = clamp_size(ch + pad.vertical, s.min_height, s.max_height, pad.vertical)
+        }
+        return (w, h)
+    }
+
+    /// The size of the content inside the padding, cached per node for the frame.
+    fn content_size(n: Div, iw: f32, ih: f32, aw: f32, ah: f32) (f32, f32) {
+        if n.kind == .div && n.child_nodes.length == 0 : return (0, 0)
+        if n.kind == .text {
+            // Text only depends on the width it may take
+            return this.text_size(n, iw >= 0 ? iw : aw)
+        }
+        let cache = n.cache
+        if isset(cache) {
+            each cache as c {
+                if c.iw == iw && c.ih == ih && c.aw == aw && c.ah == ah : return (c.w, c.h)
+            }
+        }
+        let w, h = this.compute_content(n, iw, ih, aw, ah)
+        remember(n, LayoutCache{ iw: iw, ih: ih, aw: aw, ah: ah, w: w, h: h })
+        return (w, h)
+    }
+
+    - fn compute_content(n: Div, iw: f32, ih: f32, aw: f32, ah: f32) (f32, f32) {
+        if n.kind == .image {
+            let size = this.platform.image_size(n.content)
+            if size.x > 0 && size.y > 0 {
+                if iw >= 0 && ih < 0 : return (iw, iw * size.y / size.x)
+                if ih >= 0 && iw < 0 : return (ih * size.x / size.y, ih)
+            }
+            return (size.x, size.y)
+        }
+        if n.kind == .canvas : return (0, 0)
+        return this.flex(n, iw, ih, aw, ah, false)
+    }
+
+    - fn text_size(n: Div, max: f32) (f32, f32) {
+        let natural = this.natural_width(n)
+        if natural >= 0 && (natural <= max + 0.01 || (n.nowrap && !n.ellipsis)) : return (natural, n.resolved_font.line_height)
+        let cache = n.cache
+        if isset(cache) {
+            each cache as c {
+                if c.aw == max : return (c.w, c.h)
+            }
+        }
+        let widest, count = text_extent(this.platform, n.content, n.resolved_font, max, n.nowrap, n.ellipsis)
+        let h = count.to(f32) * n.resolved_font.line_height
+        remember(n, LayoutCache{ iw: 0, ih: 0, aw: max, ah: 0, w: widest, h: h })
+        return (widest, h)
+    }
+
+    /// The width of a one-line text, -1 for text with line breaks.
+    fn natural_width(n: Div) f32 {
+        if n.natural_w == UNKNOWN && !n.content.contains("\n") : n.natural_w = this.platform.text_width(n.content, n.resolved_font)
+        return n.natural_w
+    }
+
+    /// Places `n` at its final position and lays out its children.
+    fn place(n: Div, x: f32, y: f32, w: f32, h: f32) {
+        n.bounds = .{ x: x, y: y, w: w, h: h }
+        let s = n.style
+        let inner = n.bounds.inset(s.padding.add(s.border_widths))
+        if n.kind == .text {
+            let natural = this.natural_width(n)
+            if natural >= 0 && natural <= inner.w + 0.01 {
+                n.lines = null
+            } else {
+                n.lines = wrap_text(this.platform, n.content, n.resolved_font, inner.w, n.nowrap, n.ellipsis)
+            }
+            return
+        }
+        if n.kind != .div || n.child_nodes.length == 0 : return
+        let cw, ch = this.flex(n, inner.w, inner.h, inner.w, inner.h, true)
+        n.content_w = cw
+        n.content_h = ch
+    }
+
+    /// Lays out the in-flow children of `n` inside an inner size, known or not, and returns the
+    /// size they take. With `perform` it also places them, and the absolute children.
+    fn flex(n: Div, iw: f32, ih: f32, aw: f32, ah: f32, perform: bool) (f32, f32) {
+        let s = n.style
+        let row = s.direction == .row
+        let gap = row ? s.column_gap : s.row_gap
+        let main_def = row ? iw : ih
+        let cross_def = row ? ih : iw
+        let main_avail = row ? aw : ah
+        let cross_avail = row ? ah : aw
+        if (row ? s.overflow_x : s.overflow_y) == .scroll : main_avail = INF
+        if (row ? s.overflow_y : s.overflow_x) == .scroll : cross_avail = INF
+
+        let items = Array[FlexItem]{}
+        each n.child_nodes as child {
+            let cs = child.style
+            if cs.display_none || cs.position == .absolute : continue
+            let item = FlexItem{ node: child }
+            item.mm_start = row ? cs.margin.left : cs.margin.top
+            item.mm_end = row ? cs.margin.right : cs.margin.bottom
+            item.mc_start = row ? cs.margin.top : cs.margin.left
+            item.mc_end = row ? cs.margin.bottom : cs.margin.right
+            item.align = cs.align_self ?? s.align_items
+            let pad = cs.padding.add(cs.border_widths)
+            let pad_main = row ? pad.horizontal : pad.vertical
+            let main_size = row ? cs.width.resolve(main_def) : cs.height.resolve(main_def)
+            item.cross_size = row ? cs.height.resolve(cross_def) : cs.width.resolve(cross_def)
+            if item.cross_size >= 0 {
+                item.known_cross = row ? clamp_size(item.cross_size, cs.min_height, cs.max_height, pad.vertical) : clamp_size(item.cross_size, cs.min_width, cs.max_width, pad.horizontal)
+            } else if item.align == .stretch && cross_def >= 0 {
+                let stretched = (cross_def - item.mc_start - item.mc_end).max(0)
+                item.known_cross = row ? clamp_size(stretched, cs.min_height, cs.max_height, pad.vertical) : clamp_size(stretched, cs.min_width, cs.max_width, pad.horizontal)
+            }
+            let basis = cs.basis.resolve(main_def)
+            if basis < 0 : basis = main_size
+            let content_based = basis < 0
+            if content_based {
+                basis = this.main_content(item, row, iw, ih, main_avail - item.mm_start - item.mm_end, cross_avail)
+            } else {
+                basis = basis.max(pad_main)
+            }
+            item.basis = basis
+            item.max = (row ? cs.max_width : cs.max_height) ?? INF
+            // The automatic minimum (no smaller than the content) is only applied when shrinking
+            item.min = (row ? cs.min_width : cs.min_height) ?? pad_main
+            item.hypo = basis.max(item.min).min(item.max)
+            items.append(item)
+        }
+
+        let count = items.length
+        let gaps = count > 1 ? gap * (count - 1).to(f32) : 0
+        let used: f32 = gaps
+        each items as item : used += item.hypo + item.mm_start + item.mm_end
+        let container_main = main_def >= 0 ? main_def : used
+        let free = container_main - used
+
+        // Content that wants less than its automatic minimum shrinks to it, not below
+        if free < 0 {
+            each items as item {
+                if item.min < item.hypo && item.node.style.shrink > 0 && !isset(row ? item.node.style.min_width : item.node.style.min_height) {
+                    let cs = item.node.style
+                    if cs.overflow_x == .visible && cs.overflow_y == .visible {
+                        let content_min = this.min_content(item, row, iw, ih, cross_avail)
+                        item.min = item.min.max(content_min.min(item.hypo))
+                        item.hypo = item.hypo.max(item.min)
+                    }
+                }
+            }
+        }
+        this.resolve_flexible(items, container_main, gaps, free > 0)
+
+        // Cross sizes
+        let cross_content: f32 = 0
+        each items as item {
+            if item.known_cross >= 0 {
+                item.cross = item.known_cross
+            } else {
+                let avail_cross = cross_avail - item.mc_start - item.mc_end
+                let w, h = row ? this.measure(item.node, item.main, UNKNOWN, iw, ih, item.main, avail_cross) : this.measure(item.node, UNKNOWN, item.main, iw, ih, avail_cross, item.main)
+                item.cross = row ? h : w
+            }
+            cross_content = cross_content.max(item.cross + item.mc_start + item.mc_end)
+        }
+        let container_cross = cross_def >= 0 ? cross_def : cross_content
+        if cross_def < 0 {
+            each items as item {
+                if item.align == .stretch && item.cross_size < 0 {
+                    let cs = item.node.style
+                    let pad = cs.padding.add(cs.border_widths)
+                    let stretched = (container_cross - item.mc_start - item.mc_end).max(0)
+                    item.cross = row ? clamp_size(stretched, cs.min_height, cs.max_height, pad.vertical) : clamp_size(stretched, cs.min_width, cs.max_width, pad.horizontal)
+                }
+            }
+        }
+        let main_content: f32 = gaps
+        each items as item : main_content += item.main + item.mm_start + item.mm_end
+        let content_w = row ? main_content : cross_content
+        let content_h = row ? cross_content : main_content
+        if !perform : return (content_w, content_h)
+
+        // Placement
+        let inner = n.bounds.inset(s.padding.add(s.border_widths))
+        if s.overflow_x == .scroll {
+            n.scroll_x = clamp32(n.scroll_x, 0, (content_w - inner.w).max(0))
+        } else {
+            n.scroll_x = 0
+        }
+        if s.overflow_y == .scroll {
+            n.scroll_y = clamp32(n.scroll_y, 0, (content_h - inner.h).max(0))
+        } else {
+            n.scroll_y = 0
+        }
+        let remaining = (container_main - main_content).max(0)
+        let lead: f32 = 0
+        let between = gap
+        if s.justify == .end {
+            lead = remaining
+        } else if s.justify == .center {
+            lead = remaining / 2
+        } else if s.justify == .between && count > 1 {
+            between += remaining / (count - 1).to(f32)
+        } else if s.justify == .around && count > 0 {
+            let each_side = remaining / count.to(f32) / 2
+            lead = each_side
+            between += each_side * 2
+        } else if s.justify == .evenly && count > 0 {
+            let space = remaining / (count + 1).to(f32)
+            lead = space
+            between += space
+        }
+        let ox = inner.x - n.scroll_x
+        let oy = inner.y - n.scroll_y
+        let pos = lead
+        each items as item {
+            pos += item.mm_start
+            let cross_pos = item.mc_start
+            let room = container_cross - item.mc_start - item.mc_end - item.cross
+            if item.align == .center : cross_pos += room / 2
+            else if item.align == .end : cross_pos += room
+            if row {
+                this.place(item.node, ox + pos, oy + cross_pos, item.main, item.cross)
+            } else {
+                this.place(item.node, ox + cross_pos, oy + pos, item.cross, item.main)
+            }
+            pos += item.main + item.mm_end + between
+        }
+        this.place_absolute(n, ox - inner.x, oy - inner.y)
+        return (content_w, content_h)
+    }
+
+    - fn main_content(item: FlexItem, row: bool, iw: f32, ih: f32, main_avail: f32, cross_avail: f32) f32 {
+        let kc = item.known_cross
+        let ac = kc >= 0 ? kc : cross_avail - item.mc_start - item.mc_end
+        if row : return this.measure(item.node, UNKNOWN, kc, iw, ih, main_avail, ac)[0]
+        return this.measure(item.node, kc, UNKNOWN, iw, ih, ac, main_avail)[1]
+    }
+
+    - fn min_content(item: FlexItem, row: bool, iw: f32, ih: f32, cross_avail: f32) f32 {
+        let kc = item.known_cross
+        let ac = kc >= 0 ? kc : cross_avail - item.mc_start - item.mc_end
+        // The content's own minimum, whatever size the item asks for
+        let cs = item.node.style
+        let pad = cs.padding.add(cs.border_widths)
+        if item.node.kind == .div && item.node.child_nodes.length == 0 : return row ? pad.horizontal : pad.vertical
+        if row {
+            let ih_known = kc >= 0 ? (kc - pad.vertical).max(0) : UNKNOWN
+            return this.content_size(item.node, UNKNOWN, ih_known, 0, (ac - pad.vertical).max(0))[0] + pad.horizontal
+        }
+        let iw_known = kc >= 0 ? (kc - pad.horizontal).max(0) : UNKNOWN
+        return this.content_size(item.node, iw_known, UNKNOWN, (ac - pad.horizontal).max(0), INF)[1] + pad.vertical
+    }
+
+    /// Grows or shrinks the items to fill `container_main`, honouring their minimum and maximum.
+    - fn resolve_flexible(items: Array[FlexItem], container_main: f32, gaps: f32, growing: bool) {
+        each items as item {
+            let factor = growing ? item.node.style.grow : item.node.style.shrink
+            item.frozen = factor == 0 || (growing && item.basis > item.hypo) || (!growing && item.basis < item.hypo)
+            item.main = item.hypo
+        }
+        let rounds = items.length + 1
+        while rounds > 0 {
+            rounds--
+            let used: f32 = gaps
+            let factors: f32 = 0
+            each items as item {
+                used += item.mm_start + item.mm_end
+                if item.frozen {
+                    used += item.main
+                } else {
+                    used += item.basis
+                    factors += growing ? item.node.style.grow : item.node.style.shrink * item.basis
+                }
+            }
+            if factors == 0 : break
+            let remaining = container_main - used
+            let violation: f32 = 0
+            each items as item {
+                if item.frozen : continue
+                let share = growing ? item.node.style.grow : item.node.style.shrink * item.basis
+                let target = item.basis + remaining * share / factors
+                let clamped = target.max(item.min).min(item.max)
+                violation += clamped - target
+                item.main = clamped
+            }
+            if violation == 0 : break
+            each items as item {
+                if item.frozen : continue
+                let target_min = item.main == item.min
+                let target_max = item.main == item.max
+                if (violation > 0 && target_min) || (violation < 0 && target_max) : item.frozen = true
+            }
+        }
+    }
+
+    - fn place_absolute(n: Div, scroll_dx: f32, scroll_dy: f32) {
+        let s = n.style
+        let pb = n.bounds.inset(s.border_widths)
+        each n.child_nodes as child {
+            let cs = child.style
+            if cs.display_none || cs.position != .absolute : continue
+            let l = cs.inset_left
+            let r = cs.inset_right
+            let t = cs.inset_top
+            let b = cs.inset_bottom
+            let w = cs.width.resolve(pb.w)
+            let h = cs.height.resolve(pb.h)
+            if w < 0 && isset(l) && isset(r) : w = (pb.w - l - r - cs.margin.horizontal).max(0)
+            if h < 0 && isset(t) && isset(b) : h = (pb.h - t - b - cs.margin.vertical).max(0)
+            if w < 0 || h < 0 {
+                let aw = pb.w - (l ?? 0) - (r ?? 0) - cs.margin.horizontal
+                let ah = pb.h - (t ?? 0) - (b ?? 0) - cs.margin.vertical
+                let mw, mh = this.measure(child, w, h, pb.w, pb.h, aw, ah)
+                w = mw
+                h = mh
+            }
+            let x = pb.x + s.padding.left + cs.margin.left
+            if isset(l) : x = pb.x + l + cs.margin.left
+            else if isset(r) : x = pb.right - r - w - cs.margin.right
+            let y = pb.y + s.padding.top + cs.margin.top
+            if isset(t) : y = pb.y + t + cs.margin.top
+            else if isset(b) : y = pb.bottom - b - h - cs.margin.bottom
+            this.place(child, x + scroll_dx, y + scroll_dy, w, h)
+        }
+    }
+}
+
+fn remember(n: Div, entry: LayoutCache) {
+    let cache = n.cache ?? Array[LayoutCache]{}
+    n.cache = cache
+    if cache.length >= 8 : cache.clear()
+    cache.append(entry)
+}
+
+fn clamp_size(value: f32, min: ?f32, max: ?f32, floor: f32) f32 {
+    let v = value
+    if isset(max) : v = v.min(max)
+    if isset(min) : v = v.max(min)
+    return v.max(floor)
+}

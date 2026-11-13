@@ -1,0 +1,23 @@
+use gui
+
+class Counter is gui.Render {
+    count: int (0)
+
+    fn render(win: gui.Window) gui.Div {
+        return gui.div().size_full().center().gap(16).text_xl()
+            .child("Hello, Valk!")
+            .child(gui.div().flex().gap(8)
+                .child(gui.div().size(32).rounded(6).bg(gui.rgb(0xef4444)))
+                .child(gui.div().size(32).rounded(6).bg(gui.rgb(0x22c55e)))
+                .child(gui.div().size(32).rounded(6).bg(gui.rgb(0x3b82f6)))
+                .child(gui.div().size(32).rounded(6).bg(gui.rgb(0xeab308))))
+            .child(gui.div().flex().items_center().gap(12)
+                .child(gui.button(win, "−").w(40).on_click(fn(e) { this.count-- }))
+                .child(gui.div().w(60).text_center().font_semibold().child("%{this.count}"))
+                .child(gui.button_primary(win, "+").id("increment").w(40).on_click(fn(e) { this.count++ })))
+    }
+}
+
+fn main() {
+    gui.run(Counter{}, .{ title: "Hello", width: 480, height: 320 })
+}

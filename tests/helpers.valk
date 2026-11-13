@@ -1,0 +1,19 @@
+use gui
+
+/// A root view built by a closure, for tests.
+class View is gui.Render {
+    build: fn(gui.Window)(gui.Div)
+    fn render(win: gui.Window) gui.Div { return this.build(win) }
+}
+
+fn view(build: fn(gui.Window)(gui.Div)) View { return View{ build: build } }
+
+fn bounds(win: gui.Window, id: String) gui.Bounds {
+    return win.bounds_of(id) ?? gui.Bounds{ x: -999, y: -999, w: -999, h: -999 }
+}
+
+fn same(a: f32, b: f32) bool { return (a - b).abs() < 0.01 }
+
+fn box(b: gui.Bounds, x: f32, y: f32, w: f32, h: f32) bool {
+    return same(b.x, x) && same(b.y, y) && same(b.w, w) && same(b.h, h)
+}

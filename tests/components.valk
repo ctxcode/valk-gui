@@ -1,0 +1,158 @@
+use gui
+
+class InputView is gui.Render {
+    input: gui.TextInput (gui.TextInput.new("Name"))
+    submitted: String ("")
+    changes: uint (0)
+
+    fn render(win: gui.Window) gui.Div {
+        this.input.on_submit = fn(t: String) { this.submitted = t }
+        this.input.on_change = fn(t: String) { this.changes++ }
+        return gui.div().p(20).child(gui.div().id("field").child(this.input.render(win)))
+    }
+}
+
+fn ctrl() gui.Modifiers {
+    #if OS == "macos"
+    return .{ cmd: true }
+    #else
+    return .{ ctrl: true }
+    #end
+}
+
+test "TextInput: typing, moving and deleting" {
+    let app = InputView{}
+    let win = gui.headless(app, 300, 200)
+    assert(win.scene.has_text("Name"))
+    win.type_text("ignored")
+    assert(app.input.text == "")
+
+    assert(win.click_on("field"))
+    win.type_text("hello")
+    assert(app.input.text == "hello")
+    assert(!win.scene.has_text("Name"))
+    win.press(.left)
+    win.press(.left)
+    win.type_text("X")
+    assert(app.input.text == "helXlo")
+    win.press(.backspace)
+    win.press(.delete)
+    assert(app.input.text == "helo")
+    win.press(.home)
+    win.type_text("é")
+    win.press(.end)
+    win.press(.backspace)
+    assert(app.input.text == "éhel")
+    win.press(.home)
+    win.press(.right)
+    win.press(.delete)
+    assert(app.input.text == "éel")
+    assert(app.changes == 7)
+    win.press(.enter)
+    assert(app.submitted == "éel")
+}
+
+test "TextInput: selection and the clipboard" {
+    let app = InputView{}
+    let win = gui.headless(app, 300, 200)
+    win.click_on("field")
+    win.type_text("one two three")
+    win.press(.left, .{ shift: true })
+    win.press(.left, .{ shift: true })
+    assert(app.input.selected_text() == "ee")
+    win.press(.c, ctrl())
+    assert(win.clipboard() == "ee")
+    win.press(.x, ctrl())
+    assert(app.input.text == "one two thr")
+    win.press(.home)
+    win.press(.v, ctrl())
+    assert(app.input.text == "eeone two thr")
+    win.press(.a, ctrl())
+    win.type_text("new")
+    assert(app.input.text == "new")
+    // Word jumps
+    app.input.set_text("alpha beta gamma")
+    win.press(.left, .{ ctrl: true })
+    assert(app.input.cursor == 11)
+    win.press(.backspace, .{ ctrl: true })
+    assert(app.input.text == "alpha gamma")
+}
+
+test "TextInput: the mouse places the caret and selects" {
+    let app = InputView{}
+    let win = gui.headless(app, 300, 200)
+    win.click_on("field")
+    win.type_text("hello world")
+    let field = bounds(win, "field")
+    // The text starts after the 1 px border and 10 px padding; 7 px per character
+    let x0 = field.x + 11
+    let y = field.y + field.h / 2
+    win.click(x0 + 14, y)
+    assert(app.input.cursor == 2 && app.input.anchor == 2)
+    win.drag(x0 + 7, y, x0 + 35, y)
+    assert(app.input.selected_text() == "ello")
+    win.click(x0 + 50, y)
+    win.click(x0 + 50, y)
+    assert(app.input.selected_text() == "world")
+}
+
+test "TextInput: password fields hide the text" {
+    let input = gui.TextInput.new()
+    input.password = true
+    let win = gui.headless(view(fn(win) { return gui.div().child(input.render(win)) }), 300, 100)
+    input.focus_handle(win).focus()
+    win.type_text("secret")
+    assert(input.text == "secret")
+    assert(win.scene.has_text("••••••"))
+    assert(!win.scene.has_text("secret"))
+}
+
+class Settings is gui.Render {
+    checked: bool (false)
+    on: bool (false)
+    volume: f32 (0.5)
+    clicks: uint (0)
+
+    fn render(win: gui.Window) gui.Div {
+        return gui.div().p(10).gap(10).items_start()
+            .child(gui.checkbox(win, this.checked, "Remember me").id("check").on_click(fn(e) { this.checked = !this.checked }))
+            .child(gui.switch(win, this.on).id("switch").on_click(fn(e) { this.on = !this.on }))
+            .child(gui.slider(win, this.volume, fn(v) { this.volume = v }).id("slider").w(216))
+            .child(gui.button(win, "Save").id("save").on_click(fn(e) { this.clicks++ }))
+            .child(gui.button_primary(win, "Go").id("go"))
+            .child(gui.progress(win, 0.25).id("progress").w(100))
+            .child(gui.divider(win))
+    }
+}
+
+test "Components: checkbox, switch, slider and buttons" {
+    let app = Settings{}
+    let win = gui.headless(app, 400, 400)
+    assert(win.scene.has_text("Remember me"))
+    win.click_on("check")
+    assert(app.checked)
+    win.click_on("check")
+    assert(!app.checked)
+    win.click_on("switch")
+    assert(app.on)
+    win.click_on("save")
+    assert(app.clicks == 1)
+    let s = bounds(win, "slider")
+    // The track runs from 8 px in to 8 px before the end: 200 px
+    win.click(s.x + 8 + 50, s.y + 10)
+    assert(same(app.volume, 0.25))
+    win.drag(s.x + 8 + 50, s.y + 10, s.x + 500, s.y + 10)
+    assert(same(app.volume, 1))
+    assert(same(bounds(win, "progress").h, 6))
+    assert(same(bounds(win, "save").h, 32))
+}
+
+test "Components: hover changes a button's background" {
+    let app = Settings{}
+    let win = gui.headless(app, 400, 400)
+    let b = bounds(win, "save")
+    let before = win.scene.items.length
+    win.move_to(b.x + 5, b.y + 5)
+    assert(win.scene.items.length == before)
+    assert(win.cursor == .pointer)
+}

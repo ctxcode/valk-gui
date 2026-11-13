@@ -1,0 +1,94 @@
+
+// Small stateless components styled from the window's theme. Each returns a `Div`, so it
+// takes more styles and handlers like any other element.
+
+/// A button with a label. Add `on_click`.
++ fn button(win: Window, label: String) Div {
+    let t = win.theme
+    let bg = t.elevated
+    return div().flex().center().h(32).px(14).rounded(t.radius).bg(bg)
+        .border(1).border_color(t.border).text_color(t.text).font_medium().whitespace_nowrap()
+        .cursor_pointer()
+        .hover(fn(s) { s.bg(bg.lighten(0.06)) })
+        .active(fn(s) { s.bg(bg.darken(0.1)) })
+        .child(label)
+}
+
+/// A button in the accent color, for the main action.
++ fn button_primary(win: Window, label: String) Div {
+    let t = win.theme
+    let bg = t.accent
+    return div().flex().center().h(32).px(14).rounded(t.radius).bg(bg)
+        .text_color(t.accent_text).font_medium().whitespace_nowrap()
+        .cursor_pointer()
+        .hover(fn(s) { s.bg(bg.lighten(0.1)) })
+        .active(fn(s) { s.bg(bg.darken(0.1)) })
+        .child(label)
+}
+
+/// A checkbox with a label. Toggle your state in `on_click`.
++ fn checkbox(win: Window, checked: bool, label: String) Div {
+    let t = win.theme
+    let accent = t.accent
+    let check_color = t.accent_text
+    let mark = div().size(16).rounded(4).border(1).flex_shrink_0()
+    if checked {
+        mark.bg(accent).border_color(accent).child(canvas(fn(p, b) {
+            p.line(b.x + 3.5, b.y + 8, b.x + 6.5, b.y + 11, check_color, 2)
+            p.line(b.x + 6.5, b.y + 11, b.x + 12.5, b.y + 4.5, check_color, 2)
+        }).size_full())
+    } else {
+        mark.bg(t.surface).border_color(t.border)
+    }
+    let row = div().flex().items_center().gap(8).cursor_pointer().child(mark)
+    if label.length > 0 : row.child(label)
+    return row
+}
+
+/// An on/off switch. Toggle your state in `on_click`.
++ fn switch(win: Window, on: bool) Div {
+    let t = win.theme
+    let knob = div().size(16).rounded_full().bg(white()).shadow_sm()
+    return div().w(36).h(20).p(2).rounded_full().flex().items_center().flex_shrink_0()
+        .bg(on ? t.accent : t.elevated)
+        .when(on, fn(d) { d.justify_end() })
+        .cursor_pointer()
+        .child(knob)
+}
+
+/// A horizontal slider for a value from 0 to 1. `on_change` gets the new value while the
+/// track is pressed or dragged.
++ fn slider(win: Window, value: f32, on_change: fn(f32)()) Div {
+    let t = win.theme
+    let v = clamp32(value, 0, 1)
+    let accent = t.accent
+    let track = t.elevated
+    let set = fn(e: MouseEvent) {
+        let b = e.bounds
+        if b.w > 16 : on_change(clamp32((e.x - b.x - 8) / (b.w - 16), 0, 1))
+    }
+    return div().h(20).cursor_pointer()
+        .on_mouse_down(set)
+        .on_drag(set)
+        .child(canvas(fn(p, b) {
+            let cy = b.y + b.h / 2
+            let x0 = b.x + 8
+            let w = b.w - 16
+            p.fill(.{ x: x0, y: cy - 2, w: w, h: 4 }, track, 2)
+            p.fill(.{ x: x0, y: cy - 2, w: w * v, h: 4 }, accent, 2)
+            p.circle(x0 + w * v, cy, 8, white())
+            p.ring(x0 + w * v, cy, 8, accent, 2)
+        }).size_full())
+}
+
+/// A bar filled to `value` (0 to 1).
++ fn progress(win: Window, value: f32) Div {
+    let t = win.theme
+    return div().h(6).rounded_full().bg(t.elevated).overflow_hidden().flex()
+        .child(div().w_frac(clamp32(value, 0, 1)).rounded_full().bg(t.accent))
+}
+
+/// A thin line between sections.
++ fn divider(win: Window) Div {
+    return div().h(1).flex_shrink_0().bg(win.theme.border)
+}

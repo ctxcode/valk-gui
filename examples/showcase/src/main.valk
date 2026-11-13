@@ -1,0 +1,82 @@
+use gui
+use valk.math
+
+class Showcase is gui.Render {
+    frequency: f32 (0.35)
+    amplitude: f32 (0.7)
+    filled: bool (true)
+    grid: bool (true)
+    selected: uint (3)
+
+    fn render(win: gui.Window) gui.Div {
+        let t = win.theme
+        let accent = t.accent
+        let border = t.border
+        let freq = this.frequency
+        let amp = this.amplitude
+        let filled = this.filled
+        let grid = this.grid
+
+        let chart = gui.canvas(fn(p, b) {
+            if grid {
+                each 1 .. 4 as i {
+                    let y = b.y + b.h * i.to(f32) / 5
+                    p.line(b.x, y, b.right, y, border, 1)
+                }
+            }
+            let steps = 120
+            let mid = b.y + b.h / 2
+            let prev = gui.Point{ x: b.x, y: mid }
+            each 0 .. steps + 1 as i {
+                let x = b.x + b.w * i.to(f32) / steps.to(f32)
+                let phase = i.to(f32) * freq * 0.25
+                let y = mid - math.sin(phase.to(float)).to(f32) * amp * b.h * 0.45
+                let point = gui.Point{ x: x, y: y }
+                if i > 0 {
+                    if filled {
+                        p.triangle(prev, point, .{ x: x, y: mid }, accent.opacity(0.18))
+                        p.triangle(prev, .{ x: prev.x, y: mid }, .{ x: x, y: mid }, accent.opacity(0.18))
+                    }
+                    p.line(prev.x, prev.y, x, y, accent, 2)
+                }
+                prev = point
+            }
+        })
+
+        let controls = gui.div().w(240).flex_shrink_0().p(16).gap(14).bg(t.surface).rounded(10).border(1).border_color(t.border)
+            .child(gui.div().font_semibold().child("Wave"))
+            .child(gui.div().gap(6)
+                .child(gui.div().flex().justify_between().text_sm().text_color(t.muted)
+                    .child("Frequency").child(this.frequency.to_string(2)))
+                .child(gui.slider(win, this.frequency, fn(v) { this.frequency = v })))
+            .child(gui.div().gap(6)
+                .child(gui.div().flex().justify_between().text_sm().text_color(t.muted)
+                    .child("Amplitude").child(this.amplitude.to_string(2)))
+                .child(gui.slider(win, this.amplitude, fn(v) { this.amplitude = v })))
+            .child(gui.divider(win))
+            .child(gui.checkbox(win, this.filled, "Fill the area").on_click(fn(e) { this.filled = !this.filled }))
+            .child(gui.div().flex().items_center().justify_between()
+                .child("Grid lines")
+                .child(gui.switch(win, this.grid).on_click(fn(e) { this.grid = !this.grid })))
+
+        let list = gui.uniform_list(win, "rows", 10000, 30, fn(i) {
+            let selected = i == this.selected
+            return gui.div().flex().items_center().px(12).gap(10).rounded(6).text_sm().cursor_pointer()
+                .when(selected, fn(d) { d.bg(accent).text_color(t.accent_text) })
+                .when(!selected, fn(d) { d.hover(fn(s) { s.bg(t.elevated) }) })
+                .on_click(fn(e) { this.selected = i })
+                .child(gui.div().w(56).text_color(selected ? t.accent_text : t.muted).child("#%i"))
+                .child(gui.div().flex_1().truncate().child("Sample %i of 10000"))
+        }).flex_1().p(6).bg(t.surface).rounded(10).border(1).border_color(t.border)
+
+        return gui.div().size_full().p(16).gap(16).bg(t.background).text_color(t.text)
+            .child(gui.div().flex().gap(16).h(260)
+                .child(controls)
+                .child(gui.div().flex_1().p(16).bg(t.surface).rounded(10).border(1).border_color(t.border).child(chart.size_full())))
+            .child(list)
+    }
+}
+
+fn main() {
+    gui.run(Showcase{}, .{ title: "Showcase", width: 820, height: 560 })
+}

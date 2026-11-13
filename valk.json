@@ -1,0 +1,17 @@
+{
+    "name": "gui",
+    "use": "0.8.7",
+    "require": {
+        "valk": {
+            "min": "0.8.7"
+        }
+    },
+    "dependencies": {
+        "raylib": {
+            "src": "github.com/ctxcode/valk-raylib",
+            "version": "0.1.x",
+            "current": "0.1.4",
+            "current_hash": "bf9c486ff1f834597ba424f5061bbaac60c87dcc"
+        }
+    }
+}

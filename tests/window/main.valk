@@ -1,0 +1,70 @@
+use gui
+use raylib
+
+// Opens a hidden window, saves a frame, and checks the pixels raylib drew
+
+class Shapes is gui.Render {
+    fn render(win: gui.Window) gui.Div {
+        return gui.div().size_full().bg(gui.rgb(0x101010)).p(20).gap(10)
+            .child(gui.div().w(100).h(40).bg(gui.rgb(0xff0000)))
+            .child(gui.div().w(100).h(40).border(4).border_color(gui.rgb(0x00ff00)).rounded(8))
+            .child(gui.div().w(100).h(40).bg(gui.rgb(0x0000ff)).border(4).border_color(gui.rgb(0xffff00)).rounded(8))
+            .child(gui.div().h(30).text_size(20).text_color(gui.white()).child("Hello"))
+            .child(gui.div().h(30).w(100).overflow_hidden()
+                .child(gui.div().w(300).h(30).bg(gui.rgb(0xff00ff))))
+    }
+}
+
+global failures: uint (0)
+
+fn expect(img: raylib.Image, x: i32, y: i32, rgb: u32, what: String) {
+    let c = raylib.get_image_color(img, x, y)
+    let want = gui.rgb(rgb)
+    let close = (c.r.to(int) - want.r.to(int)).abs() < 8 && (c.g.to(int) - want.g.to(int)).abs() < 8 && (c.b.to(int) - want.b.to(int)).abs() < 8
+    if close {
+        println("ok   %what")
+    } else {
+        println("FAIL %what: (%x,%y) is %{c.r},%{c.g},%{c.b}")
+        failures++
+    }
+}
+
+fn main() {
+    let path = "./debug/window-test.png"
+    gui.run(Shapes{}, .{ width: 300, height: 300, screenshot: path, hidden: true, antialias: false })
+    let img = raylib.load_image(path)
+    if img.width != 300 {
+        println("FAIL no screenshot")
+        exit(1)
+    }
+    expect(img, 5, 5, 0x101010, "background")
+    expect(img, 70, 40, 0xff0000, "filled box")
+    expect(img, 121, 40, 0x101010, "box ends at its width")
+    expect(img, 21, 90, 0x00ff00, "outline: border inside the left edge")
+    expect(img, 70, 90, 0x101010, "outline: transparent inside")
+    expect(img, 19, 90, 0x101010, "outline: nothing outside the box")
+    expect(img, 20, 70, 0x101010, "outline: rounded corner")
+    expect(img, 22, 140, 0xffff00, "bordered box: border")
+    expect(img, 70, 140, 0x0000ff, "bordered box: background")
+    expect(img, 70, 122, 0xffff00, "bordered box: top border")
+    expect(img, 70, 225, 0xff00ff, "clipped child inside")
+    expect(img, 125, 225, 0x101010, "clipped child cut at the parent")
+
+    // Some bright pixels where the text is
+    let bright: uint = 0
+    each 0 .. 100 as x {
+        each 0 .. 30 as y {
+            let c = raylib.get_image_color(img, 20 + x.to(i32), 170 + y.to(i32))
+            if c.r > 200 && c.g > 200 : bright++
+        }
+    }
+    if bright > 20 {
+        println("ok   text drawn")
+    } else {
+        println("FAIL text drawn: %bright bright pixels")
+        failures++
+    }
+    raylib.unload_image(img)
+    if failures > 0 : exit(1)
+    println("All window checks passed")
+}

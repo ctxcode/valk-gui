@@ -1,0 +1,411 @@
+
+use raylib
+use valk.core
+
+extern fn LoadFontFromMemory(file_type: ?cstring, file_data: ?ptr, data_size: i32, font_size: i32, codepoints: ?*[i32], codepoint_count: i32) raylib.Font;
+
+// stb_truetype sizes fonts by ascent to descent; this makes the em the requested size
+value EM_SCALE (1.21)
+
+/// Opens a window, shows `root` in it and handles input until the window closes.
++ fn run(root: Render, options: WindowOptions (WindowOptions{})) {
+    let flags: u32 = raylib.FLAG_WINDOW_HIGHDPI
+    if options.resizable : flags = flags | raylib.FLAG_WINDOW_RESIZABLE
+    if options.antialias : flags = flags | raylib.FLAG_MSAA_4X_HINT
+    if options.hidden || isset(env_hidden()) : flags = flags | raylib.FLAG_WINDOW_HIDDEN
+    else : flags = flags | raylib.FLAG_VSYNC_HINT
+    raylib.set_trace_log_level(.error)
+    raylib.set_config_flags(flags)
+    raylib.init_window(options.width, options.height, options.title)
+    raylib.set_window_min_size(options.min_width, options.min_height)
+    raylib.set_exit_key(.none)
+    raylib.set_target_fps(60)
+
+    let platform = RaylibPlatform{}
+    let win = Window.new(root, raylib.get_screen_width().to(f32), raylib.get_screen_height().to(f32), platform, options.theme)
+    win.title = options.title
+    each options.fonts as f : win.fonts.append(f)
+    platform.window = win
+
+    let shot: ?String = options.screenshot.length > 0 ? options.screenshot : env_screenshot()
+    let shot_after = (core.getenv("VALK_GUI_SCREENSHOT_AFTER") !? "0").to(f64) !? 0
+    let input = RaylibInput{}
+    while !raylib.window_should_close() && !win.quit_requested {
+        win.time = raylib.get_time()
+        if raylib.is_window_resized() : win.resize(raylib.get_screen_width().to(f32), raylib.get_screen_height().to(f32))
+        input.poll(win)
+        if win.title_changed {
+            raylib.set_window_title(win.title)
+            win.title_changed = false
+        }
+        win.frame_requested = false
+        win.draw()
+        input.set_cursor(win.cursor)
+
+        raylib.begin_drawing()
+        raylib.clear_background(to_rl(win.theme.background))
+        draw_scene(win, platform)
+        if isset(shot) && win.frames >= 3 && win.time >= shot_after {
+            // Ending the scissor mode draws what is batched, before the buffers swap
+            raylib.end_scissor_mode()
+            let image = raylib.load_image_from_screen()
+            raylib.export_image(image, shot)
+            raylib.unload_image(image)
+            raylib.end_drawing()
+            break
+        }
+        raylib.end_drawing()
+
+        if win.frame_requested || win.dirty || isset(shot) {
+            raylib.disable_event_waiting()
+        } else {
+            raylib.enable_event_waiting()
+        }
+    }
+    platform.unload()
+    raylib.close_window()
+}
+
+// VALK_GUI_SCREENSHOT=file.png saves the third frame and exits; for tests and docs
+fn env_screenshot() ?String {
+    let value = core.getenv("VALK_GUI_SCREENSHOT") ! return null
+    if value == "" : return null
+    return value
+}
+fn env_hidden() ?String {
+    let value = core.getenv("VALK_GUI_HIDDEN") ! return null
+    if value == "" : return null
+    return value
+}
+
+class RaylibPlatform is Platform {
+    window: ?Window (null)
+    fonts: HashMap[u64, raylib.Font] (.{})
+    textures: Map[raylib.Texture] (.{})
+    font_data: Map[String] (.{})
+    clip: String ("")
+
+    fn text_width(text: String, font: ResolvedFont) f32 {
+        let f = this.font(font)
+        return raylib.measure_text_ex(f, text, font.size * EM_SCALE, 0).x
+    }
+
+    fn image_size(path: String) Point {
+        let t = this.texture(path)
+        return .{ x: t.width.to(f32), y: t.height.to(f32) }
+    }
+
+    fn clipboard() String { return raylib.get_clipboard_text() }
+    fn set_clipboard(text: String) { raylib.set_clipboard_text(text) }
+
+    fn texture(path: String) raylib.Texture {
+        let cached = this.textures.get(path) ! {
+            let t = raylib.load_texture(path)
+            if t.id != 0 {
+                t.gen_mipmaps()
+                raylib.set_texture_filter(t, .trilinear)
+            }
+            this.textures.set(path, t)
+            return t
+        }
+        return cached
+    }
+
+    fn font(font: ResolvedFont) raylib.Font {
+        let scale = raylib.get_window_scale_dpi().x.max(1)
+        let px = round32(font.size * EM_SCALE * scale).to(i32).max(4)
+        let key = font.name.hash().to(u64) * 31 + font.weight.to(u64) * 100003 + px.to(u64)
+        let cached = this.fonts.get(key) ! {
+            let f = this.load(font.name, font.weight, px)
+            this.fonts.set(key, f)
+            return f
+        }
+        return cached
+    }
+
+    fn load(name: String, weight: FontWeight, px: i32) raylib.Font {
+        let codepoints = font_codepoints()
+        let path = this.font_path(name, weight)
+        let f: raylib.Font = .{}
+        if isset(path) {
+            f = raylib.load_font_ex(path, px, codepoints)
+        } else {
+            f = load_font_memory(builtin_font(weight), px, codepoints)
+        }
+        raylib.set_texture_filter(f.texture, .bilinear)
+        return f
+    }
+
+    // The file of the closest weight added for a family, null for the built-in font
+    fn font_path(name: String, weight: FontWeight) ?String {
+        if name == "" : return null
+        let win = this.window ?! return null
+        let best: ?String = null
+        let best_distance: int = 100
+        each win.fonts as f {
+            if f.name != name : continue
+            let d = (f.weight.to(int) - weight.to(int)).abs()
+            if d < best_distance {
+                best = f.path
+                best_distance = d
+            }
+        }
+        return best
+    }
+
+    fn unload() {
+        each this.fonts as f : raylib.unload_font(f)
+        each this.textures as t : raylib.unload_texture(t)
+    }
+}
+
+fn load_font_memory(data: local &[u8], px: i32, codepoints: local &[i32]) raylib.Font {
+    @unsafe
+    return LoadFontFromMemory(".ttf".data_cstring, data.data, data.length.to(i32), px, codepoints.data, codepoints.length.to(i32))
+}
+
+fn builtin_font(weight: FontWeight) String {
+    return match weight : String {
+        .normal => #embed("assets/fonts/Inter-Regular.ttf")
+        .medium => #embed("assets/fonts/Inter-Medium.ttf")
+        .semibold => #embed("assets/fonts/Inter-SemiBold.ttf")
+        .bold => #embed("assets/fonts/Inter-Bold.ttf")
+    }
+}
+
+global codepoint_table: ?Array[i32] (null)
+
+// Latin-1 and common punctuation, arrows and symbols
+fn font_codepoints() Array[i32] {
+    let cached = codepoint_table
+    if isset(cached) : return cached
+    let list = Array[i32]{}
+    each 32 .. 95 as c : list.append(c.to(i32))
+    each 160 .. 96 as c : list.append(c.to(i32))
+    each 0x100 .. 0x80 as c : list.append(c.to(i32))
+    each Array[i32]{ 0x2013, 0x2014, 0x2018, 0x2019, 0x201c, 0x201d, 0x2022, 0x2026, 0x20ac, 0x2122,
+        0x2190, 0x2191, 0x2192, 0x2193, 0x2212, 0x2713, 0x2715, 0x25b2, 0x25bc, 0x25b6, 0x25c0 } as c : list.append(c)
+    codepoint_table = list
+    return list
+}
+
+class RaylibInput {
+    last_x: f32 (-1)
+    last_y: f32 (-1)
+    cursor: Cursor (.default)
+
+    fn poll(win: Window) {
+        let mods = modifiers()
+        let pos = raylib.get_mouse_position()
+        let x = pos.x
+        let y = pos.y
+        if !raylib.is_cursor_on_screen() && !raylib.is_mouse_button_down(.left) {
+            x = -1
+            y = -1
+        }
+        if x != this.last_x || y != this.last_y {
+            this.last_x = x
+            this.last_y = y
+            win.mouse_move(x, y, mods)
+        }
+        each Array[MouseButton]{ .left, .right, .middle } as button {
+            let rb = to_rl_button(button)
+            if raylib.is_mouse_button_pressed(rb) : win.mouse_down(x, y, button, mods)
+            if raylib.is_mouse_button_released(rb) : win.mouse_up(x, y, button, mods)
+        }
+        let wheel = raylib.get_mouse_wheel_move_v()
+        if wheel.x != 0 || wheel.y != 0 {
+            let dx = -wheel.x * 40
+            let dy = -wheel.y * 40
+            if mods.shift && dx == 0 {
+                dx = dy
+                dy = 0
+            }
+            win.scroll(dx, dy, mods)
+        }
+        while true {
+            let code = raylib.get_key_pressed()
+            if code == 0 : break
+            let key = key_from_code(code)
+            if key != .unknown : win.key_down(key, mods)
+        }
+        each Array[raylib.KeyboardKey]{ .backspace, .delete, .left, .right, .up, .down, .page_up, .page_down, .enter, .tab, .z, .y } as rk {
+            if raylib.is_key_pressed_repeat(rk) : win.key_down(key_from_code(rk.to(i32)), mods, true)
+        }
+        let typed = ""
+        while true {
+            let cp = raylib.get_char_pressed()
+            if cp <= 0 : break
+            typed += codepoint_text(cp.to(u32))
+        }
+        if typed.length > 0 : win.input(typed)
+    }
+
+    fn set_cursor(cursor: Cursor) {
+        if cursor == this.cursor : return
+        this.cursor = cursor
+        raylib.set_mouse_cursor(match cursor : raylib.MouseCursor {
+            .default => .default
+            .pointer => .pointing_hand
+            .text => .ibeam
+            .crosshair => .crosshair
+            .not_allowed => .not_allowed
+            .resize_ew => .resize_ew
+            .resize_ns => .resize_ns
+            .move => .resize_all
+        })
+    }
+}
+
+fn modifiers() Modifiers {
+    return .{
+        shift: raylib.is_key_down(.left_shift) || raylib.is_key_down(.right_shift),
+        ctrl: raylib.is_key_down(.left_control) || raylib.is_key_down(.right_control),
+        alt: raylib.is_key_down(.left_alt) || raylib.is_key_down(.right_alt),
+        cmd: raylib.is_key_down(.left_super) || raylib.is_key_down(.right_super)
+    }
+}
+
+fn to_rl_button(b: MouseButton) raylib.MouseButton {
+    return match b : raylib.MouseButton {
+        .left => .left
+        .right => .right
+        .middle => .middle
+    }
+}
+
+/// The key for a raylib (GLFW) key code.
+fn key_from_code(code: i32) Key {
+    let items = Key.items()
+    if code >= 65 && code <= 90 : return items.get((code - 64).to(uint)) !? .unknown
+    if code >= 48 && code <= 57 : return items.get((code - 48 + 27).to(uint)) !? .unknown
+    if code >= 290 && code <= 301 : return items.get((code - 290).to(uint) + Key.f1.to(uint)) !? .unknown
+    return match code : Key {
+        32 => .space
+        256 => .escape
+        257, 335 => .enter
+        258 => .tab
+        259 => .backspace
+        260 => .insert
+        261 => .delete
+        262 => .right
+        263 => .left
+        264 => .down
+        265 => .up
+        266 => .page_up
+        267 => .page_down
+        268 => .home
+        269 => .end
+        45 => .minus
+        61 => .equal
+        44 => .comma
+        46 => .period
+        47 => .slash
+        59 => .semicolon
+        39 => .apostrophe
+        91 => .left_bracket
+        92 => .backslash
+        93 => .right_bracket
+        96 => .grave
+        default => .unknown
+    }
+}
+
+fn to_rl(c: Color) raylib.Color { return .{ r: c.r, g: c.g, b: c.b, a: c.a } }
+
+fn rect(b: Bounds) raylib.Rectangle { return .{ x: b.x, y: b.y, width: b.w, height: b.h } }
+
+fn draw_scene(win: Window, p: RaylibPlatform) {
+    let scale = raylib.get_window_scale_dpi().x.max(1)
+    each win.scene.items as item {
+        match item.kind {
+            .quad => draw_quad(item)
+            .shadow => draw_shadow(item)
+            .text => {
+                let f = p.font(item.font)
+                let size = item.font.size * EM_SCALE
+                // Whole device pixels keep the glyphs sharp
+                let x = round32(item.bounds.x * scale) / scale
+                let y = round32((item.bounds.y + (item.font.line_height - size) / 2) * scale) / scale
+                raylib.draw_text_ex(f, item.text, .{ x: x, y: y }, size, 0, to_rl(item.color))
+            }
+            .image => {
+                let t = p.texture(item.text)
+                if t.id != 0 {
+                    raylib.draw_texture_pro(t, .{ width: t.width.to(f32), height: t.height.to(f32) }, rect(item.bounds), .{}, 0, to_rl(item.color))
+                }
+            }
+            .line => raylib.draw_line_ex(.{ x: item.points[0].x, y: item.points[0].y }, .{ x: item.points[1].x, y: item.points[1].y }, item.width, to_rl(item.color))
+            .circle => raylib.draw_circle_v(.{ x: item.bounds.x + item.radius, y: item.bounds.y + item.radius }, item.radius, to_rl(item.color))
+            .ring => raylib.draw_ring(.{ x: item.bounds.x + item.radius, y: item.bounds.y + item.radius }, (item.radius - item.width).max(0), item.radius, 0, 360, 0, to_rl(item.color))
+            .triangle => {
+                let a = item.points[0]
+                let b = item.points[1]
+                let c = item.points[2]
+                // raylib wants counter-clockwise corners
+                if (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x) > 0 {
+                    raylib.draw_triangle(.{ x: a.x, y: a.y }, .{ x: c.x, y: c.y }, .{ x: b.x, y: b.y }, to_rl(item.color))
+                } else {
+                    raylib.draw_triangle(.{ x: a.x, y: a.y }, .{ x: b.x, y: b.y }, .{ x: c.x, y: c.y }, to_rl(item.color))
+                }
+            }
+            .clip => {
+                let b = item.bounds
+                let x = floor32(b.x)
+                let y = floor32(b.y)
+                raylib.begin_scissor_mode(x.to(i32), y.to(i32), (ceil32(b.x + b.w) - x).to(i32), (ceil32(b.y + b.h) - y).to(i32))
+            }
+            .unclip => raylib.end_scissor_mode()
+        }
+    }
+}
+
+fn roundness(b: Bounds, radius: f32) f32 {
+    let half = b.w.min(b.h) / 2
+    if half <= 0 : return 0
+    return (radius / half).min(1)
+}
+
+fn draw_quad(item: Primitive) {
+    let b = item.bounds
+    if b.w <= 0 || b.h <= 0 : return
+    let r = item.radius
+    let border = item.border
+    let has_border = !border.is_zero() && !item.border_color.is_transparent()
+    if r > 0.5 {
+        if has_border && !item.color.is_transparent() && item.color.a == 255 {
+            // Border color underneath, the background inset by the border on top
+            raylib.draw_rectangle_rounded(rect(b), roundness(b, r), 0, to_rl(item.border_color))
+            let inner = b.inset(border)
+            let ir = (r - border.top.max(border.left)).max(0)
+            raylib.draw_rectangle_rounded(rect(inner), roundness(inner, ir), 0, to_rl(item.color))
+            return
+        }
+        if !item.color.is_transparent() : raylib.draw_rectangle_rounded(rect(b), roundness(b, r), 0, to_rl(item.color))
+        if has_border {
+            let w = border.top.max(border.left)
+            let inner = b.inset(Edges.all(w))
+            raylib.draw_rectangle_rounded_lines_ex(rect(inner), roundness(inner, (r - w).max(0)), 0, w, to_rl(item.border_color))
+        }
+        return
+    }
+    if !item.color.is_transparent() : raylib.draw_rectangle_rec(rect(b), to_rl(item.color))
+    if has_border {
+        let c = to_rl(item.border_color)
+        if border.top > 0 : raylib.draw_rectangle_rec(.{ x: b.x, y: b.y, width: b.w, height: border.top }, c)
+        if border.bottom > 0 : raylib.draw_rectangle_rec(.{ x: b.x, y: b.bottom - border.bottom, width: b.w, height: border.bottom }, c)
+        if border.left > 0 : raylib.draw_rectangle_rec(.{ x: b.x, y: b.y + border.top, width: border.left, height: b.h - border.top - border.bottom }, c)
+        if border.right > 0 : raylib.draw_rectangle_rec(.{ x: b.right - border.right, y: b.y + border.top, width: border.right, height: b.h - border.top - border.bottom }, c)
+    }
+}
+
+fn draw_shadow(item: Primitive) {
+    let blur = item.width
+    let steps = clamp32(ceil32(blur / 2), 1, 10).to(int)
+    let layer = item.color.fade(1 / steps.to(f32))
+    each 0 .. steps as i {
+        let grow = blur * (steps - i).to(f32) / steps.to(f32) / 2
+        let b = item.bounds.grow(grow)
+        raylib.draw_rectangle_rounded(rect(b), roundness(b, item.radius + grow), 0, to_rl(layer))
+    }
+}

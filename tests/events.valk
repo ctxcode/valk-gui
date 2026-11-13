@@ -1,0 +1,214 @@
+use gui
+
+class Counter is gui.Render {
+    count: int (0)
+    log: Array[String] (.{})
+
+    fn render(win: gui.Window) gui.Div {
+        return gui.div().p(10)
+            .child(gui.div().id("outer").p(10).on_click(fn(e) { this.log.append("outer") })
+                .child(gui.div().id("inc").h(30).on_click(fn(e) {
+                    this.count++
+                    this.log.append("inc")
+                })))
+            .child("Count: %{this.count}")
+    }
+}
+
+test "Events: clicks run the innermost handler" {
+    let app = Counter{}
+    let win = gui.headless(app, 300, 200)
+    assert(win.scene.has_text("Count: 0"))
+    assert(win.click_on("inc"))
+    assert(app.count == 1)
+    assert(win.scene.has_text("Count: 1"))
+    // On the padding of outer, only outer runs
+    win.click(15, 15)
+    assert(app.log == .{ "inc", "outer" })
+    assert(!win.click_on("missing"))
+}
+
+test "Events: a click needs press and release on the element" {
+    let app = Counter{}
+    let win = gui.headless(app, 300, 200)
+    let b = bounds(win, "inc")
+    win.drag(b.x + 5, b.y + 5, 5, 190)
+    assert(app.count == 0)
+    win.drag(5, 190, b.x + 5, b.y + 5)
+    assert(app.count == 0)
+}
+
+class HoverView is gui.Render {
+    fn render(win: gui.Window) gui.Div {
+        return gui.div()
+            .child(gui.div().id("btn").size(50).bg(gui.rgb(0x111111))
+                .hover(fn(s) { s.bg(gui.rgb(0x222222)) })
+                .active(fn(s) { s.bg(gui.rgb(0x333333)) })
+                .cursor_pointer())
+    }
+}
+
+fn quad_color(win: gui.Window) u8 {
+    each win.scene.items as item {
+        if item.kind == .quad : return item.color.r
+    }
+    return 0
+}
+
+test "Events: hover and active styles" {
+    let win = gui.headless(HoverView{}, 200, 200)
+    assert(quad_color(win) == 0x11)
+    assert(win.cursor == .default)
+    win.move_to(10, 10)
+    assert(quad_color(win) == 0x22)
+    assert(win.cursor == .pointer)
+    win.mouse_down(10, 10)
+    win.draw()
+    assert(quad_color(win) == 0x33)
+    win.mouse_up(10, 10)
+    win.draw()
+    assert(quad_color(win) == 0x22)
+    win.move_to(100, 100)
+    assert(quad_color(win) == 0x11)
+}
+
+class Form is gui.Render {
+    first: ?gui.FocusHandle (null)
+    second: ?gui.FocusHandle (null)
+    typed: String ("")
+    keys: Array[gui.Key] (.{})
+    root_keys: uint (0)
+
+    fn render(win: gui.Window) gui.Div {
+        let first = this.first ?? win.focus_handle()
+        let second = this.second ?? win.focus_handle()
+        this.first = first
+        this.second = second
+        return gui.div().on_key_down(fn(e) { this.root_keys++ })
+            .child(gui.div().id("first").h(30).track_focus(first)
+                .on_input(fn(t) { this.typed += t })
+                .on_key_down(fn(e) {
+                    this.keys.append(e.key)
+                    if e.key == .enter : e.stop_propagation()
+                }))
+            .child(gui.div().id("second").h(30).track_focus(second))
+            .child(gui.div().id("plain").h(30))
+    }
+}
+
+test "Events: focus, keys and typed text" {
+    let app = Form{}
+    let win = gui.headless(app, 200, 200)
+    let first = app.first ?! return
+    let second = app.second ?! return
+    win.type_text("lost")
+    assert(app.typed == "")
+    win.press(.a)
+    assert(app.root_keys == 1)
+
+    win.click_on("first")
+    assert(first.is_focused())
+    win.type_text("hé")
+    assert(app.typed == "hé")
+    win.press(.enter)
+    win.press(.b)
+    assert(app.keys == .{ gui.Key.enter, gui.Key.b })
+    // Enter stopped, b bubbled to the root
+    assert(app.root_keys == 2)
+
+    win.press(.tab)
+    assert(second.is_focused())
+    win.press(.tab)
+    assert(first.is_focused())
+    win.press(.tab, .{ shift: true })
+    assert(second.is_focused())
+
+    win.click_on("plain")
+    assert(!second.is_focused() && !first.is_focused())
+}
+
+class DragView is gui.Render {
+    moves: Array[f32] (.{})
+    fn render(win: gui.Window) gui.Div {
+        return gui.div()
+            .child(gui.div().id("handle").size(20).on_drag(fn(e) { this.moves.append(e.x) }))
+    }
+}
+
+test "Events: drag reaches the pressed element outside its bounds" {
+    let app = DragView{}
+    let win = gui.headless(app, 200, 200)
+    win.drag(10, 10, 150, 150)
+    assert(app.moves == .{ 150 })
+    win.move_to(120, 120)
+    assert(app.moves.length == 1)
+}
+
+test "Events: double clicks count" {
+    let counts = Array[uint]{}
+    let win = gui.headless(view(fn(win) {
+        return gui.div().on_mouse_down(fn(e) { counts.append(e.click_count) })
+    }), 200, 200)
+    win.click(10, 10)
+    win.click(10, 10)
+    win.click(100, 10)
+    assert(counts == .{ 1, 2, 1 })
+}
+
+test "Events: dragging the scrollbar" {
+    let win = gui.headless(view(fn(win) {
+        let list = gui.div().id("list").h(100).overflow_y_scroll()
+        each 0 .. 10 as i : list.child(gui.div().id("row%i").h(50).flex_shrink_0())
+        return gui.div().child(list)
+    }), 200, 300)
+    // Thumb: 100 * 100 / 500 = 24 px minimum... 20 -> 24, at the right edge
+    win.drag(195, 5, 195, 81)
+    assert(same(bounds(win, "row0").y, -400))
+    // Clicking the track jumps there
+    win.click(195, 12)
+    assert(same(bounds(win, "row0").y, 0))
+}
+
+test "Events: scroll events reach handlers first" {
+    let seen = Array[f32]{}
+    let win = gui.headless(view(fn(win) {
+        let list = gui.div().id("list").h(100).overflow_y_scroll()
+            .on_scroll(fn(e) {
+                seen.append(e.dy)
+                if e.modifiers.shift : e.stop_propagation()
+            })
+        each 0 .. 10 as i : list.child(gui.div().id("row%i").h(50).flex_shrink_0())
+        return gui.div().child(list)
+    }), 200, 300)
+    win.scroll_at(50, 50, 0, 30)
+    assert(same(bounds(win, "row0").y, -30))
+    win.mouse_move(50, 50)
+    win.scroll(0, 30, .{ shift: true })
+    win.draw()
+    assert(same(bounds(win, "row0").y, -30))
+    assert(seen == .{ 30, 30 })
+}
+
+test "Events: deferred elements paint last, unclipped, and take the mouse first" {
+    let clicks = Array[String]{}
+    let win = gui.headless(view(fn(win) {
+        return gui.div()
+            .child(gui.div().id("panel").h(50).overflow_hidden().on_click(fn(e) { clicks.append("panel") })
+                .child(gui.div().id("menu").absolute().top(40).left(0).w(100).h(60).deferred().bg(gui.rgb(0x123456))
+                    .on_click(fn(e) { clicks.append("menu") })
+                    .child("menu item")))
+            .child(gui.div().id("below").h(100).bg(gui.rgb(0x654321)).on_click(fn(e) { clicks.append("below") }))
+    }), 200, 200)
+    let texts = win.scene.texts()
+    assert(texts == .{ "menu item" })
+    // The menu's quad comes after the one below it
+    let order = Array[u8]{}
+    each win.scene.items as item {
+        if item.kind == .quad : order.append(item.color.r)
+    }
+    assert(order == .{ 0x65, 0x12 })
+    win.click(50, 80)
+    win.click(150, 80)
+    win.click(50, 20)
+    assert(clicks == .{ "menu", "below", "panel" })
+}

@@ -1,0 +1,90 @@
+
++ enum MouseButton { left, right, middle }
+
+/// A key on the keyboard, independent of the layout's characters. Typed text arrives
+/// through `on_input` instead.
++ enum Key {
+    unknown
+    a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p, q, r, s, t, u, v, w, x, y, z
+    digit0, digit1, digit2, digit3, digit4, digit5, digit6, digit7, digit8, digit9
+    space, enter, escape, backspace, tab, delete, insert
+    left, right, up, down, home, end, page_up, page_down
+    f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12
+    minus, equal, comma, period, slash, semicolon, apostrophe, left_bracket, right_bracket, backslash, grave
+}
+
+/// The modifier keys held during an event.
++ struct Modifiers {
+    + shift: bool (false)
+    + ctrl: bool (false)
+    + alt: bool (false)
+    /// The Command key on macOS, the Windows or Super key elsewhere.
+    + cmd: bool (false)
+
+    /// Command on macOS, Control elsewhere: the modifier of shortcuts like copy and paste.
+    + get secondary: bool {
+        #if OS == "macos"
+        return this.cmd
+        #else
+        return this.ctrl
+        #end
+    }
+}
+
+/// A mouse press, release, move or click. Coordinates are relative to the window.
++ class MouseEvent {
+    + x: f32
+    + y: f32
+    + button: MouseButton (.left)
+    + modifiers: Modifiers (.{})
+    /// 2 for a double click, 3 for a triple click.
+    + click_count: uint (1)
+    /// The bounds of the element whose handler runs.
+    + bounds: Bounds (.{})
+    ~+ stopped: bool (false)
+
+    /// The position relative to the element's top-left corner.
+    + get local_x: f32 { return this.x - this.bounds.x }
+    + get local_y: f32 { return this.y - this.bounds.y }
+
+    /// Stops the event from reaching the handlers of parent elements.
+    + fn stop_propagation() { this.stopped = true }
+}
+
+/// A scroll wheel or touchpad scroll, in pixels.
++ class ScrollEvent {
+    + x: f32
+    + y: f32
+    + dx: f32
+    + dy: f32
+    + modifiers: Modifiers (.{})
+    + bounds: Bounds (.{})
+    ~+ stopped: bool (false)
+
+    + fn stop_propagation() { this.stopped = true }
+}
+
+/// A key press, or a repeat while the key is held.
++ class KeyEvent {
+    + key: Key
+    + modifiers: Modifiers (.{})
+    + repeat: bool (false)
+    ~+ stopped: bool (false)
+
+    /// Stops the event from reaching parent elements and the window's own handling, such as Tab
+    /// moving the focus.
+    + fn stop_propagation() { this.stopped = true }
+}
+
+/// Keeps track of whether an element has keyboard focus. Make one per focusable element and
+/// keep it with the element's state; give it to the element with `track_focus`.
++ class FocusHandle {
+    window: Window
+
+    + fn focus() { this.window.focused = this }
+    + fn blur() { if this.is_focused() : this.window.focused = null }
+    + fn is_focused() bool {
+        let f = this.window.focused ?! return false
+        return f == this
+    }
+}
