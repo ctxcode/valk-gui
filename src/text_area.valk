@@ -1,0 +1,532 @@
+
+struct Snapshot {
+    text: String
+    row: uint
+    col: uint
+}
+
+/// A multi-line text editor: selection with the mouse and Shift, word jumps, copy, cut and paste,
+/// undo and redo, auto-indent, Tab and Shift+Tab, and scrolling. Lines do not wrap. Keep it with
+/// your state and put `area.render(win)` in the tree; give it a height or `flex_1`.
++ class TextArea is Render {
+    + placeholder: String ("")
+    /// Called after every edit with the new text.
+    + on_change: ?fn(String)() (null)
+    /// Allows selecting and copying, but not editing.
+    + read_only: bool (false)
+    + line_numbers: bool (false)
+    /// A font family added with `Window.add_font`, such as a monospaced one for code.
+    + font: String ("")
+    /// The text size; the theme's when unset.
+    + font_size: ?f32 (null)
+    + tab_size: uint (4)
+    /// Colors per line, for syntax highlighting: called for each visible line with its text, it
+    /// returns `(byte length, color)` runs.
+    + highlight: ?fn(String)(Array[(uint, Color)]) (null)
+    /// The caret: a line and a byte offset in it.
+    ~+ row: uint (0)
+    ~+ col: uint (0)
+    /// The other end of the selection.
+    ~+ anchor_row: uint (0)
+    ~+ anchor_col: uint (0)
+    ~+ lines: Array[String] (.{ "" })
+    handle: ?FocusHandle (null)
+    scroll_x: f32 (0)
+    scroll_y: f32 (0)
+    goal_x: f32 (-1)
+    reveal: bool (false)
+    view: Bounds (.{})
+    size: f32 (14)
+    undo_stack: Array[Snapshot] (.{})
+    redo_stack: Array[Snapshot] (.{})
+    last_edit: String ("")
+
+    + static fn new(text: String ("")) TextArea {
+        let a = TextArea{}
+        a.set_text(text)
+        return a
+    }
+
+    + get text: String { return this.lines.join("\n") }
+
+    /// Replaces the text and puts the caret at the start. Clears the undo history.
+    + fn set_text(text: String) {
+        this.lines = text.replace("\r\n", "\n").split("\n")
+        if this.lines.length == 0 : this.lines.append("")
+        this.row = 0
+        this.col = 0
+        this.anchor_row = 0
+        this.anchor_col = 0
+        this.undo_stack.clear()
+        this.redo_stack.clear()
+    }
+
+    + fn focus_handle(win: Window) FocusHandle {
+        let h = this.handle
+        if isset(h) : return h
+        let created = win.focus_handle()
+        this.handle = created
+        return created
+    }
+
+    + fn has_selection() bool { return this.row != this.anchor_row || this.col != this.anchor_col }
+
+    + fn selected_text() String {
+        let r1, c1, r2, c2 = this.selection()
+        if r1 == r2 : return this.line(r1).range(c1, c2 - c1)
+        let parts = Array[String]{ this.line(r1).range(c1, this.line(r1).length - c1) }
+        each r1 + 1 .. r2 - r1 - 1 as r : parts.append(this.line(r))
+        parts.append(this.line(r2).range(0, c2))
+        return parts.join("\n")
+    }
+
+    + fn select_all() {
+        this.anchor_row = 0
+        this.anchor_col = 0
+        this.row = this.lines.length - 1
+        this.col = this.line(this.row).length
+    }
+
+    /// Replaces the selection with `text`, which may have line breaks.
+    + fn insert(text: String) {
+        if this.read_only : return
+        let clean = text.replace("\r\n", "\n").replace("\r", "\n").replace("\t", " ".repeat(this.tab_size))
+        let kind = clean.length == 1 && clean != " " && clean != "\n" ? "type" : "other"
+        this.remember(kind)
+        this.delete_selection()
+        let current = this.line(this.row)
+        let before = current.range(0, this.col)
+        let after = current.range(this.col, current.length - this.col)
+        let parts = clean.split("\n")
+        if parts.length == 1 {
+            this.lines.set(this.row, before + clean + after) _
+            this.col += clean.length
+        } else {
+            this.lines.set(this.row, before + (parts.get(0) !? "")) _
+            let last = parts.get(parts.length - 1) !? ""
+            each 1 .. parts.length - 2 as i : this.lines.insert(this.row + i, parts.get(i) !? "") _
+            this.lines.insert(this.row + parts.length - 1, last + after) _
+            this.row += parts.length - 1
+            this.col = last.length
+        }
+        this.collapse()
+        this.changed()
+    }
+
+    + fn undo() {
+        let snap = this.undo_stack.pop_last() ! return
+        this.redo_stack.append(this.snapshot())
+        this.restore(snap)
+    }
+
+    + fn redo() {
+        let snap = this.redo_stack.pop_last() ! return
+        this.undo_stack.append(this.snapshot())
+        this.restore(snap)
+    }
+
+    + fn render(win: Window) Div {
+        let theme = win.theme
+        let fh = this.focus_handle(win)
+        this.size = this.font_size ?? theme.font_size
+        let focused = fh.is_focused()
+        return div().p(1).flex().bg(theme.surface).border(1).border_color(focused ? theme.accent : theme.border)
+            .rounded(theme.radius).overflow_hidden().cursor_text()
+            .track_focus(fh)
+            .on_key_down(fn(e) { this.key(win, e) })
+            .on_input(fn(t) { this.insert(t) })
+            .on_scroll(fn(e) {
+                if this.scroll_by(win, e.dx, e.dy) : e.stop_propagation()
+            })
+            .child(canvas(fn(p, b) { this.paint(win, p, b) }).flex_1().min_h(this.line_height())
+                .on_mouse_down(fn(e) {
+                    let r, c = this.position_at(win, e.x, e.y)
+                    if e.click_count == 2 {
+                        let text = this.line(r)
+                        this.row = r
+                        this.anchor_row = r
+                        this.anchor_col = word_start(text, c)
+                        this.col = word_end(text, c)
+                    } else if e.click_count >= 3 {
+                        this.row = r
+                        this.anchor_row = r
+                        this.anchor_col = 0
+                        this.col = this.line(r).length
+                    } else {
+                        this.row = r
+                        this.col = c
+                        if !e.modifiers.shift : this.collapse()
+                    }
+                    this.goal_x = -1
+                    this.reveal = true
+                })
+                .on_drag(fn(e) {
+                    let r, c = this.position_at(win, e.x, e.y)
+                    this.row = r
+                    this.col = c
+                    this.reveal = true
+                }))
+    }
+
+    // ---- Geometry ----
+
+    - fn line_height() f32 { return round32(this.size * 1.5) }
+
+    - fn resolved() ResolvedFont {
+        return .{ name: this.font, size: this.size, line_height: this.line_height() }
+    }
+
+    - fn gutter(win: Window) f32 {
+        if !this.line_numbers : return 8
+        let digits = this.lines.length.to(String).length.max(2)
+        return win.platform.text_width("0".repeat(digits), this.resolved()) + 20
+    }
+
+    - fn x_of(win: Window, r: uint, c: uint) f32 {
+        return win.platform.text_width(this.line(r).range(0, c), this.resolved())
+    }
+
+    - fn position_at(win: Window, x: f32, y: f32) (uint, uint) {
+        let lh = this.line_height()
+        let ry = y - this.view.y + this.scroll_y - 4
+        let r = ry <= 0 ? 0 : floor32(ry / lh).to(uint).min(this.lines.length - 1)
+        let local = x - this.view.x - this.gutter(win) + this.scroll_x
+        let text = this.line(r)
+        let best: uint = 0
+        let best_distance = local.abs()
+        let i: uint = 0
+        while i < text.length {
+            i = next_boundary(text, i)
+            let d = (this.x_of(win, r, i) - local).abs()
+            if d < best_distance {
+                best = i
+                best_distance = d
+            }
+        }
+        return (r, best)
+    }
+
+    - fn scroll_by(win: Window, dx: f32, dy: f32) bool {
+        let lh = this.line_height()
+        let max_y = (this.lines.length.to(f32) * lh + 8 - this.view.h).max(0)
+        let ny = clamp32(this.scroll_y + dy, 0, max_y)
+        let nx = (this.scroll_x + dx).max(0)
+        let moved = ny != this.scroll_y || nx != this.scroll_x
+        this.scroll_y = ny
+        this.scroll_x = nx
+        return moved
+    }
+
+    // ---- Painting ----
+
+    - fn paint(win: Window, p: Painter, b: Bounds) {
+        this.view = b
+        let theme = win.theme
+        let font = this.resolved()
+        let lh = this.line_height()
+        let gutter = this.gutter(win)
+        let focused = this.focus_handle(win).is_focused()
+        if this.reveal {
+            this.reveal = false
+            let cy = this.row.to(f32) * lh + 4
+            if cy < this.scroll_y : this.scroll_y = cy - 4
+            if cy + lh > this.scroll_y + b.h : this.scroll_y = cy + lh - b.h + 4
+            let cx = this.x_of(win, this.row, this.col)
+            let room = b.w - gutter - 8
+            if cx < this.scroll_x : this.scroll_x = (cx - 20).max(0)
+            if cx > this.scroll_x + room : this.scroll_x = cx - room + 20
+        }
+        this.scroll_y = clamp32(this.scroll_y, 0, (this.lines.length.to(f32) * lh + 8 - b.h).max(0))
+        let first = floor32(this.scroll_y / lh).to(uint)
+        let visible = ceil32(b.h / lh).to(uint) + 1
+        let last = (first + visible).min(this.lines.length)
+        let r1, c1, r2, c2 = this.selection()
+        let selecting = this.has_selection()
+        let text_x = b.x + gutter
+        if this.line_numbers : p.fill(.{ x: b.x, y: b.y, w: gutter - 8, h: b.h }, theme.background.opacity(0.35))
+        each first .. last - first as r {
+            let y = b.y + 4 + r.to(f32) * lh - this.scroll_y
+            let content = this.line(r)
+            if this.line_numbers {
+                let label = (r + 1).to(String)
+                let lw = p.text_width(label, this.size, .normal, this.font)
+                p.text(b.x + gutter - 14 - lw, y + (lh - round32(this.size * 1.4)) / 2, label, r == this.row && focused ? theme.text : theme.muted, this.size, .normal, this.font)
+            }
+            p.clip(.{ x: text_x - 2, y: b.y, w: b.w - gutter + 2, h: b.h })
+            if selecting && r >= r1 && r <= r2 {
+                let sx = r == r1 ? this.x_of(win, r, c1) : 0
+                let ex = r == r2 ? this.x_of(win, r, c2) : this.x_of(win, r, content.length) + this.size * 0.4
+                p.fill(.{ x: text_x + sx - this.scroll_x, y: y, w: (ex - sx).max(2), h: lh }, theme.accent.opacity(focused ? 0.35 : 0.18))
+            }
+            let ty = y + (lh - round32(this.size * 1.4)) / 2
+            let hl = this.highlight
+            if isset(hl) && content.length > 0 {
+                let x = text_x - this.scroll_x
+                let at: uint = 0
+                each hl(content) as part {
+                    let len, color = part
+                    let n = len.min(content.length - at)
+                    if n == 0 : continue
+                    let piece = content.range(at, n)
+                    p.text(x, ty, piece, color, this.size, .normal, this.font)
+                    x += win.platform.text_width(piece, font)
+                    at += n
+                }
+                if at < content.length : p.text(x, ty, content.range(at, content.length - at), theme.text, this.size, .normal, this.font)
+            } else if content.length > 0 {
+                p.text(text_x - this.scroll_x, ty, content, theme.text, this.size, .normal, this.font)
+            }
+            if focused && r == this.row {
+                p.fill(.{ x: text_x + this.x_of(win, r, this.col) - this.scroll_x, y: y + 2, w: 1.5, h: lh - 4 }, theme.text)
+            }
+            p.unclip()
+        }
+        if this.lines.length == 1 && this.line(0).length == 0 && this.placeholder.length > 0 {
+            p.text(text_x, b.y + 4 + (lh - round32(this.size * 1.4)) / 2, this.placeholder, theme.muted, this.size, .normal, this.font)
+        }
+    }
+
+    // ---- Editing ----
+
+    - fn line(r: uint) String { return this.lines.get(r) !? "" }
+
+    // The selection, from its start to its end
+    - fn selection() (uint, uint, uint, uint) {
+        if this.anchor_row < this.row || (this.anchor_row == this.row && this.anchor_col <= this.col) {
+            return (this.anchor_row, this.anchor_col, this.row, this.col)
+        }
+        return (this.row, this.col, this.anchor_row, this.anchor_col)
+    }
+
+    - fn collapse() {
+        this.anchor_row = this.row
+        this.anchor_col = this.col
+    }
+
+    - fn delete_selection() {
+        if !this.has_selection() : return
+        let r1, c1, r2, c2 = this.selection()
+        let start = this.line(r1).range(0, c1)
+        let tail = this.line(r2)
+        let rest = tail.range(c2, tail.length - c2)
+        each 0 .. r2 - r1 : this.lines.remove(r1 + 1)
+        this.lines.set(r1, start + rest) _
+        this.row = r1
+        this.col = c1
+        this.collapse()
+    }
+
+    - fn changed() {
+        this.reveal = true
+        this.goal_x = -1
+        let f = this.on_change
+        if isset(f) : f(this.text)
+    }
+
+    - fn snapshot() Snapshot { return .{ text: this.text, row: this.row, col: this.col } }
+
+    // Keeps the text before an edit for undo; typing a word is one step
+    - fn remember(kind: String) {
+        if kind == "type" && this.last_edit == "type" && !this.has_selection() : return
+        this.undo_stack.append(this.snapshot())
+        if this.undo_stack.length > 200 : this.undo_stack.remove(0)
+        this.redo_stack.clear()
+        this.last_edit = kind
+    }
+
+    - fn restore(snap: Snapshot) {
+        let lines = snap.text.split("\n")
+        this.lines = lines.length > 0 ? lines : Array[String]{ "" }
+        this.row = snap.row.min(this.lines.length - 1)
+        this.col = snap.col.min(this.line(this.row).length)
+        this.collapse()
+        this.last_edit = ""
+        this.changed()
+    }
+
+    - fn move_to(r: uint, c: uint, select: bool) {
+        this.row = r
+        this.col = c
+        if !select : this.collapse()
+        this.reveal = true
+        this.last_edit = ""
+    }
+
+    - fn vertical(win: Window, rows: int, select: bool) {
+        if this.goal_x < 0 : this.goal_x = this.x_of(win, this.row, this.col)
+        let target = (this.row.to(int) + rows).max(0).min(this.lines.length.to(int) - 1).to(uint)
+        let goal = this.goal_x
+        let lx = this.view.x + this.gutter(win) - this.scroll_x + goal
+        let ly = this.view.y + 4 + target.to(f32) * this.line_height() - this.scroll_y + 1
+        let r, c = this.position_at(win, lx, ly)
+        this.move_to(target, r == target ? c : 0, select)
+        this.goal_x = goal
+    }
+
+    - fn key(win: Window, e: KeyEvent) {
+        let m = e.modifiers
+        let word = m.ctrl || m.alt
+        let text = this.line(this.row)
+        if m.secondary && !m.alt {
+            let handled = true
+            if e.key == .a {
+                this.select_all()
+            } else if e.key == .c {
+                if this.has_selection() : win.set_clipboard(this.selected_text())
+            } else if e.key == .x {
+                if this.has_selection() && !this.read_only {
+                    win.set_clipboard(this.selected_text())
+                    this.remember("cut")
+                    this.delete_selection()
+                    this.changed()
+                }
+            } else if e.key == .v {
+                this.insert(win.clipboard())
+            } else if e.key == .z && !this.read_only {
+                if m.shift : this.redo()
+                else : this.undo()
+            } else if e.key == .y && !this.read_only {
+                this.redo()
+            } else if e.key == .home {
+                this.move_to(0, 0, m.shift)
+            } else if e.key == .end {
+                this.move_to(this.lines.length - 1, this.line(this.lines.length - 1).length, m.shift)
+            } else {
+                handled = false
+            }
+            if handled {
+                e.stop_propagation()
+                return
+            }
+        }
+        match e.key {
+            .left => {
+                this.goal_x = -1
+                if this.has_selection() && !m.shift {
+                    let sel = this.selection()
+                    this.move_to(sel[0], sel[1], false)
+                } else if this.col == 0 {
+                    if this.row > 0 : this.move_to(this.row - 1, this.line(this.row - 1).length, m.shift)
+                } else {
+                    let to = prev_boundary(text, this.col)
+                    this.move_to(this.row, word ? word_start(text, to) : to, m.shift)
+                }
+            }
+            .right => {
+                this.goal_x = -1
+                if this.has_selection() && !m.shift {
+                    let sel = this.selection()
+                    this.move_to(sel[2], sel[3], false)
+                } else if this.col >= text.length {
+                    if this.row + 1 < this.lines.length : this.move_to(this.row + 1, 0, m.shift)
+                } else {
+                    let to = next_boundary(text, this.col)
+                    this.move_to(this.row, word ? word_end(text, to) : to, m.shift)
+                }
+            }
+            .up => this.vertical(win, -1, m.shift)
+            .down => this.vertical(win, 1, m.shift)
+            .page_up => this.vertical(win, -(this.view.h / this.line_height()).to(int).max(1), m.shift)
+            .page_down => this.vertical(win, (this.view.h / this.line_height()).to(int).max(1), m.shift)
+            .home => {
+                // First to the indentation, then to the line start
+                let indent = leading_spaces(text)
+                this.move_to(this.row, this.col == indent ? 0 : indent, m.shift)
+                this.goal_x = -1
+            }
+            .end => {
+                this.move_to(this.row, text.length, m.shift)
+                this.goal_x = -1
+            }
+            .backspace => {
+                if this.read_only : return
+                if !this.has_selection() {
+                    if this.col == 0 {
+                        if this.row == 0 : return
+                        this.anchor_row = this.row - 1
+                        this.anchor_col = this.line(this.row - 1).length
+                    } else {
+                        this.anchor_row = this.row
+                        let to = prev_boundary(text, this.col)
+                        this.anchor_col = word ? word_start(text, to) : to
+                    }
+                }
+                this.remember("delete")
+                this.delete_selection()
+                this.changed()
+            }
+            .delete => {
+                if this.read_only : return
+                if !this.has_selection() {
+                    if this.col >= text.length {
+                        if this.row + 1 >= this.lines.length : return
+                        this.anchor_row = this.row + 1
+                        this.anchor_col = 0
+                    } else {
+                        this.anchor_row = this.row
+                        let to = next_boundary(text, this.col)
+                        this.anchor_col = word ? word_end(text, to) : to
+                    }
+                }
+                this.remember("delete")
+                this.delete_selection()
+                this.changed()
+            }
+            .enter => {
+                if this.read_only : return
+                // Keep the indentation of the line
+                let indent = text.range(0, leading_spaces(text))
+                this.insert("\n" + indent)
+            }
+            .tab => {
+                if this.read_only : return
+                if m.shift {
+                    this.dedent()
+                } else if this.has_selection() && this.row != this.anchor_row {
+                    this.indent()
+                } else {
+                    this.insert(" ".repeat(this.tab_size))
+                }
+            }
+            .escape => {
+                if !this.has_selection() : return
+                this.collapse()
+            }
+            default => return
+        }
+        e.stop_propagation()
+    }
+
+    - fn indent() {
+        this.remember("indent")
+        let sel = this.selection()
+        let r1 = sel[0]
+        let r2 = sel[2]
+        let pad = " ".repeat(this.tab_size)
+        each r1 .. r2 - r1 + 1 as r : this.lines.set(r, pad + this.line(r)) _
+        this.anchor_col += this.tab_size
+        this.col += this.tab_size
+        this.changed()
+    }
+
+    - fn dedent() {
+        this.remember("indent")
+        let sel = this.selection()
+        let r1 = sel[0]
+        let r2 = sel[2]
+        each r1 .. r2 - r1 + 1 as r {
+            let text = this.line(r)
+            let spaces = (leading_spaces(text)).min(this.tab_size)
+            this.lines.set(r, text.range(spaces, text.length - spaces)) _
+            if r == this.row : this.col = this.col - this.col.min(spaces)
+            if r == this.anchor_row : this.anchor_col = this.anchor_col - this.anchor_col.min(spaces)
+        }
+        this.changed()
+    }
+}
+
+fn leading_spaces(text: String) uint {
+    let n: uint = 0
+    while n < text.length && (text[n] == ' ' || text[n] == '\t') : n++
+    return n
+}

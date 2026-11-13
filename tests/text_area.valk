@@ -1,0 +1,115 @@
+use gui
+
+class AreaView is gui.Render {
+    area: gui.TextArea (gui.TextArea.new())
+    fn render(win: gui.Window) gui.Div {
+        return gui.div().p(10).child(gui.div().id("area").h(200).child(this.area.render(win).size_full()))
+    }
+}
+
+fn area_win() (AreaView, gui.Window) {
+    let app = AreaView{}
+    let win = gui.headless(app, 400, 300)
+    win.click_on("area")
+    return (app, win)
+}
+
+test "TextArea: typing, new lines and auto-indent" {
+    let app, win = area_win()
+    win.type_text("fn main() {")
+    win.press(.enter)
+    win.type_text("    let x = 1")
+    win.press(.enter)
+    win.type_text("x")
+    assert(app.area.text == "fn main() {\n    let x = 1\n    x")
+    assert(app.area.row == 2 && app.area.col == 5)
+    win.press(.up)
+    win.press(.end)
+    win.press(.backspace)
+    assert(app.area.lines.get(1) !? "" == "    let x = ")
+    // Backspace at a line start joins the lines
+    win.press(.down)
+    win.press(.home)
+    win.press(.home)
+    win.press(.backspace)
+    assert(app.area.text == "fn main() {\n    let x =     x")
+}
+
+test "TextArea: selection across lines, copy and paste" {
+    let app, win = area_win()
+    win.type_text("one\ntwo\nthree")
+    assert(app.area.lines.length == 3)
+    win.press(.up, .{ shift: true })
+    win.press(.home, .{ shift: true })
+    assert(app.area.selected_text() == "two\nthree")
+    win.press(.c, .{ ctrl: true, cmd: true })
+    assert(win.clipboard() == "two\nthree")
+    win.press(.delete)
+    assert(app.area.text == "one\n")
+    win.press(.v, .{ ctrl: true, cmd: true })
+    assert(app.area.text == "one\ntwo\nthree")
+    win.press(.a, .{ ctrl: true, cmd: true })
+    assert(app.area.selected_text() == "one\ntwo\nthree")
+}
+
+test "TextArea: undo and redo" {
+    let app, win = area_win()
+    win.type_text("hello")
+    win.type_text(" ")
+    win.type_text("w")
+    win.type_text("o")
+    win.press(.backspace)
+    assert(app.area.text == "hello w")
+    win.press(.z, .{ ctrl: true, cmd: true })
+    assert(app.area.text == "hello wo")
+    win.press(.z, .{ ctrl: true, cmd: true })
+    assert(app.area.text == "hello ")
+    win.press(.z, .{ ctrl: true, cmd: true, shift: true })
+    assert(app.area.text == "hello wo")
+}
+
+test "TextArea: tab indents lines and shift+tab removes it" {
+    let app, win = area_win()
+    win.type_text("a\nb")
+    win.press(.a, .{ ctrl: true, cmd: true })
+    win.press(.tab)
+    assert(app.area.text == "    a\n    b")
+    win.press(.tab, .{ shift: true })
+    assert(app.area.text == "a\nb")
+    win.press(.end)
+    win.press(.tab)
+    assert(app.area.text == "a\nb    ")
+}
+
+test "TextArea: the mouse places the caret on the right line" {
+    let app, win = area_win()
+    win.type_text("first line\nsecond line\nthird")
+    let b = bounds(win, "area")
+    // Inside: 1 px border + 1 px padding, then 8 px gutter; lines 21 px high from 4 px down
+    win.click(b.x + 2 + 8 + 7 * 3, b.y + 2 + 4 + 21 + 10)
+    assert(app.area.row == 1 && app.area.col == 3)
+    win.click(b.x + 50, b.y + 2 + 4 + 21 * 2 + 5)
+    win.click(b.x + 50, b.y + 2 + 4 + 21 * 2 + 5)
+    assert(app.area.selected_text() == "third")
+}
+
+test "TextArea: read-only text can be selected but not changed" {
+    let app = AreaView{}
+    app.area.set_text("fixed")
+    app.area.read_only = true
+    let win = gui.headless(app, 400, 300)
+    win.click_on("area")
+    win.type_text("x")
+    win.press(.backspace)
+    win.press(.a, .{ ctrl: true, cmd: true })
+    assert(app.area.text == "fixed" && app.area.selected_text() == "fixed")
+}
+
+test "TextArea: unicode is edited by character" {
+    let app, win = area_win()
+    win.type_text("héllo wörld 日本")
+    win.press(.backspace)
+    win.press(.left)
+    win.press(.backspace)
+    assert(app.area.text == "héllo wörld日")
+}
