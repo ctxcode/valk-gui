@@ -1,0 +1,287 @@
+
+global widget_ids: uint (0)
+
+fn next_widget_id(kind: String) String {
+    widget_ids++
+    return kind + "-" + widget_ids
+}
+
+// ---- Popups and menus ----
+
+/// Keeps a popup open at a point: a menu, a context menu or any other floating panel. Clicking
+/// outside it or pressing Escape closes it.
++ class Popup {
+    ~+ open: bool (false)
+    ~+ x: f32 (0)
+    ~+ y: f32 (0)
+    ~+ above: f32 (-1)
+
+    /// Opens at a window position; `above` is where it ends when there is only room above.
+    + fn open_at(x: f32, y: f32, above: f32 (-1)) {
+        this.open = true
+        this.x = x
+        this.y = y
+        this.above = above
+    }
+
+    /// Opens below an element of the last frame, aligned with its left edge.
+    + fn open_below(b: Bounds) { this.open_at(b.x, b.bottom + 4, b.y - 4) }
+
+    + fn close() { this.open = false }
+
+    /// The popup with `content` when open, or an element that takes no space. Put it anywhere
+    /// in the tree; it is painted above everything.
+    + fn render(win: Window, content: Div) Div {
+        if !this.open : return div().hidden()
+        return div().absolute().inset(0)
+            .child(anchored(0, 0).w(win.width).h(win.height)
+                .on_mouse_down(fn(e) { this.close() })
+                .on_scroll(fn(e) { e.stop_propagation() }))
+            .child(anchored(this.x, this.y, this.above).on_dismiss(fn() { this.close() }).child(content))
+    }
+}
+
+/// An entry of `menu`.
++ class MenuItem {
+    + label: String ("")
+    + icon: ?Icon (null)
+    /// Text on the right, such as a key combination.
+    + shortcut: String ("")
+    + action: ?fn()() (null)
+    + disabled: bool (false)
+    /// Shown in the danger color, for destructive actions.
+    + danger: bool (false)
+    /// A line instead of an entry.
+    + separator: bool (false)
+
+    + static fn new(label: String, action: fn()()) MenuItem { return MenuItem{ label: label, action: action } }
+    + static fn line() MenuItem { return MenuItem{ separator: true } }
+    + fn with_icon(icon: Icon) MenuItem { this.icon = icon; return this }
+    + fn with_shortcut(text: String) MenuItem { this.shortcut = text; return this }
+    + fn as_danger() MenuItem { this.danger = true; return this }
+}
+
+/// A panel of menu entries. Choosing one calls `close` and then the entry's action.
++ fn menu(win: Window, items: Array[MenuItem], close: fn()()) Div {
+    let t = win.theme
+    let panel = div().min_w(180).p(4).gap(1).bg(t.elevated).border(1).border_color(t.border).rounded(t.radius + 2)
+        .shadow_lg().text_sm()
+    each items as item {
+        if item.separator {
+            panel.child(div().h(1).my(4).mx(4).bg(t.border))
+            continue
+        }
+        let color = item.disabled ? t.muted : (item.danger ? t.danger : t.text)
+        let row = div().flex().items_center().gap(8).h(30).px(8).rounded(t.radius).text_color(color)
+        let ic = item.icon
+        if isset(ic) {
+            row.child(icon(ic, 15))
+        }
+        row.child(div().flex_1().whitespace_nowrap().child(item.label))
+        if item.shortcut.length > 0 : row.child(div().pl(16).text_xs().text_color(t.muted).child(item.shortcut))
+        if !item.disabled {
+            let hover = item.danger ? t.danger.opacity(0.15) : t.accent.opacity(0.18)
+            row.cursor_pointer().hover(fn(s) { s.bg(hover) }).on_click(fn(e) {
+                close()
+                let action = item.action
+                if isset(action) : action()
+            })
+        }
+        panel.child(row)
+    }
+    return panel
+}
+
+// ---- Select ----
+
+/// A dropdown to choose one of several options.
++ class Select is Render {
+    + options: Array[String] (.{})
+    ~+ selected: uint (0)
+    + placeholder: String ("Select…")
+    /// Called with the index of the chosen option.
+    + on_change: ?fn(uint)() (null)
+    + width: f32 (180)
+    ~+ id: String (next_widget_id("select"))
+    popup: Popup (Popup{})
+    highlighted: uint (0)
+    handle: ?FocusHandle (null)
+
+    + static fn new(options: Array[String], selected: uint (0)) Select {
+        return Select{ options: options, selected: selected }
+    }
+
+    + get value: String { return this.options.get(this.selected) !? "" }
+
+    + fn select(index: uint) {
+        if index >= this.options.length : return
+        this.selected = index
+        let f = this.on_change
+        if isset(f) : f(index)
+    }
+
+    - fn toggle(win: Window) {
+        if this.popup.open {
+            this.popup.close()
+            return
+        }
+        let b = win.bounds_of(this.id) ?? Bounds{ x: win.mouse_x, y: win.mouse_y }
+        this.highlighted = this.selected
+        this.popup.open_below(b)
+    }
+
+    + fn render(win: Window) Div {
+        let t = win.theme
+        let fh = this.handle ?? win.focus_handle()
+        this.handle = fh
+        let label = this.options.length > 0 ? this.value : this.placeholder
+        let list = div().w(this.width).p(4).gap(1).bg(t.elevated).border(1).border_color(t.border).rounded(t.radius + 2)
+            .shadow_lg().max_h(280).overflow_y_scroll().text_sm()
+        each this.options as option, i {
+            let chosen = i == this.selected
+            list.child(div().flex().items_center().gap(8).h(30).px(8).rounded(t.radius).cursor_pointer()
+                .when(i == this.highlighted, fn(d) { d.bg(t.accent.opacity(0.18)) })
+                .hover(fn(s) { s.bg(t.accent.opacity(0.18)) })
+                .on_click(fn(e) {
+                    this.popup.close()
+                    this.select(i)
+                })
+                .child(div().flex_1().truncate().child(option))
+                .child(icon(.check, 14).when(!chosen, fn(d) { d.invisible() })))
+        }
+        return div().id(this.id).w(this.width).h(32).px(10).flex().items_center().gap(8).flex_shrink_0()
+            .bg(t.surface).border(1).border_color(this.popup.open || fh.is_focused() ? t.accent : t.border).rounded(t.radius)
+            .cursor_pointer().track_focus(fh)
+            .hover(fn(s) { s.bg(t.elevated) })
+            .on_click(fn(e) { this.toggle(win) })
+            .on_key_down(fn(e) {
+                if e.key == .enter || e.key == .space {
+                    if this.popup.open {
+                        this.popup.close()
+                        this.select(this.highlighted)
+                    } else {
+                        this.toggle(win)
+                    }
+                } else if e.key == .down {
+                    if this.popup.open : this.highlighted = (this.highlighted + 1).min(this.options.length - 1)
+                    else : this.select((this.selected + 1).min(this.options.length - 1))
+                } else if e.key == .up {
+                    if this.popup.open : this.highlighted = this.highlighted - this.highlighted.min(1)
+                    else : this.select(this.selected - this.selected.min(1))
+                } else {
+                    return
+                }
+                e.stop_propagation()
+            })
+            .child(div().flex_1().truncate().text_color(this.options.length > 0 ? t.text : t.muted).child(label))
+            .child(icon(.chevron_down, 14).text_color(t.muted))
+            .child(this.popup.render(win, list))
+    }
+}
+
+// ---- Dialogs ----
+
+/// A dialog in the middle of the window over a dimmed backdrop. Clicking the backdrop or
+/// pressing Escape calls `on_close`.
++ fn modal(win: Window, content: Div, on_close: fn()()) Div {
+    return anchored(0, 0).w(win.width).h(win.height).center().bg(rgba(0x00000088))
+        .on_dismiss(on_close)
+        .on_click(fn(e) { on_close() })
+        .on_scroll(fn(e) { e.stop_propagation() })
+        // Clicks inside the dialog stay there
+        .child(content.on_click(fn(e) {}))
+}
+
+/// A dialog panel with a title, a body and buttons at the bottom right, for use in `modal`.
++ fn dialog(win: Window, title: String, body: Div, buttons: Array[Div]) Div {
+    let t = win.theme
+    let footer = div().flex().justify_end().gap(8)
+    each buttons as b : footer.child(b)
+    return div().w(420).max_w(win.width - 32).p(20).gap(16).bg(t.surface).border(1).border_color(t.border)
+        .rounded(t.radius * 2).shadow_lg()
+        .child(div().text_lg().font_semibold().child(title))
+        .child(body)
+        .child(footer)
+}
+
+// ---- Tabs ----
+
+/// A row of tabs with a line under the selected one that slides to the new tab. `id` names the
+/// row, unique in the window.
++ fn tabs(win: Window, id: String, labels: Array[String], selected: uint, on_select: fn(uint)()) Div {
+    let t = win.theme
+    let row = div().id(id).flex().gap(4).border_b(1).border_color(t.border)
+    each labels as label, i {
+        let active = i == selected
+        row.child(div().id(id + "/" + i).px(12).h(36).flex().items_center().cursor_pointer().text_sm()
+            .text_color(active ? t.text : t.muted).when(active, fn(d) { d.font_medium() })
+            .hover(fn(s) { s.text_color(t.text) })
+            .on_click(fn(e) { on_select(i) })
+            .child(label))
+    }
+    // The line follows the selected tab of the last frame
+    let parent = win.bounds_of(id)
+    let tab = win.bounds_of(id + "/" + selected)
+    if isset(parent) && isset(tab) {
+        let x = win.transition(id + "/x", tab.x - parent.x, 0.2)
+        let w = win.transition(id + "/w", tab.w, 0.2)
+        row.child(div().absolute().left(x).bottom(-1).w(w).h(2).rounded(1).bg(t.accent))
+    }
+    return row
+}
+
+// ---- Small parts ----
+
+/// A spinning circle, for work in progress. It keeps the window drawing while shown.
++ fn spinner(win: Window, size: f32 (18)) Div {
+    win.request_frame()
+    let angle = (win.time * 300 % 360).to(f32)
+    let color = win.theme.accent
+    let track = win.theme.border
+    return canvas(fn(p, b) {
+        let r = b.w.min(b.h) / 2 - 1.5
+        let c = b.center
+        p.ring(c.x, c.y, r + 1.25, track, 2.5)
+        p.arc(c.x, c.y, r, angle, angle + 100, color, 2.5)
+    }).size(size).flex_shrink_0()
+}
+
+/// A round option button with a label. Choose it in `on_click`.
++ fn radio(win: Window, checked: bool, label: String) Div {
+    let t = win.theme
+    let mark = div().size(16).rounded_full().border(1).flex_shrink_0().center()
+        .border_color(checked ? t.accent : t.border).bg(t.surface)
+    if checked : mark.border(5)
+    let row = div().flex().items_center().gap(8).cursor_pointer().child(mark)
+    if label.length > 0 : row.child(label)
+    return row
+}
+
+/// A small rounded label, such as a count or a status.
++ fn badge(text: String, color: Color) Div {
+    return div().px(8).h(20).flex().items_center().rounded_full().bg(color.opacity(0.18)).text_color(color)
+        .text_xs().font_medium().whitespace_nowrap().flex_shrink_0().child(text)
+}
+
+/// A key or key combination in a box, such as "Ctrl+S".
++ fn kbd(win: Window, keys: String) Div {
+    let t = win.theme
+    return div().px(6).h(20).flex().items_center().rounded(4).border(1).border_color(t.border).bg(t.background)
+        .text_xs().text_color(t.muted).whitespace_nowrap().flex_shrink_0().child(keys)
+}
+
+/// A circle with initials, for a person.
++ fn avatar(name: String, color: Color, size: f32 (32)) Div {
+    let initials = ""
+    each name.words() as word {
+        if initials.utf8.length < 2 : initials += word.utf8.get(0).upper()
+    }
+    return div().size(size).rounded_full().bg(color).center().text_color(white()).font_semibold()
+        .text_size(size * 0.4).flex_shrink_0().child(initials)
+}
+
+/// A panel on the background: surface color, border, rounded corners and padding.
++ fn card(win: Window) Div {
+    let t = win.theme
+    return div().p(16).bg(t.surface).border(1).border_color(t.border).rounded(t.radius * 2)
+}

@@ -65,6 +65,8 @@
 + class Painter {
     window: Window
     alpha: f32 (1)
+    /// The text color the canvas inherits, for drawing that should match the text around it.
+    ~+ color: Color (.{ r: 255, g: 255, b: 255 })
 
     + fn fill(bounds: Bounds, color: Color, radius: f32 (0)) {
         this.window.scene.add(.{ kind: .quad, bounds: bounds, color: color.fade(this.alpha), corners: Corners.all(radius).clamp(bounds.w, bounds.h) })

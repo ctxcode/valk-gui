@@ -1,0 +1,131 @@
+use gui
+
+class Gallery is gui.Render {
+    select: gui.Select (gui.Select.new(.{ "Red", "Green", "Blue" }))
+    popup: gui.Popup (gui.Popup{})
+    show_dialog: bool (false)
+    chosen: Array[String] (.{})
+    tab: uint (0)
+    radio: uint (0)
+
+    fn render(win: gui.Window) gui.Div {
+        let root = gui.div().size_full().p(10).gap(10).items_start()
+            .on_mouse_down(fn(e) {
+                if e.button == .right : this.popup.open_at(e.x, e.y)
+            })
+            .child(this.select.render(win))
+            .child(gui.tabs(win, "tabs", .{ "One", "Two", "Three" }, this.tab, fn(i) { this.tab = i }))
+            .child(gui.radio(win, this.radio == 0, "First").id("r0").on_click(fn(e) { this.radio = 0 }))
+            .child(gui.radio(win, this.radio == 1, "Second").id("r1").on_click(fn(e) { this.radio = 1 }))
+            .child(gui.div().flex().gap(6).child(gui.badge("New", win.theme.accent)).child(gui.kbd(win, "Ctrl+S")).child(gui.avatar("Ada Lovelace", gui.rgb(0x8b5cf6))))
+            .child(gui.button(win, "Open dialog").id("open").on_click(fn(e) { this.show_dialog = true }))
+            .child(gui.icon(.search, 20).id("icon"))
+            .child(this.popup.render(win, gui.menu(win, .{
+                gui.MenuItem.new("Copy", fn() { this.chosen.append("copy") }).with_shortcut("Ctrl+C").with_icon(.copy),
+                gui.MenuItem.line(),
+                gui.MenuItem.new("Delete", fn() { this.chosen.append("delete") }).as_danger()
+            }, fn() { this.popup.close() })))
+        if this.show_dialog {
+            root.child(gui.modal(win, gui.dialog(win, "Delete file?", gui.div().child("This cannot be undone."), .{
+                gui.button(win, "Cancel").id("cancel").on_click(fn(e) { this.show_dialog = false }),
+                gui.button_primary(win, "Delete").id("confirm").on_click(fn(e) {
+                    this.chosen.append("confirmed")
+                    this.show_dialog = false
+                })
+            }), fn() { this.show_dialog = false }))
+        }
+        return root
+    }
+}
+
+test "Widgets: select opens, picks with the mouse and the keyboard" {
+    let app = Gallery{}
+    let win = gui.headless(app, 500, 500)
+    assert(win.scene.has_text("Red"))
+    assert(win.click_on(app.select.id))
+    assert(win.scene.has_text("Green") && win.scene.has_text("Blue"))
+    let green = win.scene.find_text("Green") ?! return
+    win.click(green.bounds.x + 2, green.bounds.y + 5)
+    assert(app.select.selected == 1 && !win.scene.has_text("Blue"))
+    // Keyboard: open, move down, choose
+    win.press(.enter)
+    win.press(.down)
+    win.press(.enter)
+    assert(app.select.value == "Blue")
+    // Escape closes, a click outside too
+    win.press(.enter)
+    assert(win.scene.has_text("Red"))
+    win.press(.escape)
+    assert(!win.scene.has_text("Green"))
+    win.click_on(app.select.id)
+    win.click(480, 480)
+    assert(!win.scene.has_text("Green"))
+}
+
+test "Widgets: context menu and menu items" {
+    let app = Gallery{}
+    let win = gui.headless(app, 500, 500)
+    win.mouse_move(300, 300)
+    win.mouse_down(300, 300, .right)
+    win.mouse_up(300, 300, .right)
+    win.draw()
+    let copy = win.scene.find_text("Copy") ?! return
+    assert(win.scene.has_text("Ctrl+C"))
+    assert(copy.bounds.x > 300 && copy.bounds.y > 300)
+    win.click(copy.bounds.x + 2, copy.bounds.y + 5)
+    assert(app.chosen == .{ "copy" })
+    assert(!win.scene.has_text("Copy"))
+    // Near the corner it opens up and to the left
+    win.mouse_move(495, 495)
+    win.mouse_down(495, 495, .right)
+    win.mouse_up(495, 495, .right)
+    win.draw()
+    let del = win.scene.find_text("Delete") ?! return
+    assert(del.bounds.x < 495 && del.bounds.y < 495)
+    win.click(del.bounds.x + 2, del.bounds.y + 5)
+    assert(app.chosen == .{ "copy", "delete" })
+}
+
+test "Widgets: modal dialogs block the rest and close" {
+    let app = Gallery{}
+    let win = gui.headless(app, 500, 500)
+    win.click_on("open")
+    assert(win.scene.has_text("Delete file?"))
+    // Clicks inside the dialog do not close it; the backdrop does
+    let title = win.scene.find_text("Delete file?") ?! return
+    win.click(title.bounds.x + 2, title.bounds.y + 5)
+    assert(app.show_dialog)
+    win.click(5, 5)
+    assert(!app.show_dialog)
+    win.click_on("open")
+    win.press(.escape)
+    assert(!app.show_dialog)
+    win.click_on("open")
+    win.click_on("confirm")
+    assert(app.chosen == .{ "confirmed" } && !app.show_dialog)
+}
+
+test "Widgets: tabs, radios and small parts" {
+    let app = Gallery{}
+    let win = gui.headless(app, 500, 500)
+    win.draw()
+    win.click_on("tabs/2")
+    assert(app.tab == 2)
+    // The line slides over to the new tab
+    win.advance(0.05)
+    win.advance(0.3)
+    let tab = bounds(win, "tabs/2")
+    let line = win.scene.items.filter(fn(p: gui.Primitive) bool { return p.kind == .quad && p.bounds.h == 2 })
+    let last = line.last() ! return
+    assert(same(last.bounds.x, tab.x) && same(last.bounds.w, tab.w))
+    win.click_on("r1")
+    assert(app.radio == 1)
+    assert(win.scene.has_text("AL") && win.scene.has_text("New") && win.scene.has_text("Ctrl+S"))
+    let ic = bounds(win, "icon")
+    assert(same(ic.w, 20))
+}
+
+test "Widgets: spinner keeps frames coming" {
+    let win = gui.headless(view(fn(win) { return gui.div().child(gui.spinner(win)) }), 100, 100)
+    assert(win.frame_requested)
+}

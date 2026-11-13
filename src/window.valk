@@ -310,7 +310,7 @@
             let paint = n.painter
             if isset(paint) {
                 this.push_clip(b)
-                paint(Painter{ window: this, alpha: a }, b)
+                paint(Painter{ window: this, alpha: a, color: n.resolved_color }, b)
                 this.pop_clip()
             }
             return

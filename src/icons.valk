@@ -1,0 +1,248 @@
+
+/// The built-in line icons.
++ enum Icon {
+    check, x, plus, minus
+    chevron_down, chevron_up, chevron_left, chevron_right
+    arrow_left, arrow_right, arrow_up, arrow_down
+    search, menu, more, trash, edit, settings, home, user, file, folder
+    star, heart, bell, calendar, copy, external, refresh, play, pause
+    info, warning, sun, moon, grid, list, download, upload, filter
+    lock, mail, code, terminal, clock, chart, bolt, eye, sidebar, circle
+}
+
+/// An icon drawn with lines in the current text color, `size` pixels square.
++ fn icon(name: Icon, size: f32 (16)) Div {
+    return canvas(fn(p, b) { draw_icon(p, name, b, p.color) }).size(size).flex_shrink_0()
+}
+
+/// Draws an icon into `b` with the given color, for use in a canvas.
++ fn draw_icon(p: Painter, name: Icon, b: Bounds, color: Color) {
+    let s = b.w.min(b.h) / 24
+    let ox = b.x + (b.w - 24 * s) / 2
+    let oy = b.y + (b.h - 24 * s) / 2
+    let w = (1.75 * s).max(1.1)
+    // Points in a 24 by 24 grid
+    let pt = fn(x: f32, y: f32) Point { return .{ x: ox + x * s, y: oy + y * s } }
+    let line = fn(x1: f32, y1: f32, x2: f32, y2: f32) { p.line(ox + x1 * s, oy + y1 * s, ox + x2 * s, oy + y2 * s, color, w) }
+    let poly = fn(coords: Array[f32]) {
+        let points = Array[Point]{}
+        let i: uint = 0
+        while i + 1 < coords.length {
+            points.append(pt(coords.get(i) !? 0, coords.get(i + 1) !? 0))
+            i += 2
+        }
+        p.polyline(points, color, w)
+    }
+    let ring = fn(x: f32, y: f32, r: f32) { p.ring(ox + x * s, oy + y * s, r * s + w / 2, color, w) }
+    let dot = fn(x: f32, y: f32, r: f32) { p.circle(ox + x * s, oy + y * s, r * s, color) }
+    let arc = fn(x: f32, y: f32, r: f32, a: f32, e: f32) { p.arc(ox + x * s, oy + y * s, r * s, a, e, color, w) }
+    let box = fn(x: f32, y: f32, bw: f32, bh: f32, r: f32) { p.stroke(.{ x: ox + x * s - w / 2, y: oy + y * s - w / 2, w: bw * s + w, h: bh * s + w }, color, w, r * s) }
+    let rays = fn(r1: f32, r2: f32, count: uint) {
+        each 0 .. count as i {
+            let a = i.to(f32) * 6.2831853 / count.to(f32)
+            line(12 + cos32(a) * r1, 12 + sin32(a) * r1, 12 + cos32(a) * r2, 12 + sin32(a) * r2)
+        }
+    }
+    match name {
+        .check => poly(.{ 5, 12.5, 10, 17.5, 19, 7 })
+        .x => {
+            line(6, 6, 18, 18)
+            line(18, 6, 6, 18)
+        }
+        .plus => {
+            line(12, 5, 12, 19)
+            line(5, 12, 19, 12)
+        }
+        .minus => line(5, 12, 19, 12)
+        .chevron_down => poly(.{ 6, 9, 12, 15, 18, 9 })
+        .chevron_up => poly(.{ 6, 15, 12, 9, 18, 15 })
+        .chevron_left => poly(.{ 15, 6, 9, 12, 15, 18 })
+        .chevron_right => poly(.{ 9, 6, 15, 12, 9, 18 })
+        .arrow_left => {
+            line(19, 12, 5, 12)
+            poly(.{ 11, 6, 5, 12, 11, 18 })
+        }
+        .arrow_right => {
+            line(5, 12, 19, 12)
+            poly(.{ 13, 6, 19, 12, 13, 18 })
+        }
+        .arrow_up => {
+            line(12, 19, 12, 5)
+            poly(.{ 6, 11, 12, 5, 18, 11 })
+        }
+        .arrow_down => {
+            line(12, 5, 12, 19)
+            poly(.{ 6, 13, 12, 19, 18, 13 })
+        }
+        .search => {
+            ring(10.5, 10.5, 6)
+            line(15, 15, 20, 20)
+        }
+        .menu => {
+            line(4, 6, 20, 6)
+            line(4, 12, 20, 12)
+            line(4, 18, 20, 18)
+        }
+        .more => {
+            dot(5.5, 12, 1.7)
+            dot(12, 12, 1.7)
+            dot(18.5, 12, 1.7)
+        }
+        .trash => {
+            line(4, 7, 20, 7)
+            poly(.{ 9, 7, 9, 4.5, 15, 4.5, 15, 7 })
+            poly(.{ 6, 7, 7, 20, 17, 20, 18, 7 })
+            line(10, 11, 10, 16)
+            line(14, 11, 14, 16)
+        }
+        .edit => {
+            poly(.{ 4, 20, 4.5, 15.5, 15.5, 4.5, 19.5, 8.5, 8.5, 19.5, 4, 20 })
+            line(13, 7, 17, 11)
+        }
+        .settings => {
+            ring(12, 12, 3)
+            ring(12, 12, 7)
+            rays(7.5, 10, 8)
+        }
+        .home => {
+            poly(.{ 3, 11, 12, 3.5, 21, 11 })
+            poly(.{ 5.5, 9, 5.5, 20, 18.5, 20, 18.5, 9 })
+            poly(.{ 10, 20, 10, 14, 14, 14, 14, 20 })
+        }
+        .user => {
+            ring(12, 8, 4)
+            arc(12, 22, 8.5, 205, 335)
+        }
+        .file => {
+            poly(.{ 6, 3, 14, 3, 19, 8, 19, 21, 6, 21, 6, 3 })
+            poly(.{ 14, 3, 14, 8, 19, 8 })
+        }
+        .folder => poly(.{ 3, 6, 3, 19, 21, 19, 21, 8.5, 11.5, 8.5, 9.5, 5.5, 3, 5.5, 3, 6 })
+        .star => {
+            let points = Array[f32]{}
+            each 0 .. 11 as i {
+                let a = -1.5707963 + i.to(f32) * 3.14159265 / 5
+                let r: f32 = i % 2 == 0 ? 9.5 : 4.2
+                points.append(12 + cos32(a) * r)
+                points.append(12.8 + sin32(a) * r)
+            }
+            poly(points)
+        }
+        .heart => {
+            arc(8.25, 9.5, 4.25, 140, 360)
+            arc(15.75, 9.5, 4.25, 180, 400)
+            poly(.{ 5, 12.2, 12, 19.5, 19, 12.2 })
+        }
+        .bell => {
+            arc(12, 11, 6, 180, 360)
+            line(6, 11, 6, 16)
+            line(18, 11, 18, 16)
+            line(4, 17, 20, 17)
+            line(10, 20.5, 14, 20.5)
+        }
+        .calendar => {
+            box(4, 5, 16, 15, 2)
+            line(4, 10, 20, 10)
+            line(8, 3, 8, 7)
+            line(16, 3, 16, 7)
+        }
+        .copy => {
+            box(9, 9, 11, 11, 2)
+            poly(.{ 15, 9, 15, 4, 4, 4, 4, 15, 9, 15 })
+        }
+        .external => {
+            poly(.{ 14, 4, 20, 4, 20, 10 })
+            line(20, 4, 11, 13)
+            poly(.{ 18, 14, 18, 20, 4, 20, 4, 6, 10, 6 })
+        }
+        .refresh => {
+            arc(12, 12, 7.5, -40, 250)
+            poly(.{ 18.5, 3.5, 17.7, 7.2, 14, 6.4 })
+        }
+        .play => p.triangle(pt(8, 5), pt(19.5, 12), pt(8, 19), color)
+        .pause => {
+            p.fill(.{ x: ox + 6.5 * s, y: oy + 5 * s, w: 3.5 * s, h: 14 * s }, color, s)
+            p.fill(.{ x: ox + 14 * s, y: oy + 5 * s, w: 3.5 * s, h: 14 * s }, color, s)
+        }
+        .info => {
+            ring(12, 12, 9)
+            line(12, 11, 12, 16.5)
+            dot(12, 7.8, 1.25)
+        }
+        .warning => {
+            poly(.{ 12, 3.5, 21.5, 20, 2.5, 20, 12, 3.5 })
+            line(12, 9.5, 12, 14)
+            dot(12, 17, 1.2)
+        }
+        .sun => {
+            ring(12, 12, 4)
+            rays(7, 9.5, 8)
+        }
+        .moon => {
+            arc(12, 12, 8.5, -70, 200)
+            arc(16.5, 7.5, 7.2, 152, 42)
+        }
+        .grid => {
+            box(4, 4, 6.5, 6.5, 1.5)
+            box(13.5, 4, 6.5, 6.5, 1.5)
+            box(4, 13.5, 6.5, 6.5, 1.5)
+            box(13.5, 13.5, 6.5, 6.5, 1.5)
+        }
+        .list => {
+            dot(5, 6.5, 1.4)
+            dot(5, 12, 1.4)
+            dot(5, 17.5, 1.4)
+            line(9, 6.5, 20, 6.5)
+            line(9, 12, 20, 12)
+            line(9, 17.5, 20, 17.5)
+        }
+        .download => {
+            line(12, 4, 12, 15)
+            poly(.{ 7, 10, 12, 15, 17, 10 })
+            line(5, 20, 19, 20)
+        }
+        .upload => {
+            line(12, 15, 12, 4)
+            poly(.{ 7, 9, 12, 4, 17, 9 })
+            line(5, 20, 19, 20)
+        }
+        .filter => poly(.{ 4, 5, 20, 5, 14, 12.5, 14, 19, 10, 17, 10, 12.5, 4, 5 })
+        .lock => {
+            box(5, 11, 14, 10, 2)
+            arc(12, 11, 4.5, 180, 360)
+        }
+        .mail => {
+            box(3, 5, 18, 14, 2)
+            poly(.{ 4, 6.5, 12, 13, 20, 6.5 })
+        }
+        .code => {
+            poly(.{ 8, 7, 3, 12, 8, 17 })
+            poly(.{ 16, 7, 21, 12, 16, 17 })
+        }
+        .terminal => {
+            poly(.{ 5, 8, 9, 12, 5, 16 })
+            line(11, 16, 19, 16)
+        }
+        .clock => {
+            ring(12, 12, 9)
+            poly(.{ 12, 7, 12, 12, 15.5, 14 })
+        }
+        .chart => {
+            line(3, 20, 21, 20)
+            line(7, 17, 7, 12)
+            line(12, 17, 12, 6)
+            line(17, 17, 17, 10)
+        }
+        .bolt => poly(.{ 13, 3, 5, 13.5, 12, 13.5, 11, 21, 19, 10.5, 12, 10.5, 13, 3 })
+        .eye => {
+            arc(12, 21, 12, 222, 318)
+            arc(12, 3, 12, 42, 138)
+            ring(12, 12, 3)
+        }
+        .sidebar => {
+            box(3, 4, 18, 16, 2)
+            line(9, 4, 9, 20)
+        }
+        .circle => ring(12, 12, 8)
+    }
+}
