@@ -1,0 +1,124 @@
+use raylib
+
+// Rounded rectangles, borders, shadows, circles and lines drawn with a signed distance field
+// in a fragment shader: smooth edges at any size, without multisampling.
+
+value SDF_VS (r"#version 330
+in vec3 vertexPosition;
+uniform mat4 mvp;
+out vec2 fragPos;
+void main() {
+    fragPos = vertexPosition.xy;
+    gl_Position = mvp * vec4(vertexPosition, 1.0);
+}
+")
+
+value SDF_FS (r"#version 330
+in vec2 fragPos;
+uniform vec4 rect;
+uniform float radius;
+uniform float border;
+uniform float blur;
+uniform int mode;
+uniform vec4 fill;
+uniform vec4 stroke;
+out vec4 finalColor;
+
+float box(vec2 p, vec2 half_size, float r) {
+    vec2 q = abs(p) - half_size + r;
+    return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;
+}
+
+float erf(float x) {
+    float s = sign(x);
+    float a = abs(x);
+    x = 1.0 + (0.278393 + (0.230389 + 0.078108 * (a * a)) * a) * a;
+    x *= x;
+    return s - s / (x * x);
+}
+
+void main() {
+    if (mode == 2) {
+        // A line from rect.xy to rect.zw, `border` wide
+        vec2 pa = fragPos - rect.xy;
+        vec2 ba = rect.zw - rect.xy;
+        float h = clamp(dot(pa, ba) / max(dot(ba, ba), 0.0001), 0.0, 1.0);
+        float d = length(pa - ba * h) - border * 0.5;
+        float aa = max(fwidth(d), 0.0001);
+        finalColor = vec4(fill.rgb, fill.a * clamp(0.5 - d / aa, 0.0, 1.0));
+        return;
+    }
+    vec2 half_size = rect.zw * 0.5;
+    vec2 p = fragPos - rect.xy - half_size;
+    float r = min(radius, min(half_size.x, half_size.y));
+    float d = box(p, half_size, r);
+    if (mode == 1) {
+        // A shadow: the box blurred by a gaussian with sigma blur / 2
+        float sigma = max(blur * 0.5, 0.0001);
+        float a = 0.5 - 0.5 * erf(d / (sigma * 1.41421356));
+        finalColor = vec4(fill.rgb, fill.a * a);
+        return;
+    }
+    float aa = max(fwidth(d), 0.0001);
+    float outer = clamp(0.5 - d / aa, 0.0, 1.0);
+    vec4 c = vec4(fill.rgb * fill.a, fill.a);
+    if (border > 0.0) {
+        float inner = clamp(0.5 - (d + border) / aa, 0.0, 1.0);
+        c = mix(vec4(stroke.rgb * stroke.a, stroke.a), c, inner);
+    }
+    c *= outer;
+    finalColor = c.a > 0.0 ? vec4(c.rgb / c.a, c.a) : vec4(0.0);
+}
+")
+
+class Sdf {
+    shader: raylib.Shader
+    rect: i32
+    radius: i32
+    border: i32
+    blur: i32
+    mode: i32
+    fill: i32
+    stroke: i32
+
+    static fn load() Sdf {
+        let s = raylib.load_shader_from_memory(SDF_VS, SDF_FS)
+        return Sdf{
+            shader: s, rect: s.location("rect"), radius: s.location("radius"), border: s.location("border"),
+            blur: s.location("blur"), mode: s.location("mode"), fill: s.location("fill"), stroke: s.location("stroke")
+        }
+    }
+
+    fn unload() { raylib.unload_shader(this.shader) }
+
+    /// A box with rounded corners and a border inside its edge.
+    fn box(b: Bounds, radius: f32, fill: Color, border: f32, stroke: Color) {
+        this.draw(0, .{ x: b.x, y: b.y, z: b.w, w: b.h }, radius, border, 0, fill, stroke, b.grow(1))
+    }
+
+    fn shadow(b: Bounds, radius: f32, blur: f32, color: Color) {
+        this.draw(1, .{ x: b.x, y: b.y, z: b.w, w: b.h }, radius, 0, blur, color, color, b.grow(blur * 1.5 + 1))
+    }
+
+    fn line(a: Point, b: Point, width: f32, color: Color) {
+        let x = a.x.min(b.x)
+        let y = a.y.min(b.y)
+        let area = Bounds{ x: x, y: y, w: (a.x - b.x).abs(), h: (a.y - b.y).abs() }.grow(width / 2 + 1)
+        this.draw(2, .{ x: a.x, y: a.y, z: b.x, w: b.y }, 0, width, 0, color, color, area)
+    }
+
+    - fn draw(mode: i32, shape: raylib.Vector4, radius: f32, border: f32, blur: f32, fill: Color, stroke: Color, area: Bounds) {
+        let s = this.shader
+        // Every draw has its own uniforms: switching the shader draws what was batched before
+        raylib.begin_shader_mode(s)
+        s.set_int(this.mode, mode)
+        s.set_vec4(this.rect, shape)
+        s.set_float(this.radius, radius)
+        s.set_float(this.border, border)
+        s.set_float(this.blur, blur)
+        s.set_color(this.fill, to_rl(fill))
+        s.set_color(this.stroke, to_rl(stroke))
+        raylib.draw_rectangle_rec(rect(area), raylib.WHITE)
+        raylib.end_shader_mode()
+    }
+}

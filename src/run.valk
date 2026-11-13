@@ -22,6 +22,7 @@ value EM_SCALE (1.21)
     raylib.set_target_fps(60)
 
     let platform = RaylibPlatform{}
+    let sdf = Sdf.load()
     let win = Window.new(root, raylib.get_screen_width().to(f32), raylib.get_screen_height().to(f32), platform, options.theme)
     win.title = options.title
     each options.fonts as f : win.fonts.append(f)
@@ -44,7 +45,7 @@ value EM_SCALE (1.21)
 
         raylib.begin_drawing()
         raylib.clear_background(to_rl(win.theme.background))
-        draw_scene(win, platform)
+        draw_scene(win, platform, sdf)
         if isset(shot) && win.frames >= 3 && win.time >= shot_after {
             // Ending the scissor mode draws what is batched, before the buffers swap
             raylib.end_scissor_mode()
@@ -62,6 +63,7 @@ value EM_SCALE (1.21)
             raylib.enable_event_waiting()
         }
     }
+    sdf.unload()
     platform.unload()
     raylib.close_window()
 }
@@ -315,12 +317,12 @@ fn to_rl(c: Color) raylib.Color { return .{ r: c.r, g: c.g, b: c.b, a: c.a } }
 
 fn rect(b: Bounds) raylib.Rectangle { return .{ x: b.x, y: b.y, width: b.w, height: b.h } }
 
-fn draw_scene(win: Window, p: RaylibPlatform) {
+fn draw_scene(win: Window, p: RaylibPlatform, sdf: Sdf) {
     let scale = raylib.get_window_scale_dpi().x.max(1)
     each win.scene.items as item {
         match item.kind {
-            .quad => draw_quad(item)
-            .shadow => draw_shadow(item)
+            .quad => draw_quad(item, sdf)
+            .shadow => sdf.shadow(item.bounds, item.radius, item.width, item.color)
             .text => {
                 let f = p.font(item.font)
                 let size = item.font.size * EM_SCALE
@@ -335,9 +337,9 @@ fn draw_scene(win: Window, p: RaylibPlatform) {
                     raylib.draw_texture_pro(t, .{ width: t.width.to(f32), height: t.height.to(f32) }, rect(item.bounds), .{}, 0, to_rl(item.color))
                 }
             }
-            .line => raylib.draw_line_ex(.{ x: item.points[0].x, y: item.points[0].y }, .{ x: item.points[1].x, y: item.points[1].y }, item.width, to_rl(item.color))
-            .circle => raylib.draw_circle_v(.{ x: item.bounds.x + item.radius, y: item.bounds.y + item.radius }, item.radius, to_rl(item.color))
-            .ring => raylib.draw_ring(.{ x: item.bounds.x + item.radius, y: item.bounds.y + item.radius }, (item.radius - item.width).max(0), item.radius, 0, 360, 0, to_rl(item.color))
+            .line => sdf.line(item.points[0], item.points[1], item.width, item.color)
+            .circle => sdf.box(item.bounds, item.radius, item.color, 0, item.color)
+            .ring => sdf.box(item.bounds, item.radius, transparent(), item.width, item.color)
             .triangle => {
                 let a = item.points[0]
                 let b = item.points[1]
@@ -360,33 +362,13 @@ fn draw_scene(win: Window, p: RaylibPlatform) {
     }
 }
 
-fn roundness(b: Bounds, radius: f32) f32 {
-    let half = b.w.min(b.h) / 2
-    if half <= 0 : return 0
-    return (radius / half).min(1)
-}
-
-fn draw_quad(item: Primitive) {
+fn draw_quad(item: Primitive, sdf: Sdf) {
     let b = item.bounds
     if b.w <= 0 || b.h <= 0 : return
-    let r = item.radius
     let border = item.border
     let has_border = !border.is_zero() && !item.border_color.is_transparent()
-    if r > 0.5 {
-        if has_border && !item.color.is_transparent() && item.color.a == 255 {
-            // Border color underneath, the background inset by the border on top
-            raylib.draw_rectangle_rounded(rect(b), roundness(b, r), 0, to_rl(item.border_color))
-            let inner = b.inset(border)
-            let ir = (r - border.top.max(border.left)).max(0)
-            raylib.draw_rectangle_rounded(rect(inner), roundness(inner, ir), 0, to_rl(item.color))
-            return
-        }
-        if !item.color.is_transparent() : raylib.draw_rectangle_rounded(rect(b), roundness(b, r), 0, to_rl(item.color))
-        if has_border {
-            let w = border.top.max(border.left)
-            let inner = b.inset(Edges.all(w))
-            raylib.draw_rectangle_rounded_lines_ex(rect(inner), roundness(inner, (r - w).max(0)), 0, w, to_rl(item.border_color))
-        }
+    if item.radius > 0 || (has_border && border.is_uniform()) {
+        sdf.box(b, item.radius, item.color, has_border ? border.top : 0, item.border_color)
         return
     }
     if !item.color.is_transparent() : raylib.draw_rectangle_rec(rect(b), to_rl(item.color))
@@ -396,16 +378,5 @@ fn draw_quad(item: Primitive) {
         if border.bottom > 0 : raylib.draw_rectangle_rec(.{ x: b.x, y: b.bottom - border.bottom, width: b.w, height: border.bottom }, c)
         if border.left > 0 : raylib.draw_rectangle_rec(.{ x: b.x, y: b.y + border.top, width: border.left, height: b.h - border.top - border.bottom }, c)
         if border.right > 0 : raylib.draw_rectangle_rec(.{ x: b.right - border.right, y: b.y + border.top, width: border.right, height: b.h - border.top - border.bottom }, c)
-    }
-}
-
-fn draw_shadow(item: Primitive) {
-    let blur = item.width
-    let steps = clamp32(ceil32(blur / 2), 1, 10).to(int)
-    let layer = item.color.fade(1 / steps.to(f32))
-    each 0 .. steps as i {
-        let grow = blur * (steps - i).to(f32) / steps.to(f32) / 2
-        let b = item.bounds.grow(grow)
-        raylib.draw_rectangle_rounded(rect(b), roundness(b, item.radius + grow), 0, to_rl(layer))
     }
 }

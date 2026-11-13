@@ -12,6 +12,7 @@ class Shapes is gui.Render {
             .child(gui.div().h(30).text_size(20).text_color(gui.white()).child("Hello"))
             .child(gui.div().h(30).w(100).overflow_hidden()
                 .child(gui.div().w(300).h(30).bg(gui.rgb(0xff00ff))))
+            .child(gui.div().size(40).rounded_full().bg(gui.rgb(0xffffff)))
     }
 }
 
@@ -31,7 +32,7 @@ fn expect(img: raylib.Image, x: i32, y: i32, rgb: u32, what: String) {
 
 fn main() {
     let path = "./debug/window-test.png"
-    gui.run(Shapes{}, .{ width: 300, height: 300, screenshot: path, hidden: true, antialias: false })
+    gui.run(Shapes{}, .{ width: 300, height: 340, screenshot: path, hidden: true, antialias: false })
     let img = raylib.load_image(path)
     if img.width != 300 {
         println("FAIL no screenshot")
@@ -62,6 +63,20 @@ fn main() {
         println("ok   text drawn")
     } else {
         println("FAIL text drawn: %bright bright pixels")
+        failures++
+    }
+    // Without multisampling, the edge of a circle still has pixels between the two colors
+    let blended: uint = 0
+    each 0 .. 40 as i {
+        let c = raylib.get_image_color(img, 20 + i.to(i32), 252)
+        if c.r > 40 && c.r < 220 : blended++
+    }
+    expect(img, 40, 270, 0xffffff, "circle center")
+    expect(img, 21, 251, 0x101010, "circle: outside the curve")
+    if blended >= 2 {
+        println("ok   smooth edges")
+    } else {
+        println("FAIL smooth edges: %blended blended pixels")
         failures++
     }
     raylib.unload_image(img)
