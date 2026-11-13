@@ -218,6 +218,6 @@ dialogs, no accessibility tree.
 make raylib              # download raylib 6.0 into vendor/raylib (when it is not installed)
 make test                # headless tests
 make test-window         # opens a hidden window and checks the pixels; needs a display
-make example EXAMPLE=todo
+make todo                # build and run an example: hello, todo, showcase
 make docs                # docs/api.md
 ```

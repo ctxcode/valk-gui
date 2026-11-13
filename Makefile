@@ -18,6 +18,7 @@ LINK := $(if $(RAYLIB_LIB),-L $(RAYLIB_LIB) --link-arg -rpath=$(abspath $(RAYLIB
 endif
 
 EXAMPLE ?= hello
+EXAMPLES := $(notdir $(wildcard examples/*))
 
 test:
 	@mkdir -p debug
@@ -35,6 +36,9 @@ example:
 	@mkdir -p debug
 	$(vc) build ./examples/$(EXAMPLE) -o ./debug/$(EXAMPLE) $(LINK)
 	$(RUN) ./debug/$(EXAMPLE)
+# `make todo` builds and runs examples/todo
+$(EXAMPLES):
+	@$(MAKE) --no-print-directory example EXAMPLE=$@
 deps:
 	vman install
 # raylib's own build of the library, from its release page
@@ -48,4 +52,4 @@ raylib:
 docs:
 	$(vc) doc . -o docs/api.md --markdown --no-private
 
-.PHONY: test test-window lint example deps raylib docs
+.PHONY: test test-window lint example deps raylib docs $(EXAMPLES)
