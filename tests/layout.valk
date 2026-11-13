@@ -219,3 +219,17 @@ test "Layout: uniform_list builds only the visible rows" {
     let last = bounds(win, "items/99999")
     assert(same(last.y + last.h, 110))
 }
+
+test "Layout: centered content larger than its box overflows on both sides" {
+    let win = gui.headless(view(fn(win) {
+        return gui.div().items_start()
+            .child(gui.div().flex().center().w(20).h(30).child(gui.div().id("wide").w(40).h(10).flex_shrink_0()))
+            .child(gui.div().flex().justify_end().w(20).h(30).child(gui.div().id("right").w(40).h(10).flex_shrink_0()))
+            .child(gui.div().id("label").flex().center().w(40).px(14).border(1).h(32).child("+++"))
+    }), 200, 200)
+    assert(box(bounds(win, "wide"), -10, 10, 40, 10))
+    assert(same(bounds(win, "right").x, -20))
+    // 21 px of text in 10 px of room: still centered on the box
+    let t = win.scene.find_text("+++") ?! return
+    assert(same(t.bounds.x + t.bounds.w / 2, 20))
+}

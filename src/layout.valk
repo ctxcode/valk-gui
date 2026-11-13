@@ -245,13 +245,17 @@ class Layout {
         } else {
             n.scroll_y = 0
         }
-        let remaining = (container_main - main_content).max(0)
+        // Content too large for a centered or end-aligned box overflows on both sides or the
+        // start, as in CSS, except in a scroll container
+        let free_main = container_main - main_content
+        if (row ? s.overflow_x : s.overflow_y) == .scroll : free_main = free_main.max(0)
+        let remaining = free_main.max(0)
         let lead: f32 = 0
         let between = gap
         if s.justify == .end {
-            lead = remaining
+            lead = free_main
         } else if s.justify == .center {
-            lead = remaining / 2
+            lead = free_main / 2
         } else if s.justify == .between && count > 1 {
             between += remaining / (count - 1).to(f32)
         } else if s.justify == .around && count > 0 {

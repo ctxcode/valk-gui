@@ -83,13 +83,15 @@ fn env_hidden() ?String {
 class RaylibPlatform is Platform {
     window: ?Window (null)
     fonts: HashMap[u64, raylib.Font] (.{})
+    // Per font: the middle of a capital letter below the top of a drawn line, in device pixels
+    cap_middles: HashMap[u64, f32] (.{})
     textures: Map[raylib.Texture] (.{})
     font_data: Map[String] (.{})
     clip: String ("")
 
     fn text_width(text: String, font: ResolvedFont) f32 {
         let f = this.font(font)
-        return raylib.measure_text_ex(f, text, font.size * EM_SCALE, 0).x
+        return raylib.measure_text_ex(f, text, draw_size(font), 0).x
     }
 
     fn image_size(path: String) Point {
@@ -114,15 +116,44 @@ class RaylibPlatform is Platform {
     }
 
     fn font(font: ResolvedFont) raylib.Font {
-        let scale = raylib.get_window_scale_dpi().x.max(1)
-        let px = round32(font.size * EM_SCALE * scale).to(i32).max(4)
-        let key = font.name.hash().to(u64) * 31 + font.weight.to(u64) * 100003 + px.to(u64)
+        let px = font_pixels(font)
+        let key = font_key(font, px)
         let cached = this.fonts.get(key) ! {
             let f = this.load(font.name, font.weight, px)
             this.fonts.set(key, f)
+            let h = raylib.get_glyph_info(f, 72)
+            this.cap_middles.set(key, h.offset_y.to(f32) + h.image.height.to(f32) / 2)
             return f
         }
         return cached
+    }
+
+    /// For text made only of symbols, such as "+" or "×": the middle of its ink below the top of
+    /// the text, in logical pixels. Symbols sit at different heights, so they center on themselves.
+    fn symbol_middle(font: ResolvedFont, text: String) ?f32 {
+        let f = this.font(font)
+        let top: f32 = INF
+        let bottom: f32 = -INF
+        let i: uint = 0
+        while i < text.length {
+            let cp, len = decode_utf8(text, i)
+            i += len
+            if cp == ' ' : continue
+            if !is_symbol(cp) : return null
+            let g = raylib.get_glyph_info(f, cp.to(i32))
+            if g.image.height <= 0 : continue
+            top = top.min(g.offset_y.to(f32))
+            bottom = bottom.max((g.offset_y + g.image.height).to(f32))
+        }
+        if top > bottom : return null
+        return (top + bottom) / 2 / dpi_scale()
+    }
+
+    /// Where the middle of a capital letter is below the top of the text, in logical pixels.
+    fn cap_middle(font: ResolvedFont) f32 {
+        this.font(font)
+        let key = font_key(font, font_pixels(font))
+        return (this.cap_middles.get(key) !? font_pixels(font).to(f32) * 0.4) / dpi_scale()
     }
 
     fn load(name: String, weight: FontWeight, px: i32) raylib.Font {
@@ -159,6 +190,38 @@ class RaylibPlatform is Platform {
         each this.fonts as f : raylib.unload_font(f)
         each this.textures as t : raylib.unload_texture(t)
     }
+}
+
+/// Punctuation, math and arrows: not letters or digits.
+fn is_symbol(cp: u32) bool {
+    if cp < 0x80 : return !((cp >= '0' && cp <= '9') || (cp >= 'a' && cp <= 'z') || (cp >= 'A' && cp <= 'Z'))
+    return cp == 0xd7 || cp == 0xf7 || cp == 0xb1 || (cp >= 0x2000 && cp < 0x2c00)
+}
+
+/// The code point at byte `i` and its length in bytes.
+fn decode_utf8(text: String, i: uint) (u32, uint) {
+    let b = text[i].to(u32)
+    if b < 0x80 : return (b, 1)
+    let len: uint = b >= 0xf0 ? 4 : (b >= 0xe0 ? 3 : 2)
+    let cp = b & (len == 2 ? 0x1f : (len == 3 ? 0x0f : 0x07))
+    each 1 .. len - 1 as k : cp = (cp << 6) | (text[i + k].to(u32) & 0x3f)
+    return (cp, len)
+}
+
+fn font_key(font: ResolvedFont, px: i32) u64 {
+    return font.name.hash().to(u64) * 31 + font.weight.to(u64) * 100003 + px.to(u64)
+}
+
+fn dpi_scale() f32 { return raylib.get_window_scale_dpi().x.max(1) }
+
+/// The size of the font's atlas in device pixels.
+fn font_pixels(font: ResolvedFont) i32 {
+    return round32(font.size * EM_SCALE * dpi_scale()).to(i32).max(4)
+}
+
+/// The size text is drawn at: exactly the atlas size, so glyphs are not resampled.
+fn draw_size(font: ResolvedFont) f32 {
+    return font_pixels(font).to(f32) / dpi_scale()
 }
 
 fn load_font_memory(data: local &[u8], px: i32, codepoints: local &[i32]) raylib.Font {
@@ -319,16 +382,25 @@ fn rect(b: Bounds) raylib.Rectangle { return .{ x: b.x, y: b.y, width: b.w, heig
 
 fn draw_scene(win: Window, p: RaylibPlatform, sdf: Sdf) {
     let scale = raylib.get_window_scale_dpi().x.max(1)
+    // Texts in a row share the text shader, so they draw in one batch
+    let in_text = false
     each win.scene.items as item {
+        if (item.kind == .text) != in_text {
+            in_text = !in_text
+            if in_text : raylib.begin_shader_mode(sdf.text)
+            else : raylib.end_shader_mode()
+        }
         match item.kind {
             .quad => draw_quad(item, sdf)
             .shadow => sdf.shadow(item.bounds, item.radius, item.width, item.color)
             .text => {
                 let f = p.font(item.font)
-                let size = item.font.size * EM_SCALE
+                let size = draw_size(item.font)
                 // Whole device pixels keep the glyphs sharp
                 let x = round32(item.bounds.x * scale) / scale
-                let y = round32((item.bounds.y + (item.font.line_height - size) / 2) * scale) / scale
+                // Capitals and digits centered in the line box
+                let middle = p.symbol_middle(item.font, item.text) ?? p.cap_middle(item.font)
+                let y = round32((item.bounds.y + item.font.line_height / 2 - middle) * scale) / scale
                 raylib.draw_text_ex(f, item.text, .{ x: x, y: y }, size, 0, to_rl(item.color))
             }
             .image => {
@@ -360,6 +432,7 @@ fn draw_scene(win: Window, p: RaylibPlatform, sdf: Sdf) {
             .unclip => raylib.end_scissor_mode()
         }
     }
+    if in_text : raylib.end_shader_mode()
 }
 
 fn draw_quad(item: Primitive, sdf: Sdf) {
