@@ -292,7 +292,7 @@
                 let x = inner.x
                 if n.text_align == .center : x += (inner.w - lw) / 2
                 else if n.text_align == .right : x += inner.w - lw
-                this.scene.add(.{ kind: .text, bounds: .{ x: x, y: y, w: lw, h: font.line_height }, color: color, text: line, font: font })
+                this.scene.add(.{ kind: .text, bounds: .{ x: x, y: y, w: lw, h: font.line_height }, color: color, text: line, font: font, center_symbols: true })
                 let thickness = (font.size / 14).max(1)
                 // Measured from the middle of the line, where capitals are centered
                 let middle = y + font.line_height / 2

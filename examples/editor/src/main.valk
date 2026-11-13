@@ -1,0 +1,462 @@
+use gui
+use valk.fs
+
+// A small code editor: `editor [folder]`. File tree, tabs, syntax highlighting, a command
+// palette (Ctrl+Shift+P), quick open (Ctrl+P), find in files on a background thread
+// (Ctrl+Shift+F) and saving (Ctrl+S).
+
+class Doc {
+    path: String
+    area: gui.TextArea
+    saved: String
+}
+
+class Command {
+    title: String
+    action: String
+}
+
+class Entry {
+    path: String
+    dir: bool
+    depth: uint
+}
+
+class Editor is gui.Render {
+    root: String
+    docs: Array[Doc] (.{})
+    current: uint (0)
+    open_dirs: HashSet[String] (.{})
+    sidebar: bool (true)
+    dark: bool (true)
+    // The palette: "" closed, "commands" or "files"
+    palette: String ("")
+    query: gui.TextInput (gui.TextInput.new("Type a command…"))
+    picked: uint (0)
+    search: gui.TextInput (gui.TextInput.new("Find in files"))
+    searching: bool (false)
+    results: Array[String] (.{})
+    show_search: bool (false)
+    status: String ("Ready")
+    setup: bool (false)
+
+    fn render(win: gui.Window) gui.Div {
+        if !this.setup : this.init(win)
+        win.theme = this.dark ? gui.Theme.dark() : gui.Theme.light()
+        let t = win.theme
+        let body = gui.div().flex_1().flex().min_h(0)
+        if this.sidebar : body.child(this.tree(win))
+        body.child(gui.div().flex_1().min_w(0).flex_col()
+            .child(this.tab_bar(win))
+            .child(this.editor(win))
+            .when(this.show_search, fn(d) { d.child(this.search_panel(win)) }))
+
+        let root = gui.div().size_full().bg(t.background).text_color(t.text).text_sm()
+            .on_action("save", fn() { this.save() })
+            .on_action("palette", fn() { this.open_palette(win, "commands") })
+            .on_action("quick-open", fn() { this.open_palette(win, "files") })
+            .on_action("find", fn() {
+                this.show_search = true
+                this.search.focus_handle(win).focus()
+            })
+            .on_action("close-tab", fn() { this.close(this.current) })
+            .on_action("toggle-sidebar", fn() { this.sidebar = !this.sidebar })
+            .on_action("toggle-theme", fn() { this.dark = !this.dark })
+            .on_action("next-tab", fn() { if this.docs.length > 0 : this.select((this.current + 1) % this.docs.length, win) })
+            .on_drop_files(fn(paths) { each paths as p : this.open(p, win) })
+            .child(body)
+            .child(this.status_bar(win))
+        if this.palette.length > 0 : root.child(this.palette_view(win))
+        return root
+    }
+
+    fn init(win: gui.Window) {
+        this.setup = true
+        win.bind("secondary-s", "save") _
+        win.bind("secondary-shift-p", "palette") _
+        win.bind("secondary-p", "quick-open") _
+        win.bind("secondary-shift-f", "find") _
+        win.bind("secondary-w", "close-tab") _
+        win.bind("secondary-b", "toggle-sidebar") _
+        win.bind("ctrl-tab", "next-tab") _
+        // A monospaced font from the system, when there is one
+        each Array[String]{ "/usr/share/fonts/TTF/DejaVuSansMono.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+            "/System/Library/Fonts/Menlo.ttc", "C:/Windows/Fonts/consola.ttf" } as path {
+            if fs.is_file(path) {
+                win.add_font("mono", path)
+                break
+            }
+        }
+        this.search.on_submit = fn(term: String) { this.find(win, term) }
+    }
+
+    // ---- Files ----
+
+    fn entries() Array[Entry] {
+        let result = Array[Entry]{}
+        this.list(this.root, 0, result)
+        return result
+    }
+
+    fn list(dir: String, depth: uint, out: Array[Entry]) {
+        let names = fs.files_in(dir) !? Array[String]{}
+        let dirs = names.filter(fn(p: String) bool { return fs.is_dir(p) && !fs.basename(p).starts_with(".") })
+        let files = names.filter(fn(p: String) bool { return !fs.is_dir(p) && !fs.basename(p).starts_with(".") })
+        dirs.sort()
+        files.sort()
+        each dirs as d {
+            out.append(Entry{ path: d, dir: true, depth: depth })
+            if this.open_dirs.has(d) : this.list(d, depth + 1, out)
+        }
+        each files as f : out.append(Entry{ path: f, dir: false, depth: depth })
+    }
+
+    fn open(path: String, win: gui.Window) {
+        each this.docs as doc, i {
+            if doc.path == path {
+                this.select(i, win)
+                return
+            }
+        }
+        let text = fs.read(path) ! {
+            this.status = "Cannot open " + fs.basename(path)
+            return
+        }
+        let area = gui.TextArea.new(text)
+        area.line_numbers = true
+        area.font = "mono"
+        area.font_size = 13
+        if is_code(path) : area.highlight = highlight
+        this.docs.append(Doc{ path: path, area: area, saved: text })
+        this.select(this.docs.length - 1, win)
+    }
+
+    fn select(i: uint, win: gui.Window) {
+        this.current = i
+        let doc = this.docs.get(i) ! return
+        doc.area.focus_handle(win).focus()
+        this.status = doc.path
+    }
+
+    fn close(i: uint) {
+        if i >= this.docs.length : return
+        this.docs.remove(i)
+        if this.current >= this.docs.length && this.current > 0 : this.current = this.docs.length - 1
+    }
+
+    fn save() {
+        let doc = this.docs.get(this.current) ! return
+        let text = doc.area.text
+        fs.write(doc.path, text) ! {
+            this.status = "Could not save " + fs.basename(doc.path)
+            return
+        }
+        doc.saved = text
+        this.status = "Saved " + fs.basename(doc.path)
+    }
+
+    // Searches the files on another thread; the results come back as lines
+    fn find(win: gui.Window, term: String) {
+        if term.length == 0 || this.searching : return
+        this.searching = true
+        this.results.clear()
+        let needle: atomic String = term
+        let dir: atomic String = this.root
+        win.spawn[String](fn() String {
+            let found = Array[String]{}
+            each fs.files_in(dir, true, true, false) !? Array[String]{} as path {
+                if !is_code(path) : continue
+                let content = fs.read(path) ! continue
+                each content.lines() as line, n {
+                    if line.contains(needle) && found.length < 200 : found.append(path + ":" + (n + 1) + ":" + line.trim())
+                }
+            }
+            return found.join("\n")
+        }, fn(result) {
+            this.searching = false
+            this.results = result.length > 0 ? result.split("\n") : Array[String]{}
+            this.status = "%{this.results.length} matches for '" + term + "'"
+        }) _
+    }
+
+    // ---- Views ----
+
+    fn tree(win: gui.Window) gui.Div {
+        let t = win.theme
+        let list = gui.div().id("tree").flex_1().overflow_y_scroll().py(4)
+        let current = this.docs.get(this.current) !? null
+        each this.entries() as entry {
+            let path = entry.path
+            let open = this.open_dirs.has(path)
+            let active = isset(current) && current.path == path
+            list.child(gui.div().flex().items_center().gap(6).h(26).pr(8).pl(10 + entry.depth.to(f32) * 14)
+                .cursor_pointer().whitespace_nowrap()
+                .when(active, fn(d) { d.bg(t.accent.opacity(0.18)) })
+                .hover(fn(s) { s.bg(t.elevated) })
+                .on_click(fn(e) {
+                    if entry.dir {
+                        if open : this.open_dirs.remove(path)
+                        else : this.open_dirs.add(path)
+                    } else {
+                        this.open(path, win)
+                    }
+                })
+                .child(gui.icon(entry.dir ? (open ? gui.Icon.chevron_down : gui.Icon.chevron_right) : gui.Icon.file, 14)
+                    .text_color(entry.dir ? t.muted : file_color(path)))
+                .child(gui.div().truncate().child(fs.basename(path))))
+        }
+        return gui.div().w(240).flex_shrink_0().bg(t.surface).border_r(1).border_color(t.border)
+            .child(gui.div().flex().items_center().justify_between().px(12).h(36)
+                .child(gui.div().text_xs().font_semibold().text_color(t.muted).child(fs.basename(this.root).upper()))
+                .child(gui.icon_button(win, .search, 24).tooltip("Find in files (" + win.shortcut("find") + ")")
+                    .on_click(fn(e) { win.dispatch("find") })))
+            .child(list)
+    }
+
+    fn tab_bar(win: gui.Window) gui.Div {
+        let t = win.theme
+        let bar = gui.div().flex().h(38).flex_shrink_0().bg(t.surface).border_b(1).border_color(t.border).overflow_x_scroll().id("tabs")
+        each this.docs as doc, i {
+            let active = i == this.current
+            let dirty = doc.area.text != doc.saved
+            bar.child(gui.div().flex().items_center().gap(8).pl(12).pr(6).border_r(1).border_color(t.border).cursor_pointer()
+                .flex_shrink_0()
+                .bg(active ? t.background : t.surface).text_color(active ? t.text : t.muted)
+                .when(active, fn(d) { d.border_t(2).border_color(t.accent) })
+                .on_click(fn(e) { this.select(i, win) })
+                .on_mouse_up(fn(e) { if e.button == .middle : this.close(i) })
+                .child(gui.icon(.file, 13).text_color(file_color(doc.path)))
+                .child(fs.basename(doc.path))
+                .child(gui.div().size(20).rounded(4).center()
+                    .hover(fn(s) { s.bg(t.elevated) })
+                    .on_click(fn(e) { this.close(i) })
+                    .child(dirty ? gui.div().size(8).rounded_full().bg(t.text) : gui.icon(.x, 12))))
+        }
+        return bar
+    }
+
+    fn editor(win: gui.Window) gui.Div {
+        let t = win.theme
+        let doc = this.docs.get(this.current) ! {
+            return gui.div().flex_1().center().gap(10).text_color(t.muted)
+                .child(gui.icon(.code, 40))
+                .child(gui.div().text_lg().child("No file open"))
+                .child(gui.div().flex().gap(16)
+                    .child(gui.div().flex().gap(6).items_center().child(gui.kbd(win, win.shortcut("quick-open"))).child("Open a file"))
+                    .child(gui.div().flex().gap(6).items_center().child(gui.kbd(win, win.shortcut("palette"))).child("Commands")))
+        }
+        return gui.div().flex_1().min_h(0).flex().child(doc.area.render(win).flex_1().rounded(0).border(0))
+    }
+
+    fn search_panel(win: gui.Window) gui.Div {
+        let t = win.theme
+        let list = gui.div().id("results").flex_1().overflow_y_scroll()
+        each this.results as r {
+            let parts = r.split(":", 3)
+            let path = parts.get(0) !? ""
+            let line = (parts.get(1) !? "1").to(uint) !? 1
+            list.child(gui.div().flex().gap(8).px(12).h(24).items_center().cursor_pointer().whitespace_nowrap()
+                .hover(fn(s) { s.bg(t.elevated) })
+                .on_click(fn(e) {
+                    this.open(path, win)
+                    let doc = this.docs.get(this.current) ! return
+                    doc.area.go_to(line - 1)
+                })
+                .child(gui.div().text_color(t.accent).child(fs.basename(path) + ":" + line))
+                .child(gui.div().truncate().font("mono").text_color(t.muted).child(parts.get(2) !? "")))
+        }
+        return gui.div().h(200).flex_shrink_0().border_t(1).border_color(t.border).bg(t.surface)
+            .child(gui.div().flex().items_center().gap(8).p(8)
+                .child(gui.div().w(320).child(this.search.render(win)))
+                .when(this.searching, fn(d) { d.child(gui.spinner(win, 16)) })
+                .child(gui.div().flex_1())
+                .child(gui.icon_button(win, .x, 26).on_click(fn(e) { this.show_search = false })))
+            .child(list)
+    }
+
+    fn status_bar(win: gui.Window) gui.Div {
+        let t = win.theme
+        let bar = gui.div().flex().items_center().gap(16).px(12).h(26).flex_shrink_0().bg(t.accent).text_color(t.accent_text).text_xs()
+            .child(gui.icon(.code, 13))
+            .child(gui.div().flex_1().truncate().child(this.status))
+        let doc = this.docs.get(this.current) !? null
+        if isset(doc) {
+            bar.child("Ln %{doc.area.row + 1}, Col %{doc.area.col + 1}")
+                .child("%{doc.area.lines.length} lines")
+                .child("Spaces: %{doc.area.tab_size}")
+                .child("UTF-8")
+        }
+        return bar
+    }
+
+    // ---- Command palette ----
+
+    fn commands(win: gui.Window) Array[Command] {
+        return .{
+            Command{ title: "Save", action: "save" },
+            Command{ title: "Close tab", action: "close-tab" },
+            Command{ title: "Next tab", action: "next-tab" },
+            Command{ title: "Find in files", action: "find" },
+            Command{ title: "Open file", action: "quick-open" },
+            Command{ title: "Toggle sidebar", action: "toggle-sidebar" },
+            Command{ title: "Toggle dark theme", action: "toggle-theme" }
+        }
+    }
+
+    fn open_palette(win: gui.Window, kind: String) {
+        this.palette = kind
+        this.picked = 0
+        this.query.set_text("")
+        this.query.placeholder = kind == "files" ? "Search files by name…" : "Type a command…"
+        this.query.focus_handle(win).focus()
+    }
+
+    // Entries matching the query: (label, detail, action or path)
+    fn matches(win: gui.Window) Array[(String, String, String)] {
+        let q = this.query.text.lower()
+        let found = Array[(String, String, String)]{}
+        if this.palette == "files" {
+            each fs.files_in(this.root, true, true, false) !? Array[String]{} as path {
+                let name = fs.basename(path)
+                if path.contains("/.") || !fuzzy(name.lower(), q) : continue
+                found.append((name, path.range(this.root.length, path.length - this.root.length), path))
+                if found.length >= 50 : break
+            }
+            return found
+        }
+        each this.commands(win) as c {
+            if fuzzy(c.title.lower(), q) : found.append((c.title, win.shortcut(c.action), c.action))
+        }
+        return found
+    }
+
+    fn run_pick(win: gui.Window, item: (String, String, String)) {
+        let kind = this.palette
+        this.palette = ""
+        if kind == "files" {
+            this.open(item[2], win)
+        } else {
+            let doc = this.docs.get(this.current) !? null
+            if isset(doc) : doc.area.focus_handle(win).focus()
+            win.dispatch(item[2])
+        }
+    }
+
+    fn palette_view(win: gui.Window) gui.Div {
+        let t = win.theme
+        let items = this.matches(win)
+        if this.picked >= items.length : this.picked = items.length - items.length.min(1)
+        this.query.on_submit = fn(text: String) {
+            let item = items.get(this.picked) ! return
+            this.run_pick(win, item)
+        }
+        let list = gui.div().id("palette-list").max_h(320).overflow_y_scroll().p(4)
+        each items into item, i {
+            list.child(gui.div().flex().items_center().gap(10).px(10).h(32).rounded(t.radius).cursor_pointer()
+                .when(i == this.picked, fn(d) { d.bg(t.accent.opacity(0.22)) })
+                .hover(fn(s) { s.bg(t.accent.opacity(0.12)) })
+                .on_click(fn(e) { this.run_pick(win, item) })
+                .child(gui.icon(this.palette == "files" ? gui.Icon.file : gui.Icon.chevron_right, 14).text_color(t.muted))
+                .child(gui.div().flex_1().truncate().child(item[0]))
+                .child(item[1].length > 0 ? (this.palette == "files" ? gui.div().text_xs().text_color(t.muted).truncate().max_w(260).child(item[1]) : gui.kbd(win, item[1])) : gui.div()))
+        }
+        if items.length == 0 : list.child(gui.div().p(10).text_color(t.muted).child("No matches"))
+        let panel = gui.div().w(560).bg(t.surface).border(1).border_color(t.border).rounded(10).shadow_lg().overflow_hidden()
+            .on_key_down(fn(e) {
+                if e.key == .down : this.picked = (this.picked + 1).min(items.length - items.length.min(1))
+                else if e.key == .up : this.picked = this.picked - this.picked.min(1)
+                else : return
+                e.stop_propagation()
+            })
+            .child(gui.div().p(8).border_b(1).border_color(t.border).child(this.query.render(win)))
+            .child(list)
+        return gui.anchored(0, 0).w(win.width).h(win.height).flex().justify_center().pt(80).bg(gui.rgba(0x00000055))
+            .on_dismiss(fn() { this.palette = "" })
+            .on_click(fn(e) { this.palette = "" })
+            .child(gui.div().on_click(fn(e) {}).child(panel))
+    }
+}
+
+// Every character of the query in order
+fn fuzzy(text: String, query: String) bool {
+    let at: uint = 0
+    each query as c {
+        if c == ' ' : continue
+        while at < text.length && text[at] != c : at++
+        if at >= text.length : return false
+        at++
+    }
+    return true
+}
+
+fn is_code(path: String) bool {
+    let ext = fs.extension(path)
+    return ext == "valk" || ext == "rs" || ext == "c" || ext == "h" || ext == "js" || ext == "ts" || ext == "go" || ext == "py" || ext == "md" || ext == "json" || ext == "txt" || ext == "toml" || ext == "fs" || ext == "vs"
+}
+
+fn file_color(path: String) gui.Color {
+    let ext = fs.extension(path)
+    if ext == "valk" || ext == "rs" : return gui.rgb(0xf97316)
+    if ext == "md" || ext == "txt" : return gui.rgb(0x60a5fa)
+    if ext == "json" || ext == "toml" : return gui.rgb(0xeab308)
+    return gui.rgb(0x94a3b8)
+}
+
+value KEYWORDS ("fn,let,if,else,each,as,return,class,struct,enum,use,while,match,true,false,null,value,global,test,is,interface,trait,extend,throw,break,continue,default,isset,this,static,const,mut,pub,impl,for,in,import,from,def,var,type")
+
+// Colors for one line of C-like code
+fn highlight(line: String) Array[(uint, gui.Color)] {
+    let keyword = gui.rgb(0xc678dd)
+    let string = gui.rgb(0x98c379)
+    let number = gui.rgb(0xd19a66)
+    let comment = gui.rgb(0x7f848e)
+    let call = gui.rgb(0x61afef)
+    let plain = gui.rgb(0xd4d4d8)
+    let type_color = gui.rgb(0xe5c07b)
+    let words = KEYWORDS.split(",")
+    let runs = Array[(uint, gui.Color)]{}
+    let i: uint = 0
+    while i < line.length {
+        let c = line[i]
+        let start = i
+        if c == '/' && line[i + 1] == '/' {
+            runs.append((line.length - i, comment))
+            break
+        }
+        if c == '"' {
+            i++
+            while i < line.length && line[i] != '"' {
+                if line[i] == '\\' : i++
+                i++
+            }
+            i = (i + 1).min(line.length)
+            runs.append((i - start, string))
+            continue
+        }
+        if c >= '0' && c <= '9' {
+            while i < line.length && ((line[i] >= '0' && line[i] <= '9') || line[i] == '.' || line[i] == 'x' || line[i] == '_') : i++
+            runs.append((i - start, number))
+            continue
+        }
+        if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_' {
+            while i < line.length && ((line[i] >= 'a' && line[i] <= 'z') || (line[i] >= 'A' && line[i] <= 'Z') || (line[i] >= '0' && line[i] <= '9') || line[i] == '_') : i++
+            let word = line.range(start, i - start)
+            let color = plain
+            if words.contains(word) : color = keyword
+            else if line[i] == '(' : color = call
+            else if c >= 'A' && c <= 'Z' : color = type_color
+            runs.append((i - start, color))
+            continue
+        }
+        i++
+        runs.append((1, plain))
+    }
+    return runs
+}
+
+fn main(args: Array[String]) {
+    let dir = args.get(1) !? "."
+    let root = fs.resolve(dir)
+    let app = Editor{ root: root }
+    gui.run(app, .{ title: "Editor", width: 1200, height: 760 })
+}

@@ -260,10 +260,11 @@ fn is_ascii(text: String) bool {
     return true
 }
 
-/// Punctuation, math and arrows: not letters or digits.
+/// Math signs, arrows and other symbols that are drawn centered on their own: not letters,
+/// digits or punctuation that sits on the baseline.
 fn is_symbol(cp: u32) bool {
-    if cp < 0x80 : return !((cp >= '0' && cp <= '9') || (cp >= 'a' && cp <= 'z') || (cp >= 'A' && cp <= 'Z'))
-    return cp == 0xd7 || cp == 0xf7 || cp == 0xb1 || (cp >= 0x2000 && cp < 0x2c00)
+    if cp < 0x80 : return cp == '+' || cp == '-' || cp == '=' || cp == '<' || cp == '>' || cp == '*' || cp == '~' || cp == '|'
+    return cp == 0xd7 || cp == 0xf7 || cp == 0xb1 || cp == 0xb7 || (cp >= 0x2190 && cp < 0x2c00)
 }
 
 /// The code point at byte `i` and its length in bytes.

@@ -22,7 +22,7 @@ fn draw_scene(win: Window, p: RaylibPlatform, sdf: Sdf) {
                 // Whole device pixels keep the glyphs sharp
                 let x = round32(item.bounds.x * scale) / scale
                 // Capitals and digits centered in the line box
-                let middle = fonts.symbol_middle(item.font, item.text) ?? fonts.cap_middle(item.font)
+                let middle = (item.center_symbols ? fonts.symbol_middle(item.font, item.text) : null) ?? fonts.cap_middle(item.font)
                 let y = round32((item.bounds.y + item.font.line_height / 2 - middle) * scale) / scale
                 fonts.draw(item.text, item.font, x, y, to_rl(item.color))
             }

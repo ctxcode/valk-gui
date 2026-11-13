@@ -18,6 +18,8 @@
     /// The gradient's angle, as in `Gradient`.
     + angle: f32 (180)
     + fit: ImageFit (.fill)
+    /// For text: a label made only of symbols, such as "+", is centered on its own shape.
+    + center_symbols: bool (false)
     /// The blur of a shadow, the width of a line or ring.
     + width: f32 (0)
     + text: String ("")

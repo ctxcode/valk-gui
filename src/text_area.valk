@@ -80,6 +80,14 @@ struct Snapshot {
         return parts.join("\n")
     }
 
+    /// Moves the caret to a line (from 0) and byte offset, and scrolls it into view.
+    + fn go_to(row: uint, col: uint (0)) {
+        this.row = row.min(this.lines.length - 1)
+        this.col = col.min(this.line(this.row).length)
+        this.collapse()
+        this.reveal = true
+    }
+
     + fn select_all() {
         this.anchor_row = 0
         this.anchor_col = 0
