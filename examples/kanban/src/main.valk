@@ -1,0 +1,269 @@
+use gui
+
+// A kanban board: drag cards between columns, right-click a card for its menu, press N (or
+// Ctrl+N) for a new card, type to filter, Escape to close dialogs.
+
+class Card {
+    id: uint
+    title: String
+    notes: String ("")
+    priority: uint (1)
+    owner: uint (0)
+}
+
+class Column {
+    name: String
+    color: u32
+    cards: Array[Card] (.{})
+}
+
+value PRIORITIES ("Low,Normal,High,Urgent")
+
+class Board is gui.Render {
+    columns: Array[Column] (.{})
+    next_id: uint (1)
+    search: gui.TextInput (gui.TextInput.new("Filter cards…"))
+    menu: gui.Popup (gui.Popup{})
+    menu_card: uint (0)
+    // The card being edited, 0 for a new one; null while no dialog is open
+    editing: ?uint (null)
+    edit_column: uint (0)
+    title: gui.TextInput (gui.TextInput.new("Title"))
+    notes: gui.TextArea (gui.TextArea.new())
+    priority: gui.Select (gui.Select.new(PRIORITIES.split(","), 1))
+    owner: gui.Select (gui.Select.new(.{ "Ada", "Alan", "Grace", "Linus" }))
+    toast: String ("")
+    toast_timer: ?gui.Timer (null)
+    bound: bool (false)
+
+    fn render(win: gui.Window) gui.Div {
+        let t = win.theme
+        if !this.bound {
+            win.bind("secondary-n", "new-card") _
+            win.bind("n", "new-card") _
+            this.bound = true
+        }
+        this.title.on_submit = fn(text: String) { this.save_card(win) }
+
+        let filter = this.search.text.lower()
+        let board = gui.div().flex_1().flex().gap(16).p(20).overflow_x_scroll().id("board")
+        each this.columns as column, ci {
+            board.child(this.column(win, column, ci, filter))
+        }
+
+        let header = gui.div().flex().items_center().gap(12).px(20).h(60).flex_shrink_0()
+            .bg_gradient(t.surface, t.background, 180).border_b(1).border_color(t.border)
+            .child(gui.icon(.grid, 20).text_color(t.accent))
+            .child(gui.div().text_lg().font_bold().child("Roadmap"))
+            .child(gui.badge("%{this.total()} cards", t.muted))
+            .child(gui.div().flex_1())
+            .child(gui.div().w(240).child(this.search.render(win)))
+            .child(gui.button_primary(win, "New card", .plus).tooltip("N or " + win.shortcut("new-card")).on_click(fn(e) { this.open_editor(win, 0, 0) }))
+
+        let root = gui.div().size_full().bg(t.background).text_color(t.text)
+            .on_action("new-card", fn() {
+                if !isset(this.editing) : this.open_editor(win, 0, 0)
+            })
+            .child(header)
+            .child(board)
+            .child(this.menu.render(win, this.card_menu(win)))
+        if isset(this.editing) : root.child(this.editor(win))
+        if this.toast.length > 0 {
+            root.child(gui.div().absolute().bottom(20).right(20).deferred().px(14).py(10).rounded(8).bg(t.elevated)
+                .border(1).border_color(t.border).shadow_lg().flex().items_center().gap(8).text_sm()
+                .opacity(win.transition("toast", 1, 0.2))
+                .child(gui.icon(.check, 16).text_color(gui.rgb(0x22c55e))).child(this.toast))
+        }
+        return root
+    }
+
+    fn column(win: gui.Window, column: Column, ci: uint, filter: String) gui.Div {
+        let t = win.theme
+        let accent = gui.rgb(column.color)
+        let list = gui.div().id("cards-%ci").flex_1().gap(8).overflow_y_scroll()
+        let shown: uint = 0
+        each column.cards as card {
+            if filter.length > 0 && !card.title.lower().contains(filter) && !card.notes.lower().contains(filter) : continue
+            shown++
+            list.child(this.card(win, card, ci))
+        }
+        // The count eases to its new value when cards move
+        let count = win.transition("count-%ci", column.cards.length.to(f32), 0.4)
+        return gui.div().w(280).flex_shrink_0().p(12).gap(12).rounded(12).bg(t.surface).border(1).border_color(t.border)
+            .drag_over(fn(s) { s.border_color(accent).bg(t.elevated) })
+            .on_drop(fn(payload) { this.move_card(payload.to(uint) !? 0, ci) })
+            .child(gui.div().flex().items_center().gap(8)
+                .child(gui.div().size(10).rounded_full().bg(accent))
+                .child(gui.div().font_semibold().child(column.name))
+                .child(gui.div().text_xs().text_color(t.muted).child("%{round(count)}"))
+                .child(gui.div().flex_1())
+                .child(gui.icon_button(win, .plus, 26).tooltip("Add a card to " + column.name).on_click(fn(e) { this.open_editor(win, 0, ci) })))
+            .child(list)
+            .when(shown == 0 && column.cards.length > 0, fn(d) { d.child(gui.div().text_xs().text_color(t.muted).child("No matches")) })
+    }
+
+    fn card(win: gui.Window, card: Card, ci: uint) gui.Div {
+        let t = win.theme
+        let colors = Array[u32]{ 0x64748b, 0x3b82f6, 0xf59e0b, 0xef4444 }
+        let people = Array[String]{ "Ada Lovelace", "Alan Turing", "Grace Hopper", "Linus Torvalds" }
+        let people_colors = Array[u32]{ 0xf97316, 0x8b5cf6, 0x10b981, 0x0ea5e9 }
+        let priority = PRIORITIES.split(",").get(card.priority) !? ""
+        let dragged = win.dragging() == card.id.to(String)
+        let body = gui.div().id("card-%{card.id}").p(12).gap(8).rounded(8).bg(t.background).border(1).border_color(t.border)
+            .flex_shrink_0().cursor(.move).when(dragged, fn(d) { d.opacity(0.35) })
+            .hover(fn(s) { s.border_color(t.muted) })
+            .draggable(card.id.to(String), fn() gui.Div {
+                return gui.div().w(256).p(12).rounded(8).bg(t.elevated).border(1).border_color(t.accent).text_color(t.text)
+                    .child(gui.div().font_medium().child(card.title))
+            })
+            .on_mouse_down(fn(e) {
+                if e.button == .right {
+                    this.menu_card = card.id
+                    this.menu.open_at(e.x, e.y)
+                }
+            })
+            .on_click(fn(e) {
+                if e.click_count == 2 : this.open_editor(win, card.id, ci)
+            })
+            .child(gui.div().font_medium().child(card.title))
+        if card.notes.length > 0 {
+            body.child(gui.div().text_sm().text_color(t.muted).line_height(1.45).child(card.notes))
+        }
+        return body.child(gui.div().flex().items_center().gap(8)
+            .child(gui.badge(priority, gui.rgb(colors.get(card.priority) !? 0)))
+            .child(gui.div().flex_1())
+            .child(gui.avatar(people.get(card.owner) !? "?", gui.rgb(people_colors.get(card.owner) !? 0), 24).tooltip(people.get(card.owner) !? "")))
+    }
+
+    fn card_menu(win: gui.Window) gui.Div {
+        let items = Array[gui.MenuItem]{
+            gui.MenuItem.new("Edit", fn() {
+                let found = this.find(this.menu_card) ?! return
+                this.open_editor(win, found[0].id, found[1])
+            }).with_icon(.edit)
+        }
+        each this.columns as column, ci {
+            items.append(gui.MenuItem.new("Move to " + column.name, fn() { this.move_card(this.menu_card, ci) }).with_icon(.arrow_right))
+        }
+        items.append(gui.MenuItem.line())
+        items.append(gui.MenuItem.new("Delete", fn() {
+            each this.columns as column : column.cards.remove_where(fn(c: Card) bool { return c.id == this.menu_card })
+            this.notify(win, "Card deleted")
+        }).with_icon(.trash).as_danger())
+        return gui.menu(win, items, fn() { this.menu.close() })
+    }
+
+    fn editor(win: gui.Window) gui.Div {
+        let t = win.theme
+        let is_new = (this.editing ?? 0) == 0
+        let form = gui.div().gap(12)
+            .child(this.field(win, "Title", this.title.render(win)))
+            .child(this.field(win, "Notes", this.notes.render(win).h(110)))
+            .child(gui.div().flex().gap(12)
+                .child(this.field(win, "Priority", this.priority.render(win)))
+                .child(this.field(win, "Owner", this.owner.render(win))))
+        let close = fn() { this.editing = null }
+        return gui.modal(win, gui.dialog(win, is_new ? "New card" : "Edit card", form, .{
+            gui.button(win, "Cancel").on_click(fn(e) { close() }),
+            gui.button_primary(win, is_new ? "Add card" : "Save").on_click(fn(e) { this.save_card(win) })
+        }), close)
+    }
+
+    fn field(win: gui.Window, label: String, input: gui.Div) gui.Div {
+        return gui.div().gap(6).child(gui.div().text_xs().font_medium().text_color(win.theme.muted).child(label)).child(input)
+    }
+
+    fn open_editor(win: gui.Window, id: uint, ci: uint) {
+        this.editing = id
+        this.edit_column = ci
+        let found = this.find(id)
+        if isset(found) {
+            let card = found[0]
+            this.title.set_text(card.title)
+            this.notes.set_text(card.notes)
+            this.priority.select(card.priority)
+            this.owner.select(card.owner)
+        } else {
+            this.title.set_text("")
+            this.notes.set_text("")
+            this.priority.select(1)
+        }
+        this.title.focus_handle(win).focus()
+    }
+
+    fn save_card(win: gui.Window) {
+        let title = this.title.text.trim()
+        if title.length == 0 : return
+        let id = this.editing ?? 0
+        let found = this.find(id)
+        if isset(found) {
+            let card = found[0]
+            card.title = title
+            card.notes = this.notes.text.trim()
+            card.priority = this.priority.selected
+            card.owner = this.owner.selected
+            this.notify(win, "Card saved")
+        } else {
+            let column = this.columns.get(this.edit_column) ! return
+            column.cards.append(Card{ id: this.next_id++, title: title, notes: this.notes.text.trim(), priority: this.priority.selected, owner: this.owner.selected })
+            this.notify(win, "Card added to " + column.name)
+        }
+        this.editing = null
+    }
+
+    fn move_card(id: uint, to: uint) {
+        let found = this.find(id) ?! return
+        let card, from = found
+        if from == to : return
+        let source = this.columns.get(from) ! return
+        let target = this.columns.get(to) ! return
+        source.cards.remove_where(fn(c: Card) bool { return c.id == id })
+        target.cards.append(card)
+    }
+
+    fn find(id: uint) ?(Card, uint) {
+        each this.columns as column, ci {
+            each column.cards as card {
+                if card.id == id : return (card, ci)
+            }
+        }
+        return null
+    }
+
+    fn total() uint {
+        let n: uint = 0
+        each this.columns as column : n += column.cards.length
+        return n
+    }
+
+    fn notify(win: gui.Window, text: String) {
+        this.toast = text
+        let old = this.toast_timer
+        if isset(old) : old.cancel()
+        this.toast_timer = win.after(2.5, fn() { this.toast = "" })
+    }
+
+    fn add(column: uint, title: String, notes: String, priority: uint, owner: uint) {
+        let c = this.columns.get(column) ! return
+        c.cards.append(Card{ id: this.next_id++, title: title, notes: notes, priority: priority, owner: owner })
+    }
+}
+
+fn round(v: f32) int { return (v + 0.5).to(int) }
+
+fn main() {
+    let board = Board{}
+    board.columns.append(Column{ name: "Backlog", color: 0x64748b })
+    board.columns.append(Column{ name: "In progress", color: 0x3b82f6 })
+    board.columns.append(Column{ name: "Review", color: 0xf59e0b })
+    board.columns.append(Column{ name: "Done", color: 0x22c55e })
+    board.add(0, "Command palette", "Fuzzy search over every action, with its shortcut.", 1, 0)
+    board.add(0, "Right-to-left text", "", 0, 3)
+    board.add(0, "Accessibility tree", "Expose roles and labels to screen readers.", 2, 2)
+    board.add(1, "Drag and drop", "Cards move between columns; the target lights up.", 3, 1)
+    board.add(1, "Unicode fallback fonts", "日本語 · Ελληνικά · Русский", 2, 2)
+    board.add(2, "Syntax highlighting", "Colors per line from a callback.", 1, 0)
+    board.add(3, "Flexbox layout", "Wrap, grid, gaps and absolute positioning.", 1, 3)
+    board.add(3, "SDF rendering", "Smooth corners, borders and shadows.", 2, 1)
+    gui.run(board, .{ title: "Kanban", width: 1240, height: 720 })
+}

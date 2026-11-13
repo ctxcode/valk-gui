@@ -233,3 +233,23 @@ test "Anchored popovers stay inside the window" {
     assert(box(bounds(win, "right"), 150, 20, 100, 50))
     assert(box(bounds(win, "low"), 10, 100, 100, 50))
 }
+
+class Typing is gui.Render {
+    input: gui.TextInput (gui.TextInput.new())
+    actions: uint (0)
+    fn render(win: gui.Window) gui.Div {
+        return gui.div().on_action("new", fn() { this.actions++ }).child(gui.div().id("field").child(this.input.render(win)))
+    }
+}
+
+test "Actions: plain-key bindings leave text fields alone" {
+    let app = Typing{}
+    let win = gui.headless(app, 300, 100)
+    win.bind("n", "new") !!
+    win.press(.n)
+    assert(app.actions == 1)
+    win.click_on("field")
+    win.press(.n)
+    win.type_text("n")
+    assert(app.actions == 1 && app.input.text == "n")
+}

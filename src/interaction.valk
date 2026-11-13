@@ -29,7 +29,8 @@ extend Window {
     /// joined with `-` or `+`. Keys are letters, digits, `enter`, `escape`, `tab`, `space`,
     /// `backspace`, `delete`, arrows (`up`, ...), `home`, `end`, `pageup`, `pagedown`, `f1` to `f12`,
     /// and `,` `.` `/` `;` `'` `[` `]` `\` `` ` `` `minus` `equal`. A bound key runs the action
-    /// before the key reaches `on_key_down`, when an element on the focus path handles it.
+    /// before the key reaches `on_key_down`, when an element on the focus path handles it. Keys
+    /// without Ctrl, Alt or Cmd are left to text fields while one has focus.
     + fn bind(keys: String, action: String) !SyntaxError {
         let b = parse_binding(keys) !>
         b.action = action
@@ -70,10 +71,24 @@ extend Window {
 
     // Runs a bound action for the key; true when one ran
     fn run_binding(key: Key, mods: Modifiers) bool {
+        // Plain keys belong to text fields while one has focus
+        let plain = !mods.ctrl && !mods.alt && !mods.cmd
+        if plain && this.typing() : return false
         each this.bindings as b {
             if b.key == key && b.modifiers.shift == mods.shift && b.modifiers.ctrl == mods.ctrl && b.modifiers.alt == mods.alt && b.modifiers.cmd == mods.cmd {
                 if this.dispatch(b.action) : return true
             }
+        }
+        return false
+    }
+
+    // Whether the focused element takes typed text
+    fn typing() bool {
+        if !isset(this.focused) : return false
+        let n = this.focused_node()
+        while isset(n) {
+            if isset(n.on_input_fn) : return true
+            n = n.parent
         }
         return false
     }

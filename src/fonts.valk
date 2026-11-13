@@ -88,6 +88,7 @@ class Fonts {
         if isset(cached) && cached.generation == this.generation : return cached
         if isset(cached) : raylib.unload_font(cached.font)
         let data = fallback == 0 ? this.family_file(font.name, font.weight, font.italic) : this.file(this.fallbacks.get(fallback - 1) !? "")
+        if data.length == 0 : data = builtin_font(font.weight, font.italic)
         // Sized so that every font's em is the requested size, whatever its ascent and descent
         let ratio, ascent = font_metrics(data)
         let scale = dpi_scale()
@@ -200,7 +201,9 @@ class Fonts {
             }
         }
         if !isset(best) : return builtin_font(weight, italic)
-        return this.file(best)
+        let data = this.file(best)
+        // A file that cannot be read falls back to the built-in font
+        return data.length > 0 ? data : builtin_font(weight, italic)
     }
 
     - fn file(path: String) String {
