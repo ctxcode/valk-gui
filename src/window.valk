@@ -726,7 +726,7 @@ fn hit_node(n: Div, x: f32, y: f32, clip: Bounds, top: bool) ?Div {
     if s.display_none || !s.visible || (s.on_top && !top) : return null
     let b = n.bounds
     let inside = b.contains(x, y) && clip.contains(x, y)
-    if n.kind != .div : return inside ? n : null
+    if n.kind != .div : return inside && !s.pass_through ? n : null
     let child_clip = clip
     if s.overflow_x != .visible || s.overflow_y != .visible : child_clip = clip.intersect(b.inset(s.border_widths))
     let i = n.child_nodes.length
@@ -745,7 +745,7 @@ fn hit_node(n: Div, x: f32, y: f32, clip: Bounds, top: bool) ?Div {
         let found = hit_node(child, x, y, child_clip, false)
         if isset(found) : return found
     }
-    return inside ? n : null
+    return inside && !s.pass_through ? n : null
 }
 
 fn find_node(n: Div, id: String) ?Div {

@@ -107,6 +107,7 @@
     + display_none: bool (false)
     + on_top: bool (false)
     + anchor_window: bool (false)
+    + pass_through: bool (false)
     + anchor_above: f32 (-1)
     + visible: bool (true)
 
@@ -244,6 +245,8 @@
     + fn overflow_y_scroll() SELF { this.style.overflow_y = .scroll; this.style.overflow_x = .hidden; return this }
     + fn overflow_x_scroll() SELF { this.style.overflow_x = .scroll; this.style.overflow_y = .hidden; return this }
     + fn overflow_scroll() SELF { this.style.overflow_x = .scroll; this.style.overflow_y = .scroll; return this }
+    /// Lets the mouse through to what is below the element; its children still take it.
+    + fn click_through() SELF { this.style.pass_through = true; return this }
     /// Removes the element from layout and painting.
     + fn hidden() SELF { this.style.display_none = true; return this }
     /// Keeps the element's space but does not paint it.

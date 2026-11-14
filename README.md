@@ -204,6 +204,16 @@ gui.modal(win, gui.dialog(win, "Delete file?", body, .{ cancel_button, delete_bu
 ```
 
 `gui.anchored(x, y)` places any element at a window position and keeps it on screen.
+
+Floating panels are windows inside the window, dragged by their title bar and resized from a
+corner; the one pressed last comes to the front:
+
+```rust
+let stack = gui.PanelStack{}
+stack.add(gui.Panel.new("Notes", fn() gui.Div { return notes.render(win) }).move_to(40, 40).resize(320, 220))
+root.child(stack.render(win))
+```
+
 `gui.choose_file(win, fn(path) { ... })` shows the system's file dialog.
 
 ![Components](docs/gallery.png)
@@ -275,7 +285,7 @@ moves the clock for timers and animations, and `win.wait_tasks()` waits for `spa
 | --- | --- |
 | `hello` | the counter above |
 | `todo` | a task list with filters and a theme switch |
-| `gallery` | every component and icon, Unicode text, a background task |
+| `gallery` | every component and icon, floating panels, Unicode and right-to-left text, a background task |
 | `kanban` | drag cards between columns, card dialogs, context menus, shortcuts |
 | `editor` | file tree, tabs, syntax colors, command palette, find in files; `make editor` opens this repository |
 | `dashboard` | live charts, animated numbers, a sortable table of 5000 rows |
@@ -287,7 +297,7 @@ moves the clock for timers and animations, and `win.wait_tasks()` waits for `spa
 
 ## Not supported
 
-One window per program, no inline composition for input methods (IME), no native menu bar, no
+One operating-system window per program (floating panels live inside it), no inline composition for input methods (IME), no native menu bar, no
 accessibility tree. Right-to-left text is reordered for display; the text fields edit it in
 logical order, and Arabic ligatures beyond lam-alef are not formed.
 

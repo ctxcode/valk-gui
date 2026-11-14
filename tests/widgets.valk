@@ -129,3 +129,40 @@ test "Widgets: spinner keeps frames coming" {
     let win = gui.headless(view(fn(win) { return gui.div().child(gui.spinner(win)) }), 100, 100)
     assert(win.frame_requested)
 }
+
+class Desk is gui.Render {
+    stack: gui.PanelStack (gui.PanelStack{})
+    clicks: uint (0)
+    fn render(win: gui.Window) gui.Div {
+        return gui.div().size_full()
+            .child(gui.div().id("under").size_full().on_click(fn(e) { this.clicks++ }))
+            .child(this.stack.render(win))
+    }
+}
+
+test "Panels: move, resize, stack and close" {
+    let app = Desk{}
+    let a = app.stack.add(gui.Panel.new("Notes", fn() gui.Div { return gui.div().child("note body") }).move_to(20, 20).resize(200, 150))
+    let b = app.stack.add(gui.Panel.new("Tools", fn() gui.Div { return gui.div().child("tool body") }).move_to(100, 60).resize(200, 150))
+    let win = gui.headless(app, 600, 400)
+    assert(win.scene.has_text("note body") && win.scene.has_text("tool body"))
+    // Clicks outside the panels reach the app
+    win.click(500, 350)
+    assert(app.clicks == 1)
+    // Pressing the panel below brings it to the front
+    win.click(30, 100)
+    let top = app.stack.top() ?! { assert(false); return }
+    assert(top == a && app.clicks == 1)
+    // Dragging the title bar moves it
+    win.drag(60, 35, 260, 135)
+    assert(same(a.x, 220) && same(a.y, 120))
+    // The corner resizes it
+    win.drag(a.x + a.w - 4, a.y + a.h - 4, a.x + a.w + 46, a.y + a.h + 26)
+    assert(same(a.w, 250) && same(a.h, 180))
+    // Dragged out of the window, it stays inside
+    win.drag(a.x + 40, a.y + 15, 2000, 2000)
+    assert(same(a.x + a.w, 600) && same(a.y + a.h, 400))
+    // The close button
+    win.click(b.x + b.w - 15, b.y + 17)
+    assert(!b.open && !win.scene.has_text("tool body"))
+}

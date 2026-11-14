@@ -216,6 +216,8 @@ Namespaces: [main](#main)
     // Adds a child element, or a text when given a `String`.
     + fn child(item: String | Div) Div
     + fn children(items: Array[Div]) Div
+    // Lets the mouse through to what is below the element; its children still take it.
+    + fn click_through() Div
     // How many grid columns the element takes.
     + fn col_span(columns: uint) Div
     + fn cursor(cursor: Cursor) Div
@@ -567,6 +569,45 @@ Namespaces: [main](#main)
 ```
 
 ```js
+// A window inside the window: a title bar to drag it by, a corner to resize it from, and a close button. Keep panels in a `PanelStack`.
++ class Panel {
+    + closable: bool
+    // Builds the panel's content every frame.
+    + content: fn()(Div)
+    ~+ h: f32
+    + icon: ?Icon
+    ~+ id: String
+    + min_h: f32
+    + min_w: f32
+    + open: bool
+    + resizable: bool
+    + title: String
+    ~+ w: f32
+    ~+ x: f32
+    ~+ y: f32
+
+    // Moves the panel to a window position.
+    + fn move_to(x: f32, y: f32) Panel
+    + static fn new(title: String, content: fn()(Div)) Panel
+    + fn resize(w: f32, h: f32) Panel
+}
+```
+
+```js
+// Floating panels, painted over the rest of the window in their stacking order. Pressing a panel brings it to the front.
++ class PanelStack {
+    ~+ panels: Array[Panel]
+
+    + fn add(panel: Panel) Panel
+    // Puts the panel on top of the others.
+    + fn front(panel: Panel) void
+    + fn render(win: Window) Div
+    // The panel on top, or null.
+    + fn top() ?Panel
+}
+```
+
+```js
 // What the window needs from the system it runs on: text metrics, images and the clipboard. `run` uses raylib; `headless` uses fixed-width metrics for tests.
 + interface Platform {
 }
@@ -750,6 +791,7 @@ Namespaces: [main](#main)
     + overflow_x: Overflow
     + overflow_y: Overflow
     + padding: Edges
+    + pass_through: bool
     + position: Position
     + radius: f32
     + row_gap: f32
@@ -777,6 +819,8 @@ Namespaces: [main](#main)
     + fn bottom(value: f32) Style
     // Centers children on both axes.
     + fn center() Style
+    // Lets the mouse through to what is below the element; its children still take it.
+    + fn click_through() Style
     // How many grid columns the element takes.
     + fn col_span(columns: uint) Style
     // The corner radii, from `rounded` or the per-corner methods.

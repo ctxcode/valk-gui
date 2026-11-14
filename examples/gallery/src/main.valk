@@ -19,6 +19,10 @@ class Gallery is gui.Render {
     menu: gui.Popup (gui.Popup{})
     log: String ("Right-click anywhere for a menu")
     start_tab: uint (3)
+    panels: gui.PanelStack (gui.PanelStack{})
+    hue: f32 (0.6)
+    light: f32 (0.55)
+    panel_notes: gui.TextArea (gui.TextArea.new("Panels float above the window.\nDrag them by the title bar,\nresize them from the corner."))
 
     fn render(win: gui.Window) gui.Div {
         win.theme = this.dark ? gui.Theme.dark() : gui.Theme.light()
@@ -32,6 +36,7 @@ class Gallery is gui.Render {
             .child(gui.badge("valk-gui", t.accent))
             .child(gui.div().flex_1())
             .child(gui.icon(this.dark ? gui.Icon.moon : gui.Icon.sun, 16).text_color(t.muted))
+            .child(gui.button(win, "Panels", .sidebar).on_click(fn(e) { this.open_panels(win) }))
             .child(gui.switch(win, this.dark).tooltip("Dark theme").on_click(fn(e) { this.dark = !this.dark }))
 
         let pages = Array[gui.Div]{ this.controls(win), this.icons(win), this.text_page(win) }
@@ -51,6 +56,7 @@ class Gallery is gui.Render {
             .child(body)
             .child(gui.div().flex().items_center().px(20).h(32).border_t(1).border_color(t.border).bg(t.surface).text_xs().text_color(t.muted)
                 .child(gui.icon(.info, 13)).child(gui.div().pl(6).child(this.log)))
+            .child(this.panels.render(win))
             .child(this.menu.render(win, gui.menu(win, .{
                 gui.MenuItem.new("Copy", fn() { this.log = "Copied" }).with_icon(.copy).with_shortcut("Ctrl+C"),
                 gui.MenuItem.new("Rename", fn() { this.log = "Renamed" }).with_icon(.edit),
@@ -68,6 +74,29 @@ class Gallery is gui.Render {
             }), fn() { this.show_dialog = false }))
         }
         return root
+    }
+
+    fn open_panels(win: gui.Window) {
+        if this.panels.panels.length == 0 {
+            this.panel_notes.wrap = true
+            let notes = gui.Panel.new("Notes", fn() gui.Div { return gui.div().size_full().p(8).child(this.panel_notes.render(win).size_full()) })
+            notes.icon = .edit
+            this.panels.add(notes.move_to(560, 140).resize(320, 220))
+            let mixer = gui.Panel.new("Color mixer", fn() gui.Div { return this.mixer(win) })
+            mixer.icon = .settings
+            this.panels.add(mixer.move_to(440, 330).resize(300, 250))
+        }
+        each this.panels.panels as p : p.open = true
+    }
+
+    fn mixer(win: gui.Window) gui.Div {
+        let color = gui.hsla(this.hue * 360, 0.75, this.light, 1)
+        return gui.div().size_full().p(14).gap(10)
+            .child(gui.div().h(60).rounded(8).bg(color).shadow_md())
+            .child(gui.div().text_xs().text_color(win.theme.muted).child("Hue"))
+            .child(gui.slider(win, this.hue, fn(v) { this.hue = v }))
+            .child(gui.div().text_xs().text_color(win.theme.muted).child("Lightness"))
+            .child(gui.slider(win, this.light, fn(v) { this.light = v }))
     }
 
     fn section(win: gui.Window, title: String) gui.Div {

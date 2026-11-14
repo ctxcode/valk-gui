@@ -285,3 +285,126 @@ fn next_widget_id(kind: String) String {
     let t = win.theme
     return div().p(16).bg(t.surface).border(1).border_color(t.border).rounded(t.radius * 2)
 }
+
+// ---- Floating panels ----
+
+/// A window inside the window: a title bar to drag it by, a corner to resize it from, and a
+/// close button. Keep panels in a `PanelStack`.
++ class Panel {
+    + title: String
+    /// Builds the panel's content every frame.
+    + content: fn()(Div)
+    ~+ x: f32 (40)
+    ~+ y: f32 (40)
+    ~+ w: f32 (360)
+    ~+ h: f32 (240)
+    + min_w: f32 (180)
+    + min_h: f32 (100)
+    + open: bool (true)
+    + closable: bool (true)
+    + resizable: bool (true)
+    + icon: ?Icon (null)
+    ~+ id: String (next_widget_id("panel"))
+    drag_x: f32 (0)
+    drag_y: f32 (0)
+
+    + static fn new(title: String, content: fn()(Div)) Panel { return Panel{ title: title, content: content } }
+
+    /// Moves the panel to a window position.
+    + fn move_to(x: f32, y: f32) Panel {
+        this.x = x
+        this.y = y
+        return this
+    }
+
+    + fn resize(w: f32, h: f32) Panel {
+        this.w = w.max(this.min_w)
+        this.h = h.max(this.min_h)
+        return this
+    }
+}
+
+/// Floating panels, painted over the rest of the window in their stacking order. Pressing a
+/// panel brings it to the front.
++ class PanelStack {
+    ~+ panels: Array[Panel] (.{})
+
+    + fn add(panel: Panel) Panel {
+        this.panels.append(panel)
+        return panel
+    }
+
+    /// Puts the panel on top of the others.
+    + fn front(panel: Panel) {
+        this.panels.remove_value(panel)
+        this.panels.append(panel)
+    }
+
+    /// The panel on top, or null.
+    + fn top() ?Panel {
+        let i = this.panels.length
+        while i > 0 {
+            i--
+            let p = this.panels.get(i) ! break
+            if p.open : return p
+        }
+        return null
+    }
+
+    + fn render(win: Window) Div {
+        let t = win.theme
+        let layer = div().absolute().inset(0).click_through()
+        let top = this.top()
+        each this.panels as panel {
+            if !panel.open : continue
+            // Inside the window, also after it shrank
+            panel.w = panel.w.min(win.width)
+            panel.h = panel.h.min(win.height)
+            panel.x = clamp32(panel.x, 0, win.width - panel.w)
+            panel.y = clamp32(panel.y, 0, win.height - panel.h)
+            let active = isset(top) && top == panel
+            let bar = div().flex().items_center().gap(8).h(34).pl(12).pr(4).flex_shrink_0()
+                .bg(active ? t.elevated : t.surface).border_b(1).border_color(t.border).cursor(.move)
+                .on_mouse_down(fn(e) {
+                    panel.drag_x = e.x - panel.x
+                    panel.drag_y = e.y - panel.y
+                })
+                .on_drag(fn(e) {
+                    panel.x = clamp32(e.x - panel.drag_x, 0, (win.width - panel.w).max(0))
+                    panel.y = clamp32(e.y - panel.drag_y, 0, (win.height - panel.h).max(0))
+                })
+            let ic = panel.icon
+            if isset(ic) : bar.child(icon(ic, 14).text_color(t.muted))
+            bar.child(div().flex_1().truncate().text_sm().font_medium().text_color(active ? t.text : t.muted).child(panel.title))
+            if panel.closable {
+                bar.child(icon_button(win, .x, 26).on_click(fn(e) {
+                    panel.open = false
+                }))
+            }
+            let body = div().flex_1().min_h(0).overflow_hidden().child(panel.content())
+            // An id keeps the panel's elements the same while it moves in the stacking order
+            let frame = anchored(panel.x, panel.y).id(panel.id).w(panel.w).h(panel.h).flex_col()
+                .bg(t.surface).border(1).border_color(active ? t.accent.opacity(0.6) : t.border).rounded(t.radius + 2)
+                .overflow_hidden().shadow_lg()
+                .on_mouse_down(fn(e) { this.front(panel) })
+                .child(bar)
+                .child(body)
+            if panel.resizable {
+                frame.child(div().absolute().right(0).bottom(0).size(16).cursor(.resize_ns)
+                    .on_mouse_down(fn(e) {
+                        panel.drag_x = panel.x + panel.w - e.x
+                        panel.drag_y = panel.y + panel.h - e.y
+                    })
+                    .on_drag(fn(e) {
+                        panel.resize(e.x - panel.x + panel.drag_x, e.y - panel.y + panel.drag_y)
+                    })
+                    .child(canvas(fn(p, b) {
+                        p.line(b.x + 5, b.bottom - 3, b.right - 3, b.y + 5, t.muted, 1.5)
+                        p.line(b.x + 10, b.bottom - 3, b.right - 3, b.y + 10, t.muted, 1.5)
+                    }).size_full()))
+            }
+            layer.child(frame)
+        }
+        return layer
+    }
+}

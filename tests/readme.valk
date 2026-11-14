@@ -185,3 +185,15 @@ test "README: drag and drop, timers, bindings, menus" {
     win.press(.escape)
     assert(!app.open)
 }
+
+test "README: floating panels" {
+    let notes = gui.TextArea.new("hi")
+    let win = gui.headless(view(fn(win) {
+        let root = gui.div().size_full()
+        let stack = gui.PanelStack{}
+        stack.add(gui.Panel.new("Notes", fn() gui.Div { return notes.render(win) }).move_to(40, 40).resize(320, 220))
+        root.child(stack.render(win))
+        return root
+    }), 500, 400)
+    assert(win.scene.has_text("Notes"))
+}
