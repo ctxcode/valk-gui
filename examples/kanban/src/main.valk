@@ -155,7 +155,6 @@ class Board is gui.Render {
     }
 
     fn editor(win: gui.Window) gui.Div {
-        let t = win.theme
         let is_new = (this.editing ?? 0) == 0
         let form = gui.div().gap(12)
             .child(this.field(win, "Title", this.title.render(win)))

@@ -942,6 +942,8 @@ Namespaces: [main](#main)
     // The caret: a line and a byte offset in it.
     ~+ row: uint
     + tab_size: uint
+    // Wraps long lines at the width of the area instead of scrolling sideways.
+    + wrap: bool
 
     + fn focus_handle(win: Window) FocusHandle
     // Moves the caret to a line (from 0) and byte offset, and scrolls it into view.
