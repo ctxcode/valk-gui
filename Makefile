@@ -36,6 +36,10 @@ example:
 	@mkdir -p debug
 	$(vc) build ./examples/$(EXAMPLE) -o ./debug/$(EXAMPLE) $(LINK)
 	$(RUN) ./debug/$(EXAMPLE)
+# Builds every example without running it
+examples:
+	@mkdir -p debug
+	@for e in $(EXAMPLES); do echo "examples/$$e"; $(vc) build ./examples/$$e -o ./debug/$$e $(LINK) || exit 1; done
 # `make todo` builds and runs examples/todo
 $(EXAMPLES):
 	@$(MAKE) --no-print-directory example EXAMPLE=$@
@@ -52,4 +56,4 @@ raylib:
 docs:
 	$(vc) doc . -o docs/api.md --markdown --no-private
 
-.PHONY: test test-window lint example deps raylib docs $(EXAMPLES)
+.PHONY: test test-window lint example examples deps raylib docs $(EXAMPLES)

@@ -296,5 +296,6 @@ make raylib              # download raylib 6.0 into vendor/raylib (when it is no
 make test                # headless tests
 make test-window         # opens a hidden window and checks the pixels; needs a display
 make kanban              # build and run an example (see Examples)
+make examples            # build them all
 make docs                # docs/api.md
 ```

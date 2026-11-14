@@ -44,6 +44,9 @@ jobs:
       - name: Run the tests
         run: make test
 
+      - name: Build the examples
+        run: make examples
+
       - name: Run the window test
         run: xvfb-run -a -s "-screen 0 1280x720x24" make test-window
 
