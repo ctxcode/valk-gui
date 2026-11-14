@@ -44,7 +44,7 @@ test "Widgets: select opens, picks with the mouse and the keyboard" {
     assert(win.scene.has_text("Red"))
     assert(win.click_on(app.select.id))
     assert(win.scene.has_text("Green") && win.scene.has_text("Blue"))
-    let green = win.scene.find_text("Green") ?! return
+    let green = win.scene.find_text("Green") ?! { assert(false); return }
     win.click(green.bounds.x + 2, green.bounds.y + 5)
     assert(app.select.selected == 1 && !win.scene.has_text("Blue"))
     // Keyboard: open, move down, choose
@@ -69,7 +69,7 @@ test "Widgets: context menu and menu items" {
     win.mouse_down(300, 300, .right)
     win.mouse_up(300, 300, .right)
     win.draw()
-    let copy = win.scene.find_text("Copy") ?! return
+    let copy = win.scene.find_text("Copy") ?! { assert(false); return }
     assert(win.scene.has_text("Ctrl+C"))
     assert(copy.bounds.x > 300 && copy.bounds.y > 300)
     win.click(copy.bounds.x + 2, copy.bounds.y + 5)
@@ -80,7 +80,7 @@ test "Widgets: context menu and menu items" {
     win.mouse_down(495, 495, .right)
     win.mouse_up(495, 495, .right)
     win.draw()
-    let del = win.scene.find_text("Delete") ?! return
+    let del = win.scene.find_text("Delete") ?! { assert(false); return }
     assert(del.bounds.x < 495 && del.bounds.y < 495)
     win.click(del.bounds.x + 2, del.bounds.y + 5)
     assert(app.chosen == .{ "copy", "delete" })
@@ -92,7 +92,7 @@ test "Widgets: modal dialogs block the rest and close" {
     win.click_on("open")
     assert(win.scene.has_text("Delete file?"))
     // Clicks inside the dialog do not close it; the backdrop does
-    let title = win.scene.find_text("Delete file?") ?! return
+    let title = win.scene.find_text("Delete file?") ?! { assert(false); return }
     win.click(title.bounds.x + 2, title.bounds.y + 5)
     assert(app.show_dialog)
     win.click(5, 5)
@@ -116,7 +116,7 @@ test "Widgets: tabs, radios and small parts" {
     win.advance(0.3)
     let tab = bounds(win, "tabs/2")
     let line = win.scene.items.filter(fn(p: gui.Primitive) bool { return p.kind == .quad && p.bounds.h == 2 })
-    let last = line.last() ! return
+    let last = line.last() ! { assert(false); return }
     assert(same(last.bounds.x, tab.x) && same(last.bounds.w, tab.w))
     win.click_on("r1")
     assert(app.radio == 1)

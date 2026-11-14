@@ -156,3 +156,19 @@ test "Components: hover changes a button's background" {
     assert(win.scene.items.length == before)
     assert(win.cursor == .pointer)
 }
+
+test "TextInput: undo and redo" {
+    let app = InputView{}
+    let win = gui.headless(app, 300, 200)
+    win.click_on("field")
+    win.type_text("h")
+    win.type_text("i")
+    win.type_text(" ")
+    win.type_text("x")
+    win.press(.z, ctrl())
+    assert(app.input.text == "hi ")
+    win.press(.z, ctrl())
+    assert(app.input.text == "hi")
+    win.press(.y, ctrl())
+    assert(app.input.text == "hi ")
+}

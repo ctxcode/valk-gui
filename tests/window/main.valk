@@ -13,6 +13,7 @@ class Shapes is gui.Render {
             .child(gui.div().h(30).w(100).overflow_hidden()
                 .child(gui.div().w(300).h(30).bg(gui.rgb(0xff00ff))))
             .child(gui.div().size(40).rounded_full().bg(gui.rgb(0xffffff)))
+            .child(gui.div().h(20).bg_gradient(gui.rgb(0xff0000), gui.rgb(0x0000ff), 90))
     }
 }
 
@@ -32,7 +33,7 @@ fn expect(img: raylib.Image, x: i32, y: i32, rgb: u32, what: String) {
 
 fn main() {
     let path = "./debug/window-test.png"
-    gui.run(Shapes{}, .{ width: 300, height: 340, screenshot: path, hidden: true, antialias: false })
+    gui.run(Shapes{}, .{ width: 300, height: 380, screenshot: path, hidden: true, antialias: false })
     let img = raylib.load_image(path)
     if img.width != 300 {
         println("FAIL no screenshot")
@@ -72,6 +73,8 @@ fn main() {
         if c.r > 40 && c.r < 220 : blended++
     }
     expect(img, 40, 270, 0xffffff, "circle center")
+    expect(img, 21, 310, 0xff0000, "gradient: starts red")
+    expect(img, 278, 310, 0x0000ff, "gradient: ends blue")
     expect(img, 21, 251, 0x101010, "circle: outside the curve")
     if blended >= 2 {
         println("ok   smooth edges")

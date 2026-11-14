@@ -5,7 +5,7 @@ your state lives in plain classes, `render` builds a tree of elements every fram
 elements are styled with chained, Tailwind-like methods. Layout is flexbox. Drawing is done on
 the GPU through [raylib](https://www.raylib.com).
 
-![Showcase](docs/showcase.png)
+![Dashboard](docs/dashboard.png)
 
 ```rust
 use gui
@@ -69,9 +69,11 @@ gui.div().flex().items_center().gap(8).px(12).h(40)
 | Spacing | `p`, `px`, `py`, `pt`, `pr`, `pb`, `pl`, `m`, `mx`, `my`, `mt`, ..., `gap`, `gap_x`, `gap_y` |
 | Position | `absolute()` with `top`, `right`, `bottom`, `left`, `inset`; `deferred()` paints on top of everything |
 | Overflow | `overflow_hidden()`, `overflow_y_scroll()`, `overflow_x_scroll()`, `overflow_scroll()` |
-| Paint | `bg`, `border(w)`, `border_t/r/b/l`, `border_color`, `rounded(r)`, `rounded_full()`, `shadow_sm/md/lg()`, `opacity`, `cursor_pointer()` |
-| Text | `text_color`, `text_size(px)`, `text_xs` ... `text_3xl`, `font_medium/semibold/bold()`, `line_height`, `text_center()`, `truncate()`, `whitespace_nowrap()`, `font(name)` |
-| Visibility | `hidden()` (no space), `invisible()` (keeps its space) |
+| Wrapping | `flex_wrap()`; `grid(columns)` with `col_span(n)` on cells |
+| Paint | `bg`, `bg_gradient(from, to, angle)`, `border(w)`, `border_t/r/b/l`, `border_color`, `rounded(r)`, `rounded_t/b/l/r/tl/tr/br/bl(r)`, `rounded_full()`, `shadow_sm/md/lg()`, `opacity`, `cursor_pointer()` |
+| Text | `text_color`, `text_size(px)`, `text_xs` ... `text_3xl`, `font_medium/semibold/bold()`, `italic()`, `underline()`, `line_through()`, `line_height`, `text_center()`, `truncate()`, `whitespace_nowrap()`, `font(name)` |
+| Images | `gui.img(path)` with `object_cover()` or `object_contain()`; `rounded` clips them |
+| Visibility | `hidden()` (no space), `invisible()` (keeps its space), `tooltip(text)` |
 
 Text styles are inherited by children. Sizes are logical pixels. Colors come from
 `gui.rgb(0xRRGGBB)`, `gui.rgba(0xRRGGBBAA)` or `gui.hsla(h, s, l, a)`, and have `opacity`,
@@ -89,17 +91,40 @@ gui.div().bg(gray)
 ## State and events
 
 Handlers are closures, so they change your state directly. The window draws a new frame after
-every input event, and sleeps in between. Call `win.request_frame()` from `render` to keep
-drawing, for animations.
+every input event, and sleeps in between.
 
 ```rust
 .on_click(fn(e) { this.count++ })                    // the innermost element with a click handler
-.on_mouse_down(fn(e) { ... e.local_x ... e.click_count })
+.on_mouse_down(fn(e) { ... e.local_x ... e.click_count ... e.button })
 .on_drag(fn(e) { ... })                              // moves while the button pressed here is held
 .on_scroll(fn(e) { ... e.dy ... })
+.on_drop_files(fn(paths) { ... })                    // files dropped on the window
 ```
 
 Parents receive what their children do not stop: `e.stop_propagation()`.
+
+## Drag and drop
+
+```rust
+gui.div().draggable(card.id, fn() gui.Div { return gui.div().child(card.title) })   // optional preview
+gui.div().on_drop(fn(payload) { this.move_card(payload, column) })
+    .drag_over(fn(s) { s.border_color(blue) })       // while something is held over it
+```
+
+`win.dragging()` gives the payload in flight, for example to fade the original.
+
+## Time, animation and background work
+
+```rust
+win.after(2.5, fn() { this.toast = "" })             // once
+let timer = win.every(1, fn() { this.tick() })       // until timer.cancel()
+let x = win.transition("panel", open ? 240 : 0, 0.2) // eases to a new target over 0.2 s
+win.spawn[String](fn() String { return load() }, fn(result) { this.data = result }) _
+```
+
+`spawn` runs its first closure on another thread and the second on the window's thread with the
+result; values that cross threads are numbers, strings or `atomic` objects. Call
+`win.request_frame()` from `render` to keep drawing, for free-running animations.
 
 ## Keyboard and focus
 
@@ -126,10 +151,23 @@ class Editor is gui.Render {
 `modifiers.secondary` is Command on macOS and Control elsewhere. The root element receives key
 presses when nothing has focus.
 
+Key bindings turn key combinations into named actions, handled by the focused element or one
+of its parents; menus and command palettes show them with `win.shortcut(action)`:
+
+```rust
+win.bind("secondary-s", "save") _
+win.bind("secondary-shift-p", "palette") _
+gui.div().on_action("save", fn() { this.save() })
+win.dispatch("save")                                 // from code, such as a menu
+```
+
+Escape runs the last `on_dismiss` handler in the tree, which closes menus and dialogs.
+
 ## Components
 
-`gui.TextInput` is a single-line text field with selection, word jumps and the clipboard. Keep it
-with your state:
+`gui.TextInput` (one line) and `gui.TextArea` (many lines, with line numbers, syntax colors and
+read-only mode) edit text with selection, word jumps, the clipboard, and undo. `gui.Select` is
+a dropdown. Keep these with your state:
 
 ```rust
 class Login is gui.Render {
@@ -144,12 +182,31 @@ class Login is gui.Render {
 }
 ```
 
-The others are functions that return a `Div` to style further: `gui.button`,
-`gui.button_primary`, `gui.checkbox`, `gui.switch`, `gui.slider`, `gui.progress` and
-`gui.divider`. They take their colors from `win.theme`, which is `gui.Theme.dark()` unless
-`WindowOptions.theme` or `win.theme` says otherwise.
+The others are functions that return a `Div` to style further: `button`, `button_primary` and
+`icon_button`, `checkbox`, `radio`, `switch`, `slider`, `progress`, `spinner`, `tabs`, `badge`,
+`kbd`, `avatar`, `card` and `divider`. `gui.icon(.search)` draws one of 50 line icons. They take
+their colors from `win.theme`, which is `gui.Theme.dark()` unless `WindowOptions.theme` or
+`win.theme` says otherwise.
 
-![Tasks](docs/todo.png)
+Menus, popovers and dialogs float above everything:
+
+```rust
+// A context menu where the mouse was pressed
+.on_mouse_down(fn(e) { if e.button == .right : this.menu.open_at(e.x, e.y) })
+.child(this.menu.render(win, gui.menu(win, .{
+    gui.MenuItem.new("Copy", fn() { this.copy_text() }).with_icon(.copy).with_shortcut("Ctrl+C"),
+    gui.MenuItem.line(),
+    gui.MenuItem.new("Delete", fn() { this.delete() }).as_danger()
+}, fn() { this.menu.close() })))
+
+// A dialog over a dimmed window
+gui.modal(win, gui.dialog(win, "Delete file?", body, .{ cancel_button, delete_button }), fn() { this.open = false })
+```
+
+`gui.anchored(x, y)` places any element at a window position and keeps it on screen.
+`gui.choose_file(win, fn(path) { ... })` shows the system's file dialog.
+
+![Components](docs/gallery.png)
 
 ## Lists and scrolling
 
@@ -178,8 +235,9 @@ gui.canvas(fn(p, b) {
 
 ## Fonts
 
-The built-in font is [Inter](https://rsms.me/inter/) in four weights. Add your own families and
-use them with `font(name)`:
+The built-in font is [Inter](https://rsms.me/inter/) in four weights and italic. Characters it
+lacks, such as Chinese or Japanese, come from the system's fonts, or from
+`WindowOptions.fallback_fonts`. Add your own families and use them with `font(name)`:
 
 ```rust
 gui.run(app, .{ fonts: .{ .{ name: "mono", path: "fonts/JetBrainsMono-Regular.ttf" } } })
@@ -203,14 +261,33 @@ test "the counter counts" {
 }
 ```
 
-Text is measured as if every character were half the font size wide.
+Text is measured as if every character were half the font size wide. `win.advance(seconds)`
+moves the clock for timers and animations, and `win.wait_tasks()` waits for `spawn`ed work.
 
 `VALK_GUI_SCREENSHOT=out.png ./app` saves the third frame of any app and exits.
 
+## Examples
+
+`make <name>` builds and runs one:
+
+| | |
+| --- | --- |
+| `hello` | the counter above |
+| `todo` | a task list with filters and a theme switch |
+| `gallery` | every component and icon, Unicode text, a background task |
+| `kanban` | drag cards between columns, card dialogs, context menus, shortcuts |
+| `editor` | file tree, tabs, syntax colors, command palette, find in files; `make editor` opens this repository |
+| `dashboard` | live charts, animated numbers, a sortable table of 5000 rows |
+| `showcase` | canvas drawing, sliders and a long list |
+
+![Kanban](docs/kanban.png)
+
+![Editor](docs/editor.png)
+
 ## Not supported
 
-One window per program, single-line text input only, no right-to-left text, no system menus or
-dialogs, no accessibility tree.
+One window per program, no right-to-left text or input methods (IME), no native menu bar, no
+accessibility tree. Text areas do not wrap lines.
 
 ## Development
 
@@ -218,6 +295,6 @@ dialogs, no accessibility tree.
 make raylib              # download raylib 6.0 into vendor/raylib (when it is not installed)
 make test                # headless tests
 make test-window         # opens a hidden window and checks the pixels; needs a display
-make todo                # build and run an example: hello, todo, showcase
+make kanban              # build and run an example (see Examples)
 make docs                # docs/api.md
 ```

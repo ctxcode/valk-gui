@@ -230,6 +230,6 @@ test "Layout: centered content larger than its box overflows on both sides" {
     assert(box(bounds(win, "wide"), -10, 10, 40, 10))
     assert(same(bounds(win, "right").x, -20))
     // 21 px of text in 10 px of room: still centered on the box
-    let t = win.scene.find_text("+++") ?! return
+    let t = win.scene.find_text("+++") ?! { assert(false); return }
     assert(same(t.bounds.x + t.bounds.w / 2, 20))
 }

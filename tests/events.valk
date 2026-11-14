@@ -99,8 +99,8 @@ class Form is gui.Render {
 test "Events: focus, keys and typed text" {
     let app = Form{}
     let win = gui.headless(app, 200, 200)
-    let first = app.first ?! return
-    let second = app.second ?! return
+    let first = app.first ?! { assert(false); return }
+    let second = app.second ?! { assert(false); return }
     win.type_text("lost")
     assert(app.typed == "")
     win.press(.a)

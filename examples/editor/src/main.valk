@@ -39,6 +39,7 @@ class Editor is gui.Render {
     show_search: bool (false)
     status: String ("Ready")
     setup: bool (false)
+    first_file: String ("")
 
     fn render(win: gui.Window) gui.Div {
         if !this.setup : this.init(win)
@@ -67,7 +68,7 @@ class Editor is gui.Render {
                     if path.length == 0 : return
                     this.root = path
                     this.open_dirs.clear()
-                    this.status = "Opened " + path
+                    this.status = "Opened " + fs.basename(path)
                 }, .folder, "Open folder")
             })
             .on_action("next-tab", fn() { if this.docs.length > 0 : this.select((this.current + 1) % this.docs.length, win) })
@@ -97,6 +98,10 @@ class Editor is gui.Render {
             }
         }
         this.search.on_submit = fn(term: String) { this.find(win, term) }
+        if this.first_file.length > 0 {
+            this.open_dirs.add(this.root)
+            this.open(this.first_file, win)
+        }
     }
 
     // ---- Files ----
@@ -144,7 +149,12 @@ class Editor is gui.Render {
         this.current = i
         let doc = this.docs.get(i) ! return
         doc.area.focus_handle(win).focus()
-        this.status = doc.path
+        this.status = this.relative(doc.path)
+    }
+
+    fn relative(path: String) String {
+        if path.starts_with(this.root + "/") : return path.range(this.root.length + 1, path.length - this.root.length - 1)
+        return path
     }
 
     fn close(i: uint) {
@@ -468,8 +478,10 @@ fn highlight(line: String) Array[(uint, gui.Color)] {
 }
 
 fn main(args: Array[String]) {
-    let dir = args.get(1) !? "."
-    let root = fs.resolve(dir)
-    let app = Editor{ root: root }
+    let path = fs.resolve(args.get(1) !? ".")
+    // A file opens in its folder
+    let file = fs.is_dir(path) ? "" : path
+    let root = file.length > 0 ? fs.dir_of(path) : path
+    let app = Editor{ root: root, first_file: file }
     gui.run(app, .{ title: "Editor", width: 1200, height: 760 })
 }

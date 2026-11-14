@@ -19,6 +19,9 @@
     - handle: ?FocusHandle (null)
     - scroll: f32 (0)
     - size: f32 (14)
+    - undo_stack: Array[(String, uint)] (.{})
+    - redo_stack: Array[(String, uint)] (.{})
+    - last_typed: bool (false)
 
     + static fn new(placeholder: String ("")) TextInput {
         return TextInput{ placeholder: placeholder }
@@ -127,8 +130,36 @@
         if focused : p.fill(.{ x: x + caret, y: top, w: 1.5, h: line }, theme.text)
     }
 
+    + fn undo() {
+        let snap = this.undo_stack.pop_last() ! return
+        this.redo_stack.append((this.text, this.cursor))
+        this.restore(snap)
+    }
+
+    + fn redo() {
+        let snap = this.redo_stack.pop_last() ! return
+        this.undo_stack.append((this.text, this.cursor))
+        this.restore(snap)
+    }
+
+    - fn restore(snap: (String, uint)) {
+        this.text = snap[0]
+        this.cursor = snap[1].min(this.text.length)
+        this.anchor = this.cursor
+        this.last_typed = false
+        this.changed()
+    }
+
     /// Replaces the selection with `t`.
     + fn insert(t: String) {
+        // Typing a word is one undo step
+        let typed = t.length == 1 && t != " "
+        if !typed || !this.last_typed || this.anchor != this.cursor {
+            this.undo_stack.append((this.text, this.cursor))
+            if this.undo_stack.length > 100 : this.undo_stack.remove(0)
+            this.redo_stack.clear()
+        }
+        this.last_typed = typed
         let clean = t.replace("\r", "").replace("\n", " ")
         let a = this.anchor.min(this.cursor)
         let b = this.anchor.max(this.cursor)
@@ -165,6 +196,11 @@
                 }
             } else if e.key == .v {
                 this.insert(win.clipboard())
+            } else if e.key == .z {
+                if m.shift : this.redo()
+                else : this.undo()
+            } else if e.key == .y {
+                this.redo()
             } else {
                 handled = false
             }

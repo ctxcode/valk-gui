@@ -111,3 +111,77 @@ test "README: styles, lists and drawing" {
     let options = gui.WindowOptions{ fonts: .{ .{ name: "mono", path: "fonts/JetBrainsMono-Regular.ttf" } } }
     assert(options.fonts.length == 1)
 }
+
+class ReadmeCard {
+    id: String
+    title: String
+}
+
+class ReadmeFeatures is gui.Render {
+    toast: String ("hi")
+    ticks: uint (0)
+    open: bool (false)
+    data: String ("")
+    moved: Array[String] (.{})
+    saved: uint (0)
+    menu: gui.Popup (gui.Popup{})
+    timer: ?gui.Timer (null)
+
+    fn tick() { this.ticks++ }
+    fn move_card(payload: String, column: uint) { this.moved.append(payload + "@" + column) }
+    fn save() { this.saved++ }
+    fn copy_text() {}
+    fn delete() {}
+
+    fn render(win: gui.Window) gui.Div {
+        let card = ReadmeCard{ id: "c1", title: "Card" }
+        let column: uint = 2
+        let blue = gui.rgb(0x3b82f6)
+        if !isset(this.timer) {
+            win.after(2.5, fn() { this.toast = "" })
+            this.timer = win.every(1, fn() { this.tick() })
+            win.spawn[String](fn() String { return "loaded" }, fn(result) { this.data = result }) _
+        }
+        let x = win.transition("panel", this.open ? 240 : 0, 0.2)
+        let body = gui.div().child("body")
+        let cancel_button = gui.button(win, "Cancel")
+        let delete_button = gui.button_primary(win, "Delete")
+        let root = gui.div().flex().gap(10).w(400 + x)
+            .on_action("save", fn() { this.save() })
+            .on_mouse_down(fn(e) { if e.button == .right : this.menu.open_at(e.x, e.y) })
+            .child(gui.div().id("card").size(40).draggable(card.id, fn() gui.Div { return gui.div().child(card.title) }))
+            .child(gui.div().id("column").size(80).on_drop(fn(payload) { this.move_card(payload, column) })
+                .drag_over(fn(s) { s.border_color(blue) }))
+            .child(this.menu.render(win, gui.menu(win, .{
+                gui.MenuItem.new("Copy", fn() { this.copy_text() }).with_icon(.copy).with_shortcut("Ctrl+C"),
+                gui.MenuItem.line(),
+                gui.MenuItem.new("Delete", fn() { this.delete() }).as_danger()
+            }, fn() { this.menu.close() })))
+        if this.open {
+            root.child(gui.modal(win, gui.dialog(win, "Delete file?", body, .{ cancel_button, delete_button }), fn() { this.open = false }))
+        }
+        return root
+    }
+}
+
+test "README: drag and drop, timers, bindings, menus" {
+    let app = ReadmeFeatures{}
+    let win = gui.headless(app, 600, 400)
+    win.bind("secondary-s", "save") _
+    win.bind("secondary-shift-p", "palette") _
+    win.dispatch("save")
+    assert(app.saved == 1)
+    let c = bounds(win, "card")
+    let col = bounds(win, "column")
+    win.drag(c.x + 5, c.y + 5, col.x + 20, col.y + 20)
+    assert(app.moved == .{ "c1@2" })
+    win.advance(3)
+    assert(app.toast == "" && app.ticks >= 1)
+    win.wait_tasks()
+    assert(app.data == "loaded")
+    app.open = true
+    win.draw()
+    assert(win.scene.has_text("Delete file?"))
+    win.press(.escape)
+    assert(!app.open)
+}

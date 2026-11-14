@@ -37,13 +37,13 @@ test "Paint: corners, gradients, decorations" {
             .child(gui.div().line_through().italic().child("struck"))
     }), 200, 300)
     let quads = win.scene.items.filter(fn(p: gui.Primitive) bool { return p.kind == .quad })
-    let first = quads.get(0) ! return
+    let first = quads.get(0) ! { assert(false); return }
     assert(first.corners.top_left == 0 && first.corners.top_right == 8 && first.corners.bottom_left == 8)
-    let grad = quads.get(1) ! return
+    let grad = quads.get(1) ! { assert(false); return }
     assert(grad.gradient && grad.color.r == 255 && grad.color2.b == 255 && grad.angle == 90)
     // One decoration line under each of the two texts
     assert(quads.length == 4)
-    let struck = win.scene.find_text("struck") ?! return
+    let struck = win.scene.find_text("struck") ?! { assert(false); return }
     assert(struck.font.italic)
 }
 
@@ -70,7 +70,7 @@ test "Timers: after and every run on the window's clock" {
     win.advance(1.0)
     win.advance(1.0)
     assert(app.ticks == 3 && app.once == 1)
-    let t = app.timer ?! return
+    let t = app.timer ?! { assert(false); return }
     t.cancel()
     win.advance(5)
     assert(app.ticks == 3 && app.once == 1)
@@ -110,10 +110,10 @@ test "Transitions: values move to their target over time" {
     win.draw()
     win.advance(0.5)
     win.advance(0.6)
-    let v0 = values.get(0) ! return
-    let v1 = values.get(1) ! return
-    let mid = values.get(2) ! return
-    let end = values.last() ! return
+    let v0 = values.get(0) ! { assert(false); return }
+    let v1 = values.get(1) ! { assert(false); return }
+    let mid = values.get(2) ! { assert(false); return }
+    let end = values.last() ! { assert(false); return }
     assert(v0 == 0 && v1 == 0)
     assert(mid > 50 && mid < 100)
     assert(end == 100)
@@ -217,7 +217,7 @@ test "Tooltips appear after the mouse rests" {
     win.move_to(10, 10)
     assert(!win.scene.has_text("Saves the file"))
     win.advance(0.6)
-    let tip = win.scene.find_text("Saves the file") ?! return
+    let tip = win.scene.find_text("Saves the file") ?! { assert(false); return }
     assert(tip.bounds.x > 10 && tip.bounds.y > 10)
     win.move_to(200, 150)
     assert(!win.scene.has_text("Saves the file"))
