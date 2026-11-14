@@ -357,5 +357,5 @@ fn group(v: f32) String {
 fn main() {
     let app = Dashboard{}
     app.generate()
-    gui.run(app, .{ title: "Dashboard", width: 1280, height: 860 })
+    gui.run(app, .{ title: "Dashboard", width: 1280, height: 860 }) ! print("Could not open a window\n")
 }

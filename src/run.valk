@@ -1,8 +1,9 @@
 use raylib
 use valk.core
 
-/// Opens a window, shows `root` in it and handles input until the window closes.
-+ fn run(root: Render, options: WindowOptions (WindowOptions{})) {
+/// Opens a window, shows `root` in it and handles input until the window closes. Throws when the
+/// system can't open a window, for example without OpenGL 3.3.
++ fn run(root: Render, options: WindowOptions (WindowOptions{})) !InitError {
     let flags: u32 = raylib.FLAG_WINDOW_HIGHDPI
     if options.resizable : flags = flags | raylib.FLAG_WINDOW_RESIZABLE
     if options.antialias : flags = flags | raylib.FLAG_MSAA_4X_HINT
@@ -11,6 +12,7 @@ use valk.core
     raylib.set_trace_log_level(.error)
     raylib.set_config_flags(flags)
     raylib.init_window(options.width, options.height, options.title)
+    if !raylib.is_window_ready() : throw .init
     raylib.set_window_min_size(options.min_width, options.min_height)
     raylib.set_exit_key(.none)
     raylib.set_target_fps(60)

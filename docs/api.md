@@ -89,8 +89,8 @@ Namespaces: [main](#main)
 + fn rgb(hex: u32) Color
 // A color from a hex number with alpha in the lowest byte, such as `0x3b82f680`.
 + fn rgba(hex: u32) Color
-// Opens a window, shows `root` in it and handles input until the window closes.
-+ fn run(root: Render, options: WindowOptions (WindowOptions{})) void
+// Opens a window, shows `root` in it and handles input until the window closes. Throws when the system can't open a window, for example without OpenGL 3.3.
++ fn run(root: Render, options: WindowOptions (WindowOptions{})) void !InitError
 // A horizontal slider for a value from 0 to 1. `on_change` gets the new value while the track is pressed or dragged.
 + fn slider(win: Window, value: f32, on_change: fn(f32)()) Div
 // A spinning circle, for work in progress. It keeps the window drawing while shown.

@@ -78,5 +78,5 @@ class Showcase is gui.Render {
 }
 
 fn main() {
-    gui.run(Showcase{}, .{ title: "Showcase", width: 820, height: 560 })
+    gui.run(Showcase{}, .{ title: "Showcase", width: 820, height: 560 }) ! print("Could not open a window\n")
 }

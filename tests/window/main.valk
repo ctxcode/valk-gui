@@ -33,7 +33,10 @@ fn expect(img: raylib.Image, x: i32, y: i32, rgb: u32, what: String) {
 
 fn main() {
     let path = "./debug/window-test.png"
-    gui.run(Shapes{}, .{ width: 300, height: 380, screenshot: path, hidden: true, antialias: false })
+    gui.run(Shapes{}, .{ width: 300, height: 380, screenshot: path, hidden: true, antialias: false }) ! {
+        println("FAIL could not open a window")
+        exit(1)
+    }
     let img = raylib.load_image(path)
     if img.width != 300 {
         println("FAIL no screenshot")

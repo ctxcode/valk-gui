@@ -24,7 +24,7 @@ class Counter is gui.Render {
 }
 
 fn main() {
-    gui.run(Counter{}, .{ title: "Hello", width: 480, height: 320 })
+    gui.run(Counter{}, .{ title: "Hello", width: 480, height: 320 }) ! print("Could not open a window\n")
 }
 ```
 
@@ -251,7 +251,7 @@ lacks, such as Chinese or Japanese, come from the system's fonts, or from
 `text_right()` aligns such text, and text is stored and edited in logical order. Add your own families and use them with `font(name)`:
 
 ```rust
-gui.run(app, .{ fonts: .{ .{ name: "mono", path: "fonts/JetBrainsMono-Regular.ttf" } } })
+gui.run(app, .{ fonts: .{ .{ name: "mono", path: "fonts/JetBrainsMono-Regular.ttf" } } }) ! print("Could not open a window\n")
 gui.div().font("mono").child("let x = 1")
 ```
 

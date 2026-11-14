@@ -19,5 +19,5 @@ class Counter is gui.Render {
 }
 
 fn main() {
-    gui.run(Counter{}, .{ title: "Hello", width: 480, height: 320 })
+    gui.run(Counter{}, .{ title: "Hello", width: 480, height: 320 }) ! print("Could not open a window\n")
 }

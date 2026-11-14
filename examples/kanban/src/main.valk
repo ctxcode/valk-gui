@@ -265,5 +265,5 @@ fn main() {
     board.add(2, "Syntax highlighting", "Colors per line from a callback.", 1, 0)
     board.add(3, "Flexbox layout", "Wrap, grid, gaps and absolute positioning.", 1, 3)
     board.add(3, "SDF rendering", "Smooth corners, borders and shadows.", 2, 1)
-    gui.run(board, .{ title: "Kanban", width: 1240, height: 720 })
+    gui.run(board, .{ title: "Kanban", width: 1240, height: 720 }) ! print("Could not open a window\n")
 }

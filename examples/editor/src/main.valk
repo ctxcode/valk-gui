@@ -491,5 +491,5 @@ fn main(args: Array[String]) {
     let file = fs.is_dir(path) ? "" : path
     let root = file.length > 0 ? fs.dir_of(path) : path
     let app = Editor{ root: root, first_file: file }
-    gui.run(app, .{ title: "Editor", width: 1200, height: 760 })
+    gui.run(app, .{ title: "Editor", width: 1200, height: 760 }) ! print("Could not open a window\n")
 }

@@ -203,5 +203,5 @@ fn main(args: Array[String]) {
     // `gallery 2` opens on the third tab
     let app = Gallery{}
     app.start_tab = (args.get(1) !? "3").to(uint) !? 3
-    gui.run(app, .{ title: "Components", width: 1000, height: 760 })
+    gui.run(app, .{ title: "Components", width: 1000, height: 760 }) ! print("Could not open a window\n")
 }

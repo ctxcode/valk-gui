@@ -92,5 +92,5 @@ fn main() {
     }
     app.tasks[0].done = true
     app.tasks[1].done = true
-    gui.run(app, .{ title: "Tasks", width: 760, height: 520 })
+    gui.run(app, .{ title: "Tasks", width: 760, height: 520 }) ! print("Could not open a window\n")
 }
