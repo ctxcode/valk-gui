@@ -113,3 +113,30 @@ test "TextArea: unicode is edited by character" {
     win.press(.backspace)
     assert(app.area.text == "héllo wörld日")
 }
+
+test "TextArea: wrapping long lines" {
+    let app = AreaView{}
+    app.area.wrap = true
+    let win = gui.headless(app, 400, 300)
+    win.click_on("area")
+    // 360 px for text: 51 characters at 7 px
+    let words = Array[String]{ "aaaaaaaaa" x 8 }
+    win.type_text(words.join(" "))
+    let texts = win.scene.texts()
+    assert(texts.contains("aaaaaaaaa aaaaaaaaa aaaaaaaaa aaaaaaaaa aaaaaaaaa "))
+    assert(texts.contains("aaaaaaaaa aaaaaaaaa aaaaaaaaa"))
+    // Up moves to the row above, keeping the x
+    assert(app.area.col == 79)
+    win.press(.up)
+    assert(app.area.row == 0 && app.area.col == 29)
+    win.press(.down)
+    assert(app.area.col == 79)
+    // A word longer than a row breaks between characters
+    win.press(.enter)
+    win.type_text("b".repeat(60))
+    assert(win.scene.texts().contains("b".repeat(51)))
+    // Clicking on the second row of the first line
+    let b = bounds(win, "area")
+    win.click(b.x + 2 + 8 + 7 * 2, b.y + 2 + 4 + 21 + 10)
+    assert(app.area.row == 0 && app.area.col == 52)
+}

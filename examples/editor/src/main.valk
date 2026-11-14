@@ -40,6 +40,7 @@ class Editor is gui.Render {
     status: String ("Ready")
     setup: bool (false)
     first_file: String ("")
+    wrap: bool (false)
 
     fn render(win: gui.Window) gui.Div {
         if !this.setup : this.init(win)
@@ -63,6 +64,10 @@ class Editor is gui.Render {
             .on_action("close-tab", fn() { this.close(this.current) })
             .on_action("toggle-sidebar", fn() { this.sidebar = !this.sidebar })
             .on_action("toggle-theme", fn() { this.dark = !this.dark })
+            .on_action("toggle-wrap", fn() {
+                this.wrap = !this.wrap
+                each this.docs as doc : doc.area.wrap = this.wrap
+            })
             .on_action("open-folder", fn() {
                 gui.choose_file(win, fn(path) {
                     if path.length == 0 : return
@@ -88,6 +93,7 @@ class Editor is gui.Render {
         win.bind("secondary-w", "close-tab") _
         win.bind("secondary-b", "toggle-sidebar") _
         win.bind("secondary-o", "open-folder") _
+        win.bind("alt-z", "toggle-wrap") _
         win.bind("ctrl-tab", "next-tab") _
         // A monospaced font from the system, when there is one
         each Array[String]{ "/usr/share/fonts/TTF/DejaVuSansMono.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
@@ -140,6 +146,7 @@ class Editor is gui.Render {
         area.line_numbers = true
         area.font = "mono"
         area.font_size = 13
+        area.wrap = this.wrap
         if is_code(path) : area.highlight = highlight
         this.docs.append(Doc{ path: path, area: area, saved: text })
         this.select(this.docs.length - 1, win)
@@ -322,6 +329,7 @@ class Editor is gui.Render {
             Command{ title: "Open file", action: "quick-open" },
             Command{ title: "Open folder…", action: "open-folder" },
             Command{ title: "Toggle sidebar", action: "toggle-sidebar" },
+            Command{ title: "Toggle word wrap", action: "toggle-wrap" },
             Command{ title: "Toggle dark theme", action: "toggle-theme" }
         }
     }

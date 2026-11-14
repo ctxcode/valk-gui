@@ -1,4 +1,11 @@
 
+// One row on screen: a whole line, or a part of one when lines wrap
+struct VisualRow {
+    line: uint
+    start: uint
+    len: uint
+}
+
 struct Snapshot {
     text: String
     row: uint
@@ -20,6 +27,8 @@ struct Snapshot {
     /// The text size; the theme's when unset.
     + font_size: ?f32 (null)
     + tab_size: uint (4)
+    /// Wraps long lines at the width of the area instead of scrolling sideways.
+    + wrap: bool (false)
     /// Colors per line, for syntax highlighting: called for each visible line with its text, it
     /// returns `(byte length, color)` runs.
     + highlight: ?fn(String)(Array[(uint, Color)]) (null)
@@ -40,6 +49,10 @@ struct Snapshot {
     undo_stack: Array[Snapshot] (.{})
     redo_stack: Array[Snapshot] (.{})
     last_edit: String ("")
+    version: uint (0)
+    visual: Array[VisualRow] (.{})
+    visual_version: uint (999999999)
+    visual_width: f32 (-1)
 
     + static fn new(text: String ("")) TextArea {
         let a = TextArea{}
@@ -59,6 +72,7 @@ struct Snapshot {
         this.anchor_col = 0
         this.undo_stack.clear()
         this.redo_stack.clear()
+        this.version++
     }
 
     + fn focus_handle(win: Window) FocusHandle {
@@ -191,34 +205,106 @@ struct Snapshot {
     }
 
     - fn x_of(win: Window, r: uint, c: uint) f32 {
-        return win.platform.text_width(this.line(r).range(0, c), this.resolved())
+        let vr = this.visual_row(win, this.row_index(win, r, c))
+        return this.width_of(win, r, vr.start, c)
+    }
+
+    - fn width_of(win: Window, r: uint, from: uint, to: uint) f32 {
+        if to <= from : return 0
+        return win.platform.text_width(this.line(r).range(from, to - from), this.resolved())
+    }
+
+    // The rows on screen, recomputed when the text or, with wrapping, the width changes
+    - fn rows(win: Window) Array[VisualRow] {
+        let width = this.wrap ? (this.view.w - this.gutter(win) - 8).max(20) : -1
+        if this.visual_version == this.version && this.visual_width == width : return this.visual
+        let rows = Array[VisualRow]{}
+        each this.lines as text, r {
+            if !this.wrap || text.length == 0 {
+                rows.append(.{ line: r, start: 0, len: text.length })
+                continue
+            }
+            let start: uint = 0
+            while start < text.length {
+                let end = this.wrap_end(win, r, start, width)
+                rows.append(.{ line: r, start: start, len: end - start })
+                start = end
+            }
+        }
+        this.visual = rows
+        this.visual_version = this.version
+        this.visual_width = width
+        return rows
+    }
+
+    // Where the row that starts at `start` ends: after the last space that fits, or at the last
+    // character that fits for a word longer than the row
+    - fn wrap_end(win: Window, r: uint, start: uint, width: f32) uint {
+        let text = this.line(r)
+        if this.width_of(win, r, start, text.length) <= width : return text.length
+        let fit = next_boundary(text, start)
+        let space_break: uint = 0
+        let i = fit
+        while i < text.length {
+            let next = next_boundary(text, i)
+            if this.width_of(win, r, start, next) > width : break
+            fit = next
+            if text[i] == ' ' : space_break = next
+            i = next
+        }
+        return space_break > start ? space_break : fit
+    }
+
+    - fn visual_row(win: Window, index: uint) VisualRow {
+        let rows = this.rows(win)
+        return rows.get(index.min(rows.length - 1)) !? VisualRow{ line: 0, start: 0, len: 0 }
+    }
+
+    // The screen row that shows the caret position `r`, `c`
+    - fn row_index(win: Window, r: uint, c: uint) uint {
+        let rows = this.rows(win)
+        let found: uint = 0
+        each rows as vr, i {
+            if vr.line > r : break
+            if vr.line == r && vr.start <= c : found = i
+        }
+        return found
     }
 
     - fn position_at(win: Window, x: f32, y: f32) (uint, uint) {
         let lh = this.line_height()
+        let rows = this.rows(win)
         let ry = y - this.view.y + this.scroll_y - 4
-        let r = ry <= 0 ? 0 : floor32(ry / lh).to(uint).min(this.lines.length - 1)
+        let vi = ry <= 0 ? 0 : floor32(ry / lh).to(uint).min(rows.length - 1)
+        let vr = this.visual_row(win, vi)
         let local = x - this.view.x - this.gutter(win) + this.scroll_x
-        let text = this.line(r)
-        let best: uint = 0
+        let text = this.line(vr.line)
+        let end = vr.start + vr.len
+        // A wrapped row ends before the next row's first character
+        let last_row = vi + 1 >= rows.length || (rows.get(vi + 1) !? vr).line != vr.line
+        let limit = last_row ? end : prev_boundary(text, end).max(vr.start)
+        let best = vr.start
         let best_distance = local.abs()
-        let i: uint = 0
-        while i < text.length {
+        let i = vr.start
+        while i < limit {
             i = next_boundary(text, i)
-            let d = (this.x_of(win, r, i) - local).abs()
+            let d = (this.width_of(win, vr.line, vr.start, i) - local).abs()
             if d < best_distance {
                 best = i
                 best_distance = d
             }
         }
-        return (r, best)
+        return (vr.line, best)
+    }
+
+    - fn content_height(win: Window) f32 {
+        return this.rows(win).length.to(f32) * this.line_height() + 8
     }
 
     - fn scroll_by(win: Window, dx: f32, dy: f32) bool {
-        let lh = this.line_height()
-        let max_y = (this.lines.length.to(f32) * lh + 8 - this.view.h).max(0)
+        let max_y = (this.content_height(win) - this.view.h).max(0)
         let ny = clamp32(this.scroll_y + dy, 0, max_y)
-        let nx = (this.scroll_x + dx).max(0)
+        let nx = this.wrap ? 0 : (this.scroll_x + dx).max(0)
         let moved = ny != this.scroll_y || nx != this.scroll_x
         this.scroll_y = ny
         this.scroll_x = nx
@@ -230,13 +316,14 @@ struct Snapshot {
     - fn paint(win: Window, p: Painter, b: Bounds) {
         this.view = b
         let theme = win.theme
-        let font = this.resolved()
         let lh = this.line_height()
         let gutter = this.gutter(win)
         let focused = this.focus_handle(win).is_focused()
+        let rows = this.rows(win)
+        let caret_row = this.row_index(win, this.row, this.col)
         if this.reveal {
             this.reveal = false
-            let cy = this.row.to(f32) * lh + 4
+            let cy = caret_row.to(f32) * lh + 4
             if cy < this.scroll_y : this.scroll_y = cy - 4
             if cy + lh > this.scroll_y + b.h : this.scroll_y = cy + lh - b.h + 4
             let cx = this.x_of(win, this.row, this.col)
@@ -244,53 +331,77 @@ struct Snapshot {
             if cx < this.scroll_x : this.scroll_x = (cx - 20).max(0)
             if cx > this.scroll_x + room : this.scroll_x = cx - room + 20
         }
-        this.scroll_y = clamp32(this.scroll_y, 0, (this.lines.length.to(f32) * lh + 8 - b.h).max(0))
+        if this.wrap : this.scroll_x = 0
+        this.scroll_y = clamp32(this.scroll_y, 0, (this.content_height(win) - b.h).max(0))
         let first = floor32(this.scroll_y / lh).to(uint)
         let visible = ceil32(b.h / lh).to(uint) + 1
-        let last = (first + visible).min(this.lines.length)
+        let last = (first + visible).min(rows.length)
         let r1, c1, r2, c2 = this.selection()
         let selecting = this.has_selection()
         let text_x = b.x + gutter
+        let text_h = round32(this.size * 1.4)
         if this.line_numbers : p.fill(.{ x: b.x, y: b.y, w: gutter - 8, h: b.h }, theme.background.opacity(0.35))
-        each first .. last - first as r {
-            let y = b.y + 4 + r.to(f32) * lh - this.scroll_y
+        // Colors are worked out per line, and reused for its wrapped rows
+        let colors_line: uint = 0
+        let colors: ?Array[(uint, Color)] = null
+        each first .. last - first as vi {
+            let vr = rows.get(vi) ! break
+            let r = vr.line
+            let y = b.y + 4 + vi.to(f32) * lh - this.scroll_y
             let content = this.line(r)
-            if this.line_numbers {
+            let seg_end = vr.start + vr.len
+            if this.line_numbers && vr.start == 0 {
                 let label = (r + 1).to(String)
                 let lw = p.text_width(label, this.size, .normal, this.font)
-                p.text(b.x + gutter - 14 - lw, y + (lh - round32(this.size * 1.4)) / 2, label, r == this.row && focused ? theme.text : theme.muted, this.size, .normal, this.font)
+                p.text(b.x + gutter - 14 - lw, y + (lh - text_h) / 2, label, r == this.row && focused ? theme.text : theme.muted, this.size, .normal, this.font)
             }
             p.clip(.{ x: text_x - 2, y: b.y, w: b.w - gutter + 2, h: b.h })
             if selecting && r >= r1 && r <= r2 {
-                let sx = r == r1 ? this.x_of(win, r, c1) : 0
-                let ex = r == r2 ? this.x_of(win, r, c2) : this.x_of(win, r, content.length) + this.size * 0.4
-                p.fill(.{ x: text_x + sx - this.scroll_x, y: y, w: (ex - sx).max(2), h: lh }, theme.accent.opacity(focused ? 0.35 : 0.18))
+                let from = r == r1 ? c1.max(vr.start) : vr.start
+                let to = r == r2 ? c2.min(seg_end) : seg_end
+                let ends_line = seg_end == content.length && r != r2
+                if from <= to && !(r == r1 && c1 > seg_end) && !(r == r2 && c2 < vr.start) {
+                    let sx = this.width_of(win, r, vr.start, from)
+                    let ex = this.width_of(win, r, vr.start, to) + (ends_line ? this.size * 0.4 : 0)
+                    p.fill(.{ x: text_x + sx - this.scroll_x, y: y, w: (ex - sx).max(2), h: lh }, theme.accent.opacity(focused ? 0.35 : 0.18))
+                }
             }
-            let ty = y + (lh - round32(this.size * 1.4)) / 2
+            let ty = y + (lh - text_h) / 2
             let hl = this.highlight
-            if isset(hl) && content.length > 0 {
+            if isset(hl) && vr.len > 0 {
+                if !isset(colors) || colors_line != r {
+                    colors = hl(content)
+                    colors_line = r
+                }
                 let x = text_x - this.scroll_x
                 let at: uint = 0
-                each hl(content) as part {
+                each colors ?? Array[(uint, Color)]{} as part {
                     let len, color = part
-                    let n = len.min(content.length - at)
-                    if n == 0 : continue
-                    let piece = content.range(at, n)
-                    p.text(x, ty, piece, color, this.size, .normal, this.font)
-                    x += win.platform.text_width(piece, font)
-                    at += n
+                    let part_end = (at + len).min(content.length)
+                    let from = at.max(vr.start)
+                    let to = part_end.min(seg_end)
+                    if from < to {
+                        let piece = content.range(from, to - from)
+                        p.text(x, ty, piece, color, this.size, .normal, this.font)
+                        x += this.width_of(win, r, from, to)
+                    }
+                    at = part_end
+                    if at >= seg_end : break
                 }
-                if at < content.length : p.text(x, ty, content.range(at, content.length - at), theme.text, this.size, .normal, this.font)
-            } else if content.length > 0 {
-                p.text(text_x - this.scroll_x, ty, content, theme.text, this.size, .normal, this.font)
+                if at < seg_end {
+                    let from = at.max(vr.start)
+                    p.text(x, ty, content.range(from, seg_end - from), theme.text, this.size, .normal, this.font)
+                }
+            } else if vr.len > 0 {
+                p.text(text_x - this.scroll_x, ty, content.range(vr.start, vr.len), theme.text, this.size, .normal, this.font)
             }
-            if focused && r == this.row {
-                p.fill(.{ x: text_x + this.x_of(win, r, this.col) - this.scroll_x, y: y + 2, w: 1.5, h: lh - 4 }, theme.text)
+            if focused && vi == caret_row {
+                p.fill(.{ x: text_x + this.width_of(win, r, vr.start, this.col) - this.scroll_x, y: y + 2, w: 1.5, h: lh - 4 }, theme.text)
             }
             p.unclip()
         }
         if this.lines.length == 1 && this.line(0).length == 0 && this.placeholder.length > 0 {
-            p.text(text_x, b.y + 4 + (lh - round32(this.size * 1.4)) / 2, this.placeholder, theme.muted, this.size, .normal, this.font)
+            p.text(text_x, b.y + 4 + (lh - text_h) / 2, this.placeholder, theme.muted, this.size, .normal, this.font)
         }
     }
 
@@ -325,6 +436,7 @@ struct Snapshot {
     }
 
     - fn changed() {
+        this.version++
         this.reveal = true
         this.goal_x = -1
         let f = this.on_change
@@ -362,12 +474,14 @@ struct Snapshot {
 
     - fn vertical(win: Window, rows: int, select: bool) {
         if this.goal_x < 0 : this.goal_x = this.x_of(win, this.row, this.col)
-        let target = (this.row.to(int) + rows).max(0).min(this.lines.length.to(int) - 1).to(uint)
+        let count = this.rows(win).length
+        let current = this.row_index(win, this.row, this.col)
+        let target = (current.to(int) + rows).max(0).min(count.to(int) - 1).to(uint)
         let goal = this.goal_x
         let lx = this.view.x + this.gutter(win) - this.scroll_x + goal
         let ly = this.view.y + 4 + target.to(f32) * this.line_height() - this.scroll_y + 1
         let r, c = this.position_at(win, lx, ly)
-        this.move_to(target, r == target ? c : 0, select)
+        this.move_to(r, c, select)
         this.goal_x = goal
     }
 

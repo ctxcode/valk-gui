@@ -23,6 +23,7 @@ class Gallery is gui.Render {
         win.theme = this.dark ? gui.Theme.dark() : gui.Theme.light()
         let t = win.theme
         this.password.password = true
+        this.notes.wrap = true
 
         let header = gui.div().flex().items_center().gap(12).px(20).h(56).border_b(1).border_color(t.border).bg(t.surface)
             .child(gui.icon(.grid, 20).text_color(t.accent))

@@ -44,6 +44,7 @@ class Board is gui.Render {
             this.bound = true
         }
         this.title.on_submit = fn(text: String) { this.save_card(win) }
+        this.notes.wrap = true
 
         let filter = this.search.text.lower()
         let board = gui.div().flex_1().flex().gap(16).p(20).overflow_x_scroll().id("board")
