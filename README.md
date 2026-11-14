@@ -297,9 +297,14 @@ moves the clock for timers and animations, and `win.wait_tasks()` waits for `spa
 
 ## Not supported
 
-One operating-system window per program (floating panels live inside it), no inline composition for input methods (IME), no native menu bar, no
-accessibility tree. Right-to-left text is reordered for display; the text fields edit it in
-logical order, and Arabic ligatures beyond lam-alef are not formed.
+- **Input methods (IME):** text typed through an input method (Chinese, Japanese, Korean)
+  arrives when it is committed, but the word being composed is not shown at the caret and the
+  candidate popup is not placed next to it. raylib's GLFW backend has no API for this.
+- **Accessibility:** no accessibility tree is exposed, so screen readers see an empty window.
+- **Windows:** one operating-system window per program; floating panels live inside it. No
+  native menu bar.
+- **Right-to-left text:** reordered for display; the text fields edit it in logical order, and
+  Arabic ligatures beyond lam-alef are not formed.
 
 ## Development
 
