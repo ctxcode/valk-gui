@@ -1,0 +1,39 @@
+use valk.core
+
++ enum FileDialog { open, save, folder }
+
+/// Shows the system's file dialog and calls `done` with the chosen path, or with "" when it was
+/// cancelled or the system has no dialog program. The dialog runs on another thread, so the window
+/// keeps drawing. Linux uses `zenity` or `kdialog`, macOS AppleScript, Windows PowerShell.
++ fn choose_file(win: Window, done: fn(String)(), kind: FileDialog (.open), title: String ("")) {
+    let mode = kind.to(int)
+    let heading: atomic String = title
+    win.spawn[String](fn() String { return run_file_dialog(mode, heading) }, done) ! done("")
+}
+
+fn run_file_dialog(mode: int, title: String) String {
+    #if OS == "macos"
+    let action = mode == 1 ? "choose file name" : (mode == 2 ? "choose folder" : "choose file")
+    let prompt = title.length > 0 ? " with prompt \"" + title.replace("\"", "'") + "\"" : ""
+    let out = core.Process.output("osascript", .{ "-e", "POSIX path of (" + action + prompt + ")" }) ! return ""
+    return out.code == 0 ? out.stdout.trim() : ""
+    #elif OS == "win"
+    let dialog = mode == 2 ? "System.Windows.Forms.FolderBrowserDialog" : (mode == 1 ? "System.Windows.Forms.SaveFileDialog" : "System.Windows.Forms.OpenFileDialog")
+    let field = mode == 2 ? "SelectedPath" : "FileName"
+    let script = "Add-Type -AssemblyName System.Windows.Forms; $d = New-Object " + dialog + "; if ($d.ShowDialog() -eq 'OK') { $d." + field + " }"
+    let out = core.Process.output("powershell", .{ "-NoProfile", "-STA", "-Command", script }) ! return ""
+    return out.code == 0 ? out.stdout.trim() : ""
+    #else
+    let args = Array[String]{ "--file-selection" }
+    if mode == 1 : args.append_many(.{ "--save", "--confirm-overwrite" })
+    if mode == 2 : args.append("--directory")
+    if title.length > 0 : args.append("--title=" + title)
+    let out = core.Process.output("zenity", args) ! {
+        let kd = Array[String]{ mode == 1 ? "--getsavefilename" : (mode == 2 ? "--getexistingdirectory" : "--getopenfilename"), "." }
+        if title.length > 0 : kd.append_many(.{ "--title", title })
+        let alt = core.Process.output("kdialog", kd) ! return ""
+        return alt.code == 0 ? alt.stdout.trim() : ""
+    }
+    return out.code == 0 ? out.stdout.trim() : ""
+    #end
+}
