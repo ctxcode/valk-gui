@@ -165,8 +165,8 @@ Escape runs the last `on_dismiss` handler in the tree, which closes menus and di
 
 ## Components
 
-`gui.TextInput` (one line) and `gui.TextArea` (many lines, with line numbers, syntax colors and
-read-only mode) edit text with selection, word jumps, the clipboard, and undo. `gui.Select` is
+`gui.TextInput` (one line) and `gui.TextArea` (many lines, with wrapping, line numbers, syntax
+colors and read-only mode) edit text with selection, word jumps, the clipboard, and undo. `gui.Select` is
 a dropdown. Keep these with your state:
 
 ```rust
@@ -287,7 +287,7 @@ moves the clock for timers and animations, and `win.wait_tasks()` waits for `spa
 ## Not supported
 
 One window per program, no right-to-left text or input methods (IME), no native menu bar, no
-accessibility tree. Text areas do not wrap lines.
+accessibility tree.
 
 ## Development
 
@@ -295,6 +295,7 @@ accessibility tree. Text areas do not wrap lines.
 make raylib              # download raylib 6.0 into vendor/raylib (when it is not installed)
 make test                # headless tests
 make test-window         # opens a hidden window and checks the pixels; needs a display
+make raylib-win test-win # the same tests built for Windows, run under Wine
 make kanban              # build and run an example (see Examples)
 make examples            # build them all
 make docs                # docs/api.md

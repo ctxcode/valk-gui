@@ -1,3 +1,4 @@
 /debug
 /vendor
 /tests/window/vendor
+/vendor/raylib-win

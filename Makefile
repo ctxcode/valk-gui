@@ -30,6 +30,20 @@ test-window:
 	cd tests/window && vman install
 	$(vc) build ./tests/window -o ./debug/window-tests $(LINK)
 	$(RUN) ./debug/window-tests
+# The tests built for Windows and run under Wine; needs raylib's win64 release in RAYLIB_WIN
+RAYLIB_WIN ?= vendor/raylib-win/lib
+test-win:
+	@mkdir -p debug/win
+	$(vc) build ./tests --test --target win-x64 -L $(RAYLIB_WIN) -o ./debug/win/tests.exe
+	$(vc) build ./tests/window --target win-x64 -L $(RAYLIB_WIN) -o ./debug/win/window-tests.exe
+	cp $(RAYLIB_WIN)/raylib.dll ./debug/win/
+	cd debug/win && WINEDEBUG=-all wine ./tests.exe
+	cd debug/win && mkdir -p debug && WINEDEBUG=-all wine ./window-tests.exe
+raylib-win:
+	@mkdir -p vendor
+	curl -fsSL -o vendor/raylib-win.zip https://github.com/raysan5/raylib/releases/download/$(RAYLIB_VERSION)/raylib-$(RAYLIB_VERSION)_win64_msvc16.zip
+	rm -rf vendor/raylib-win vendor/raylib-$(RAYLIB_VERSION)_win64_msvc16
+	cd vendor && unzip -q raylib-win.zip && mv raylib-$(RAYLIB_VERSION)_win64_msvc16 raylib-win && rm raylib-win.zip
 lint:
 	$(vc) build ./src --lint
 example:
@@ -56,4 +70,4 @@ raylib:
 docs:
 	$(vc) doc . -o docs/api.md --markdown --no-private
 
-.PHONY: test test-window lint example examples deps raylib docs $(EXAMPLES)
+.PHONY: test test-window test-win raylib-win lint example examples deps raylib docs $(EXAMPLES)
