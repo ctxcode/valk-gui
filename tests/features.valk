@@ -253,3 +253,15 @@ test "Actions: plain-key bindings leave text fields alone" {
     win.type_text("n")
     assert(app.actions == 1 && app.input.text == "n")
 }
+
+test "Right-to-left: Hebrew and Arabic in drawing order" {
+    // Hebrew: reversed as a run inside left-to-right text, numbers keep their order
+    assert(gui.visual_text("abc שלום def") == "abc םולש def")
+    assert(gui.visual_text("שלום 123") == "123 םולש")
+    // Brackets mirror inside right-to-left text
+    assert(gui.visual_text("(שלום)") == "(םולש)")
+    // Arabic: letters take joined forms (initial, medial, final), then the run is reversed
+    // سلام = seen lam alef meem: seen initial, lam+alef ligature final, meem isolated
+    assert(gui.visual_text("سلام") == "\u{fee1}\u{fefc}\u{feb3}")
+    assert(gui.visual_text("plain text") == "plain text")
+}

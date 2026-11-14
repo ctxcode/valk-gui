@@ -1,0 +1,287 @@
+
+// Right-to-left text for display: Arabic letters take their joined forms, and runs of Hebrew and
+// Arabic are put in visual order, following the Unicode bidirectional algorithm in a simplified
+// form (no explicit embeddings). Text is stored and edited in logical order.
+
+/// Whether a code point is written right to left.
+fn is_rtl(cp: u32) bool {
+    return (cp >= 0x0590 && cp < 0x0900) || (cp >= 0xfb1d && cp < 0xfe00) || (cp >= 0xfe70 && cp < 0xff00)
+}
+
+/// Whether the text has right-to-left characters, which need `visual_text`.
+fn has_rtl(text: String) bool {
+    // Hebrew and Arabic start with the UTF-8 lead bytes 0xd6 to 0xdf, presentation forms with 0xef
+    each text as b {
+        if b >= 0xd6 && b <= 0xdf : return true
+        if b == 0xef : return true
+    }
+    return false
+}
+
+// Direction classes
+value DIR_L (0)
+value DIR_R (1)
+value DIR_NUM (2)
+value DIR_N (3)
+
+fn dir_class(cp: u32) int {
+    if is_rtl(cp) {
+        // Arabic-Indic digits read left to right
+        if (cp >= 0x0660 && cp <= 0x0669) || (cp >= 0x06f0 && cp <= 0x06f9) : return DIR_NUM
+        return DIR_R
+    }
+    if cp >= '0' && cp <= '9' : return DIR_NUM
+    if (cp >= 'a' && cp <= 'z') || (cp >= 'A' && cp <= 'Z') : return DIR_L
+    if cp < 0xc0 : return DIR_N
+    if cp >= 0x2000 && cp < 0x2c00 : return DIR_N
+    return DIR_L
+}
+
+/// `text` in the order it is drawn, left to right, with Arabic letters in their joined forms.
+/// Text elements and `Painter.text` do this already; it is for measuring or drawing by hand.
++ fn visual_text(text: String) String {
+    if !has_rtl(text) : return text
+    let cps = shape_arabic(decode_all(text))
+    let n = cps.length
+    let classes = Array[int]{}
+    each cps as cp : classes.append(dir_class(cp))
+
+    // The paragraph takes the direction of its first strong character
+    let para = DIR_L
+    each classes as c {
+        if c == DIR_L || c == DIR_R {
+            para = c
+            break
+        }
+    }
+    // Neutrals between two runs of the same direction take it; others the paragraph's
+    let resolved = Array[int]{}
+    each classes as c, i {
+        if c != DIR_N {
+            resolved.append(c)
+            continue
+        }
+        let before = strong_near(classes, i, false, para)
+        let after = strong_near(classes, i, true, para)
+        resolved.append(before == after ? before : para)
+    }
+    // Levels: even runs left to right, odd right to left
+    let levels = Array[uint]{}
+    let last_strong = para
+    each resolved as c {
+        let level: uint = 0
+        if para == DIR_L {
+            if c == DIR_R : level = 1
+            else if c == DIR_NUM : level = last_strong == DIR_R ? 2 : 0
+        } else {
+            level = c == DIR_R ? 1 : 2
+        }
+        if c == DIR_L || c == DIR_R : last_strong = c
+        levels.append(level)
+    }
+    // Reverse every run at or above each level, from the highest down to 1
+    let order = Array[uint]{}
+    each 0 .. n as i : order.append(i)
+    let high: uint = 0
+    each levels as l : high = high.max(l)
+    let level = high
+    while level >= 1 {
+        let i: uint = 0
+        while i < n {
+            if (levels.get(order.get(i) !? 0) !? 0) < level {
+                i++
+                continue
+            }
+            let j = i
+            while j < n && (levels.get(order.get(j) !? 0) !? 0) >= level : j++
+            let a = i
+            let b = j - 1
+            while a < b {
+                order.swap(a, b)
+                a++
+                b--
+            }
+            i = j
+        }
+        level--
+    }
+    let out = ByteBuffer.new(text.length + 8)
+    each order as at {
+        let cp = cps.get(at) !? ' '.to(u32)
+        if (levels.get(at) !? 0) % 2 == 1 : cp = mirrored(cp)
+        out.write(codepoint_text(cp))
+    }
+    return out.to_string()
+}
+
+fn strong_near(classes: Array[int], i: uint, forward: bool, para: int) int {
+    let j = i
+    while true {
+        if forward {
+            j++
+            if j >= classes.length : return para
+        } else {
+            if j == 0 : return para
+            j--
+        }
+        let c = classes.get(j) !? DIR_N
+        if c == DIR_L : return DIR_L
+        // Numbers inside right-to-left text keep its direction for the neutrals around them
+        if c == DIR_R || (c == DIR_NUM && para == DIR_R) : return DIR_R
+        if c == DIR_NUM : return DIR_L
+    }
+}
+
+fn mirrored(cp: u32) u32 {
+    return match cp : u32 {
+        '(' => ')'
+        ')' => '('
+        '[' => ']'
+        ']' => '['
+        '{' => '}'
+        '}' => '{'
+        '<' => '>'
+        '>' => '<'
+        0xab => 0xbb
+        0xbb => 0xab
+        default => cp
+    }
+}
+
+fn decode_all(text: String) Array[u32] {
+    let cps = Array[u32]{}
+    let i: uint = 0
+    while i < text.length {
+        let cp, len = decode_utf8(text, i)
+        cps.append(cp)
+        i += len
+    }
+    return cps
+}
+
+// ---- Arabic letter shaping ----
+
+// For U+0621 to U+064A: the first presentation form (isolated), and how many forms there are:
+// 1 does not join, 2 joins to the previous letter only, 4 joins on both sides
+fn arabic_forms(cp: u32) (u32, uint) {
+    return match cp : (u32, uint) {
+        0x0621 => (0xfe80, 1)
+        0x0622 => (0xfe81, 2)
+        0x0623 => (0xfe83, 2)
+        0x0624 => (0xfe85, 2)
+        0x0625 => (0xfe87, 2)
+        0x0626 => (0xfe89, 4)
+        0x0627 => (0xfe8d, 2)
+        0x0628 => (0xfe8f, 4)
+        0x0629 => (0xfe93, 2)
+        0x062a => (0xfe95, 4)
+        0x062b => (0xfe99, 4)
+        0x062c => (0xfe9d, 4)
+        0x062d => (0xfea1, 4)
+        0x062e => (0xfea5, 4)
+        0x062f => (0xfea9, 2)
+        0x0630 => (0xfeab, 2)
+        0x0631 => (0xfead, 2)
+        0x0632 => (0xfeaf, 2)
+        0x0633 => (0xfeb1, 4)
+        0x0634 => (0xfeb5, 4)
+        0x0635 => (0xfeb9, 4)
+        0x0636 => (0xfebd, 4)
+        0x0637 => (0xfec1, 4)
+        0x0638 => (0xfec5, 4)
+        0x0639 => (0xfec9, 4)
+        0x063a => (0xfecd, 4)
+        0x0641 => (0xfed1, 4)
+        0x0642 => (0xfed5, 4)
+        0x0643 => (0xfed9, 4)
+        0x0644 => (0xfedd, 4)
+        0x0645 => (0xfee1, 4)
+        0x0646 => (0xfee5, 4)
+        0x0647 => (0xfee9, 4)
+        0x0648 => (0xfeed, 2)
+        0x0649 => (0xfeef, 2)
+        0x064a => (0xfef1, 4)
+        default => (0, 0)
+    }
+}
+
+// Vowel marks and other characters that do not break joining
+fn arabic_transparent(cp: u32) bool {
+    return (cp >= 0x064b && cp <= 0x065f) || cp == 0x0670
+}
+
+value TATWEEL (0x0640)
+
+// How a letter joins: 0 not at all, 2 to the previous letter only, 4 on both sides
+fn joining(cp: u32) uint {
+    if cp == TATWEEL : return 4
+    let base, forms = arabic_forms(cp)
+    if base == 0 : return 0
+    return forms == 1 ? 0 : forms
+}
+
+fn shape_arabic(cps: Array[u32]) Array[u32] {
+    let out = Array[u32]{}
+    let n = cps.length
+    let i: uint = 0
+    while i < n {
+        let cp = cps.get(i) !? 0
+        let base, forms = arabic_forms(cp)
+        if base == 0 {
+            out.append(cp)
+            i++
+            continue
+        }
+        let prev = neighbor(cps, i, false)
+        let next_i = neighbor_index(cps, i, true)
+        let next = cps.get(next_i) !? 0
+        let joins_prev = joining(prev) == 4
+        // Lam followed by an alef becomes one ligature
+        if cp == 0x0644 && next_i < n {
+            let lig = match next : u32 {
+                0x0622 => 0xfef5
+                0x0623 => 0xfef7
+                0x0625 => 0xfef9
+                0x0627 => 0xfefb
+                default => 0
+            }
+            if lig != 0 {
+                out.append(joins_prev ? lig + 1 : lig)
+                // Marks between the two stay
+                each i + 1 .. next_i - i - 1 as k : out.append(cps.get(k) !? 0)
+                i = next_i + 1
+                continue
+            }
+        }
+        let joins_next = forms == 4 && joining(next) > 0
+        let form: u32 = 0
+        if forms == 4 {
+            if joins_prev && joins_next : form = 3
+            else if joins_prev : form = 1
+            else if joins_next : form = 2
+        } else if forms == 2 && joins_prev {
+            form = 1
+        }
+        out.append(base + form)
+        i++
+    }
+    return out
+}
+
+fn neighbor_index(cps: Array[u32], i: uint, forward: bool) uint {
+    let j = i
+    while true {
+        if forward {
+            j++
+            if j >= cps.length : return cps.length
+        } else {
+            if j == 0 : return cps.length
+            j--
+        }
+        if !arabic_transparent(cps.get(j) !? 0) : return j
+    }
+}
+
+fn neighbor(cps: Array[u32], i: uint, forward: bool) u32 {
+    return cps.get(neighbor_index(cps, i, forward)) !? 0
+}

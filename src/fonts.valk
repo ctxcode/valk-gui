@@ -49,6 +49,7 @@ class Fonts {
     codepoints: Array[i32] (base_codepoints())
     known: HashSet[i32] (.{})
     generation: uint (0)
+    visual: Map[String] (.{})
 
     static fn new(extra_fallbacks: Array[String]) Fonts {
         let f = Fonts{}
@@ -102,7 +103,8 @@ class Fonts {
     }
 
     /// The text cut into parts that one face draws.
-    fn runs(text: String, font: ResolvedFont) Array[Run] {
+    fn runs(logical: String, font: ResolvedFont) Array[Run] {
+        let text = this.ordered(logical)
         this.see(text)
         let primary = this.face(font, 0)
         let result = Array[Run]{}
@@ -125,6 +127,17 @@ class Fonts {
         }
         if text.length > start : result.append(.{ face: current, text: text.range(start, text.length - start) })
         return result
+    }
+
+    // Right-to-left text in drawing order, remembered because the same texts come every frame
+    - fn ordered(text: String) String {
+        if !has_rtl(text) : return text
+        let cached = this.visual.get(text) !? null
+        if isset(cached) : return cached
+        if this.visual.length > 4000 : this.visual.clear()
+        let v = visual_text(text)
+        this.visual.set(text, v)
+        return v
     }
 
     - fn face_for(font: ResolvedFont, primary: Face, cp: i32) Face {

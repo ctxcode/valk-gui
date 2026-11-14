@@ -237,7 +237,8 @@ gui.canvas(fn(p, b) {
 
 The built-in font is [Inter](https://rsms.me/inter/) in four weights and italic. Characters it
 lacks, such as Chinese or Japanese, come from the system's fonts, or from
-`WindowOptions.fallback_fonts`. Add your own families and use them with `font(name)`:
+`WindowOptions.fallback_fonts`. Hebrew and Arabic are drawn right to left, Arabic letters joined;
+`text_right()` aligns such text, and text is stored and edited in logical order. Add your own families and use them with `font(name)`:
 
 ```rust
 gui.run(app, .{ fonts: .{ .{ name: "mono", path: "fonts/JetBrainsMono-Regular.ttf" } } })
@@ -286,8 +287,9 @@ moves the clock for timers and animations, and `win.wait_tasks()` waits for `spa
 
 ## Not supported
 
-One window per program, no right-to-left text or input methods (IME), no native menu bar, no
-accessibility tree.
+One window per program, no inline composition for input methods (IME), no native menu bar, no
+accessibility tree. Right-to-left text is reordered for display; the text fields edit it in
+logical order, and Arabic ligatures beyond lam-alef are not formed.
 
 ## Development
 

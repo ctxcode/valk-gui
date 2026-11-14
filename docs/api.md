@@ -104,6 +104,8 @@ Namespaces: [main](#main)
 + fn transparent() Color
 // A scrolling list of `count` rows of equal height that only builds the rows in view, so it stays fast with any number of rows. `row` builds the row at an index. `id` names the list; it must be unique in the window.
 + fn uniform_list(win: Window, id: String, count: uint, row_height: f32, row: fn(uint)(Div)) Div
+// `text` in the order it is drawn, left to right, with Arabic letters in their joined forms. Text elements and `Painter.text` do this already; it is for measuring or drawing by hand.
++ fn visual_text(text: String) String
 + fn white() Color
 ```
 
