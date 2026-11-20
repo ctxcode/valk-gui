@@ -45,7 +45,7 @@ raylib-win:
 	rm -rf vendor/raylib-win vendor/raylib-$(RAYLIB_VERSION)_win64_msvc16
 	cd vendor && unzip -q raylib-win.zip && mv raylib-$(RAYLIB_VERSION)_win64_msvc16 raylib-win && rm raylib-win.zip
 lint:
-	$(vc) build ./src --lint
+	$(vc) build ./src --lint --deny-warnings
 example:
 	@mkdir -p debug
 	$(vc) build ./examples/$(EXAMPLE) -o ./debug/$(EXAMPLE) $(LINK)
