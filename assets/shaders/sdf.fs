@@ -8,7 +8,7 @@ uniform vec4 rect;
 uniform vec4 radii;
 uniform float border;
 uniform float blur;
-// 0 box, 1 shadow, 2 line, 3 image
+// 0 box, 1 shadow, 2 line, 3 image, 4 arc
 uniform int mode;
 uniform vec4 fill;
 uniform vec4 fill2;
@@ -43,6 +43,18 @@ void main() {
         vec2 ba = rect.zw - rect.xy;
         float h = clamp(dot(pa, ba) / max(dot(ba, ba), 0.0001), 0.0, 1.0);
         float d = length(pa - ba * h) - border * 0.5;
+        float aa = max(fwidth(d), 0.0001);
+        finalColor = vec4(fill.rgb, fill.a * clamp(0.5 - d / aa, 0.0, 1.0));
+        return;
+    }
+    if (mode == 4) {
+        // rect: (cx, cy, radius, 0), radii: (cos(mid), sin(mid), cos(half_span), sin(half_span))
+        vec2 p = fragPos - rect.xy;
+        vec2 q = vec2(p.x * radii.x + p.y * radii.y, abs(-p.x * radii.y + p.y * radii.x));
+        vec2 sc = radii.zw;
+        float r = rect.z;
+        float d = (q.x * sc.y > q.y * sc.x) ? abs(length(q) - r) : length(q - sc * r);
+        d -= border * 0.5;
         float aa = max(fwidth(d), 0.0001);
         finalColor = vec4(fill.rgb, fill.a * clamp(0.5 - d / aa, 0.0, 1.0));
         return;

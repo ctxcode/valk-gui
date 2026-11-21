@@ -346,3 +346,12 @@ test "Selectable text: drag, double-click, triple-click, copy and link click" {
     win.mouse_up(bb.right - 4, bb.center.y)
     assert(win.selected_text() == "")
 }
+
+test "Paint: arcs emit a single SDF arc primitive" {
+    let win = gui.headless(view(fn(win) { return gui.div().child(gui.icon(.refresh, 24)) }), 64, 64)
+    let arcs: uint = 0
+    each win.scene.items as item {
+        if item.kind == .arc : arcs++
+    }
+    assert(arcs == 1)
+}

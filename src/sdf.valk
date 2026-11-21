@@ -56,6 +56,29 @@ class Sdf {
         raylib.end_shader_mode()
     }
 
+    fn arc(cx: f32, cy: f32, radius: f32, start_deg: f32, end_deg: f32, width: f32, color: Color) {
+        let span = (end_deg - start_deg).abs()
+        if span <= 0.01 : return
+        if span >= 359.9 {
+            let b = Bounds{ x: cx - radius, y: cy - radius, w: radius * 2, h: radius * 2 }
+            this.box(b, Corners.all(radius), transparent(), width, color)
+            return
+        }
+        let mid = (start_deg + end_deg) * 0.5 * 0.017453292
+        let half = span * 0.5 * 0.017453292
+        let pad = width / 2 + 1.5
+        let area = Bounds{ x: cx - radius - pad, y: cy - radius - pad, w: (radius + pad) * 2, h: (radius + pad) * 2 }
+        let s = this.shader
+        raylib.begin_shader_mode(s)
+        s.set_int(this.mode, 4)
+        s.set_vec4(this.rect, .{ x: cx, y: cy, z: radius, w: 0 })
+        s.set_vec4(this.radii, .{ x: cos32(mid), y: sin32(mid), z: cos32(half), w: sin32(half) })
+        s.set_float(this.border, width)
+        s.set_color(this.fill, to_rl(color))
+        raylib.draw_rectangle_rec(rect(area), raylib.WHITE)
+        raylib.end_shader_mode()
+    }
+
     fn line(a: Point, b: Point, width: f32, color: Color) {
         let area = Bounds{ x: a.x.min(b.x), y: a.y.min(b.y), w: (a.x - b.x).abs(), h: (a.y - b.y).abs() }.grow(width / 2 + 1)
         let s = this.shader

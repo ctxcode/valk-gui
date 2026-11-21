@@ -28,6 +28,7 @@ fn draw_scene(win: Window, p: RaylibPlatform, sdf: Sdf) {
             }
             .image => draw_image(item, p.texture(item.text), sdf)
             .line => sdf.line(item.points[0], item.points[1], item.width, item.color)
+            .arc => sdf.arc(item.bounds.x, item.bounds.y, item.bounds.w, item.points[0].x, item.points[0].y, item.width, item.color)
             .circle => sdf.box(item.bounds, Corners.all(item.radius), item.color, 0, item.color)
             .ring => sdf.box(item.bounds, Corners.all(item.radius), transparent(), item.width, item.color)
             .triangle => {

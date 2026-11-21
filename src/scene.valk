@@ -1,5 +1,5 @@
 
-+ enum PrimitiveKind { quad, shadow, text, image, line, circle, ring, triangle, clip, unclip }
++ enum PrimitiveKind { quad, shadow, text, image, line, arc, circle, ring, triangle, clip, unclip }
 
 /// One drawing command. Which fields matter depends on `kind`.
 + struct Primitive {
@@ -96,13 +96,13 @@
 
     /// An arc of a circle from angle `start` to `end`, in degrees clockwise from the right.
     + fn arc(x: f32, y: f32, radius: f32, start: f32, end: f32, color: Color, width: f32 (1)) {
-        let steps = clamp32(ceil32((end - start).abs() / 10), 2, 72).to(uint)
-        let points = Array[Point]{}
-        each 0 .. steps + 1 as i {
-            let a = (start + (end - start) * i.to(f32) / steps.to(f32)) * 0.017453292
-            points.append(.{ x: x + cos32(a) * radius, y: y + sin32(a) * radius })
-        }
-        this.polyline(points, color, width)
+        this.window.scene.add(.{
+            kind: .arc
+            bounds: .{ x: x, y: y, w: radius, h: 0 }
+            points: { .{ x: start, y: end }, .{}, .{} }
+            color: color.fade(this.alpha)
+            width: width
+        })
     }
 
     + fn line(x1: f32, y1: f32, x2: f32, y2: f32, color: Color, width: f32 (1)) {
