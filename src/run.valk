@@ -87,25 +87,39 @@ use valk.fs
 }
 
 // Sets the window icon from `options.icon` (file path) or `options.icon_png` (embedded PNG bytes).
+// Generates standard sizes capped at 128px so X11/XWayland `_NET_WM_ICON` stays well under the
+// 256 KB property limit and gives crisp icons in titlebars, taskbars, and Alt-Tab previews.
 fn apply_window_icon(options: WindowOptions) {
+    let img = raylib.Image{}
     if options.icon.length > 0 && fs.is_file(options.icon) {
-        let img = raylib.load_image(options.icon)
-        if raylib.is_image_valid(img) {
-            raylib.set_window_icon(img)
-            raylib.unload_image(img)
-        }
-        return
-    }
-    if options.icon_png.length > 0 {
+        img = raylib.load_image(options.icon)
+    } else if options.icon_png.length > 0 {
         let tmp = fs.create_temp_file("valk-gui-icon-", ".png") ! return
         defer { fs.delete_file(tmp) _ }
         fs.write(tmp, options.icon_png) ! return
-        let img = raylib.load_image(tmp)
-        if raylib.is_image_valid(img) {
-            raylib.set_window_icon(img)
-            raylib.unload_image(img)
+        img = raylib.load_image(tmp)
+    } else {
+        return
+    }
+    if !raylib.is_image_valid(img) : return
+    defer { raylib.unload_image(img) }
+
+    img.convert_format(.uncompressed_r8g8b8a8)
+    let icons = Array[raylib.Image]{}
+    let sizes = Array[i32]{ 128, 48, 32, 16 }
+    each sizes as sz {
+        if img.width >= sz && img.height >= sz {
+            let copy = raylib.image_copy(img)
+            if copy.width != sz || copy.height != sz : copy.resize(sz, sz)
+            icons.append(copy)
         }
     }
+    if icons.length == 0 {
+        raylib.set_window_icon(img)
+        return
+    }
+    raylib.set_window_icons(icons)
+    each icons as copy : raylib.unload_image(copy)
 }
 
 // VALK_GUI_SCREENSHOT=file.png saves the third frame and exits; for tests and docs
