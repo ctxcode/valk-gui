@@ -146,6 +146,15 @@ test "Panels: move, resize, stack and close" {
     let b = app.stack.add(gui.Panel.new("Tools", fn() gui.Div { return gui.div().child("tool body") }).move_to(100, 60).resize(200, 150))
     let win = gui.headless(app, 600, 400)
     assert(win.scene.has_text("note body") && win.scene.has_text("tool body"))
+    // Panel title bar has rounded top corners matching the frame's inner radius and a bottom border
+    let found_rounded_bar = false
+    each win.scene.items as item {
+        if item.kind == .quad && same(item.bounds.h, 34) && same(item.corners.top_left, win.theme.radius + 1)
+            && same(item.corners.top_right, win.theme.radius + 1) && same(item.border.bottom, 1) {
+            found_rounded_bar = true
+        }
+    }
+    assert(found_rounded_bar)
     // Clicks outside the panels reach the app
     win.click(500, 350)
     assert(app.clicks == 1)

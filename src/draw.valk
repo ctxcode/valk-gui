@@ -64,10 +64,12 @@ fn draw_quad(item: Primitive, sdf: Sdf) {
         return
     }
     if !item.corners.is_zero() || (has_border && border.is_uniform()) {
-        sdf.box(b, item.corners, item.color, has_border ? border.top : 0, item.border_color)
-        return
+        let uniform = has_border && border.is_uniform()
+        sdf.box(b, item.corners, item.color, uniform ? border.top : 0, item.border_color)
+        if !has_border || uniform : return
+    } else if !item.color.is_transparent() {
+        raylib.draw_rectangle_rec(rect(b), to_rl(item.color))
     }
-    if !item.color.is_transparent() : raylib.draw_rectangle_rec(rect(b), to_rl(item.color))
     if has_border {
         let c = to_rl(item.border_color)
         if border.top > 0 : raylib.draw_rectangle_rec(.{ x: b.x, y: b.y, width: b.w, height: border.top }, c)

@@ -364,7 +364,7 @@ fn next_widget_id(kind: String) String {
             panel.y = clamp32(panel.y, 0, win.height - panel.h)
             let active = isset(top) && top == panel
             let bar = div().flex().items_center().gap(8).h(34).pl(12).pr(4).flex_shrink_0()
-                .bg(active ? t.elevated : t.surface).border_b(1).border_color(t.border).cursor(.move)
+                .bg(active ? t.elevated : t.surface).rounded_t(t.radius + 1).border_b(1).border_color(t.border).cursor(.move)
                 .on_mouse_down(fn(e) {
                     panel.drag_x = e.x - panel.x
                     panel.drag_y = e.y - panel.y
