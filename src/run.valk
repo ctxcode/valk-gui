@@ -1,5 +1,6 @@
 use raylib
 use valk.core
+use valk.fs
 
 /// Opens a window, shows `root` in it and handles input until the window closes. Throws when the
 /// system can't open a window, for example without OpenGL 3.3.
@@ -13,6 +14,7 @@ use valk.core
     raylib.set_config_flags(flags)
     raylib.init_window(options.width, options.height, options.title)
     if !raylib.is_window_ready() : throw .init
+    apply_window_icon(options)
     raylib.set_window_min_size(options.min_width, options.min_height)
     raylib.set_exit_key(.none)
     raylib.set_target_fps(60)
@@ -82,6 +84,28 @@ use valk.core
     fonts.unload()
     platform.unload()
     raylib.close_window()
+}
+
+// Sets the window icon from `options.icon` (file path) or `options.icon_png` (embedded PNG bytes).
+fn apply_window_icon(options: WindowOptions) {
+    if options.icon.length > 0 && fs.is_file(options.icon) {
+        let img = raylib.load_image(options.icon)
+        if raylib.is_image_valid(img) {
+            raylib.set_window_icon(img)
+            raylib.unload_image(img)
+        }
+        return
+    }
+    if options.icon_png.length > 0 {
+        let tmp = fs.create_temp_file("valk-gui-icon-", ".png") ! return
+        defer { fs.delete_file(tmp) _ }
+        fs.write(tmp, options.icon_png) ! return
+        let img = raylib.load_image(tmp)
+        if raylib.is_image_valid(img) {
+            raylib.set_window_icon(img)
+            raylib.unload_image(img)
+        }
+    }
 }
 
 // VALK_GUI_SCREENSHOT=file.png saves the third frame and exits; for tests and docs

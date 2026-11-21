@@ -21,6 +21,10 @@
     /// Font files tried, before the system's, for characters the fonts in use lack (such as
     /// Chinese or Japanese). `.ttf`, `.otf` or the first font of a `.ttc`.
     + fallback_fonts: Array[String] (.{})
+    /// Path to an image file (such as a `.png`) for the window icon on X11 and Windows.
+    + icon: String ("")
+    /// Raw PNG bytes (for example from `#embed`) for the window icon on X11 and Windows.
+    + icon_png: String ("")
     /// Saves the third frame to this PNG file and closes the window, for tests and images.
     + screenshot: String ("")
     /// Opens the window hidden.
