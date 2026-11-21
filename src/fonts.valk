@@ -23,15 +23,42 @@ fn system_fallback_fonts() Array[String] {
     #end
 }
 
-/// One font file rasterized at one size.
+// Alpha-weighted vertical center of a glyph's ink below the top of the text, in logical pixels.
+// Accounts for subpixel antialiasing rows at the top/bottom of stb_truetype bitmaps.
+fn glyph_optical_middle(font: raylib.Font, codepoint: i32, scale: f32) f32 {
+    let g = raylib.get_glyph_info(font, codepoint)
+    let iw = g.image.width
+    let ih = g.image.height
+    if iw > 0 && ih > 0 && raylib.is_image_valid(g.image) {
+        let weighted: f32 = 0
+        let total: f32 = 0
+        let y: i32 = 0
+        while y < ih {
+            let row_sum: f32 = 0
+            let x: i32 = 0
+            while x < iw {
+                row_sum += raylib.get_image_color(g.image, x, y).a.to(f32)
+                x++
+            }
+            weighted += row_sum * (g.offset_y.to(f32) + y.to(f32) + 0.5)
+            total += row_sum
+            y++
+        }
+        if total > 0 : return (weighted / total) / scale
+    }
+    return (g.offset_y.to(f32) + ih.to(f32) / 2) / scale
+}
+
+// One font file rasterized at one size.
 class Face {
     font: raylib.Font
     generation: uint
     // The code points the file has a glyph for
     has: HashSet[i32]
-    // The size to draw at, and the distance from the top of the text to the baseline
+    // The size to draw at, distance to baseline, and optical center of a capital letter
     size: f32
     baseline: f32
+    cap_mid: f32
 }
 
 struct Run {
@@ -97,7 +124,8 @@ class Fonts {
         let f = load_font_memory(data, px, this.codepoints)
         raylib.set_texture_filter(f.texture, .bilinear)
         let size = px.to(f32) / scale
-        let face = Face{ font: f, generation: this.generation, has: glyph_set(f), size: size, baseline: size * ascent / ratio }
+        let cap_mid = glyph_optical_middle(f, 72, scale)
+        let face = Face{ font: f, generation: this.generation, has: glyph_set(f), size: size, baseline: size * ascent / ratio, cap_mid: cap_mid }
         this.faces.set(key, face)
         return face
     }
@@ -167,11 +195,9 @@ class Fonts {
         }
     }
 
-    /// Where the middle of a capital letter is below the top of the text, in logical pixels.
+    /// Where the optical middle of a capital letter is below the top of the text, in logical pixels.
     fn cap_middle(font: ResolvedFont) f32 {
-        let f = this.face(font, 0).font
-        let h = raylib.get_glyph_info(f, 72)
-        return (h.offset_y.to(f32) + h.image.height.to(f32) / 2) / dpi_scale()
+        return this.face(font, 0).cap_mid
     }
 
     /// For text made only of symbols, such as "+" or "×": the middle of its ink below the top of
