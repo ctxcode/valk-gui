@@ -78,6 +78,7 @@
     tooltip_key: u64 (0)
     tooltip_since: f64 (0)
     tooltip: String ("")
+    text_sel: TextSelection (.{})
 
     + static fn new(root: Render, width: f32, height: f32, platform: Platform, theme: Theme (Theme.dark())) Window {
         return Window{ root: root, width: width, height: height, platform: platform, theme: theme }
@@ -135,6 +136,7 @@
         let hit = this.hit_test(this.mouse_x, this.mouse_y)
         let cursor: Cursor = .default
         let found_cursor = false
+        let default_text_cursor = isset(selectable_text_node(hit))
         let node = hit
         while isset(node) {
             hovered.add(node.key)
@@ -147,6 +149,7 @@
             }
             node = node.parent
         }
+        if !found_cursor && default_text_cursor : cursor = .text
         if this.bar_drag_key != 0 : cursor = .default
         if !hovered.equals(this.hover_keys) : this.dirty = true
         this.hover_keys = hovered
@@ -191,6 +194,7 @@
             n.ellipsis = parent.ellipsis
             n.decor_underline = parent.decor_underline
             n.decor_strike = parent.decor_strike
+            n.text_selectable = parent.text_selectable
         } else {
             n.key = root_key
             n.resolved_font = .{ size: this.theme.font_size, line_height: round32(this.theme.font_size * 1.4) }
@@ -230,6 +234,8 @@
         if isset(underline) : n.decor_underline = underline
         let strike = s.text_strike
         if isset(strike) : n.decor_strike = strike
+        let sel = s.text_selectable
+        if isset(sel) : n.text_selectable = sel
         if s.overflow_x == .scroll || s.overflow_y == .scroll {
             let st = this.scroll_state.get(n.key) !? Point{}
             n.scroll_x = st.x
@@ -287,11 +293,12 @@
             let font = n.resolved_font
             let color = n.resolved_color.fade(a)
             let lines = n.lines ?? Array[String]{ n.content }
-            each lines as line {
+            each lines as line, line_idx {
                 let lw = isset(n.lines) ? this.platform.text_width(line, font) : n.natural_w
                 let x = inner.x
                 if n.text_align == .center : x += (inner.w - lw) / 2
                 else if n.text_align == .right : x += inner.w - lw
+                this.paint_text_selection(n, line_idx, line, x, y, font, a)
                 this.scene.add(.{ kind: .text, bounds: .{ x: x, y: y, w: lw, h: font.line_height }, color: color, text: line, font: font, center_symbols: true })
                 let thickness = (font.size / 14).max(1)
                 // Measured from the middle of the line, where capitals are centered
@@ -400,6 +407,7 @@
         this.mouse_y = y
         this.update_hover()
         if this.move_drag(x, y) : return
+        if this.move_text_selection(x, y) : return
         if this.bar_drag_key != 0 {
             let node = this.node_by_key(this.bar_drag_key)
             if isset(node) : this.drag_scrollbar(node, x, y)
@@ -469,6 +477,11 @@
                 n = n.parent
             }
             this.focused = target
+            if !isset(target) {
+                this.start_text_selection(hit, x, y, modifiers)
+            } else {
+                this.clear_selection()
+            }
         }
 
         let e = MouseEvent{ x: x, y: y, button: button, modifiers: modifiers, click_count: this.click_count }
@@ -510,7 +523,9 @@
             }
             n = n.parent
         }
-        if button == .left {
+        let dragged_text = button == .left && this.end_text_selection()
+        let selected_on_click = button == .left && this.click_count >= 2 && this.text_sel.has_selection()
+        if button == .left && !dragged_text && !selected_on_click {
             n = hit
             while isset(n) {
                 let handler = n.on_click_fn
@@ -555,6 +570,7 @@
             return
         }
         if !repeat && this.run_binding(key, modifiers) : return
+        if this.handle_text_selection_key(key, modifiers) : return
         let e = KeyEvent{ key: key, modifiers: modifiers, repeat: repeat }
         let n = this.focused_node()
         while isset(n) {

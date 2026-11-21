@@ -8,7 +8,7 @@
     let bg = t.elevated
     return button_content(div().flex().center().gap(6).h(32).px(14).rounded(t.radius).bg(bg)
         .border(1).border_color(t.border).text_color(t.text).font_medium().whitespace_nowrap()
-        .cursor_pointer()
+        .selectable(false).cursor_pointer()
         .hover(fn(s) { s.bg(bg.lighten(0.06)) })
         .active(fn(s) { s.bg(bg.darken(0.1)) }), label, icon)
 }
@@ -19,7 +19,7 @@
     let bg = t.accent
     return button_content(div().flex().center().gap(6).h(32).px(14).rounded(t.radius).bg(bg)
         .text_color(t.accent_text).font_medium().whitespace_nowrap()
-        .cursor_pointer()
+        .selectable(false).cursor_pointer()
         .hover(fn(s) { s.bg(bg.lighten(0.1)) })
         .active(fn(s) { s.bg(bg.darken(0.1)) }), label, icon)
 }

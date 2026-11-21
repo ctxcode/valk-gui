@@ -1,0 +1,220 @@
+
+// Selection state for static `.selectable()` text elements.
+struct TextSelection {
+    key: u64 (0)
+    anchor_line: uint (0)
+    anchor_col: uint (0)
+    focus_line: uint (0)
+    focus_col: uint (0)
+    dragging: bool (false)
+
+    fn has_selection() bool {
+        return this.key != 0 && (this.anchor_line != this.focus_line || this.anchor_col != this.focus_col)
+    }
+
+    fn ordered() (uint, uint, uint, uint) {
+        if this.anchor_line < this.focus_line || (this.anchor_line == this.focus_line && this.anchor_col <= this.focus_col) {
+            return (this.anchor_line, this.anchor_col, this.focus_line, this.focus_col)
+        }
+        return (this.focus_line, this.focus_col, this.anchor_line, this.anchor_col)
+    }
+}
+
+/// Resolves a hit node to its selectable text node, if any.
+fn selectable_text_node(hit: ?Div) ?Div {
+    let n = hit ?! return null
+    if n.kind == .text && n.text_selectable : return n
+    if n.kind == .div && n.child_nodes.length == 1 {
+        let only = n.child_nodes.get(0) !!
+        if only.kind == .text && only.text_selectable : return only
+    }
+    return null
+}
+
+fn node_text_lines(n: Div) Array[String] {
+    return n.lines ?? Array[String]{ n.content }
+}
+
+extend Window {
+    /// Returns the currently selected text from a `.selectable()` element, or "".
+    + fn selected_text() String {
+        if !this.text_sel.has_selection() : return ""
+        let node = this.node_by_key(this.text_sel.key) ?! return ""
+        let lines = node_text_lines(node)
+        if lines.length == 0 : return ""
+        let sl, sc, el, ec = this.text_sel.ordered()
+        let last_idx = lines.length - 1
+        let start_l = sl.min(last_idx)
+        let end_l = el.min(last_idx)
+        if start_l == 0 && sc == 0 && end_l == last_idx && ec >= (lines.get(last_idx) !!).length {
+            return node.content
+        }
+        if start_l == end_l {
+            let line = lines.get(start_l) !!
+            let a = sc.min(line.length)
+            let b = ec.min(line.length)
+            return b > a ? line.range(a, b - a) : ""
+        }
+        let parts = Array[String]{}
+        let i = start_l
+        while i <= end_l {
+            let line = lines.get(i) !!
+            let a = i == start_l ? sc.min(line.length) : 0
+            let b = i == end_l ? ec.min(line.length) : line.length
+            parts.append(b > a ? line.range(a, b - a) : "")
+            i++
+        }
+        let sep = node.content.contains("\n") ? "\n" : " "
+        return parts.join(sep)
+    }
+
+    /// Clears any active static text selection.
+    + fn clear_selection() {
+        this.text_sel = TextSelection{}
+    }
+
+    fn text_line_x(n: Div, line: String, inner: Bounds) f32 {
+        let lw = isset(n.lines) ? this.platform.text_width(line, n.resolved_font) : n.natural_w
+        let x = inner.x
+        if n.text_align == .center : x += (inner.w - lw) / 2
+        else if n.text_align == .right : x += inner.w - lw
+        return x
+    }
+
+    fn text_pos_at(n: Div, x: f32, y: f32) (uint, uint) {
+        let lines = node_text_lines(n)
+        if lines.length == 0 : return (0, 0)
+        let inner = n.bounds.inset(n.style.padding.add(n.style.border_widths))
+        let lh = n.resolved_font.line_height.max(1)
+        let line_idx: uint = 0
+        if y > inner.y {
+            line_idx = ((y - inner.y) / lh).to(uint).min(lines.length - 1)
+        }
+        let line = lines.get(line_idx) !!
+        let lx = this.text_line_x(n, line, inner)
+        let rel_x = x - lx
+        if rel_x <= 0 : return (line_idx, 0)
+        let best: uint = 0
+        let best_dist: f32 = rel_x.abs()
+        let i: uint = 0
+        while i < line.length {
+            i = next_boundary(line, i)
+            let d = (this.platform.text_width(line.range(0, i), n.resolved_font) - rel_x).abs()
+            if d < best_dist {
+                best = i
+                best_dist = d
+            }
+        }
+        return (line_idx, best)
+    }
+
+    fn start_text_selection(hit: ?Div, x: f32, y: f32, modifiers: Modifiers) {
+        let node = selectable_text_node(hit)
+        if !isset(node) {
+            this.text_sel = TextSelection{}
+            return
+        }
+        let lines = node_text_lines(node)
+        let line_idx, col = this.text_pos_at(node, x, y)
+        if this.click_count >= 3 {
+            let last_l = lines.length > 0 ? lines.length - 1 : 0
+            let last_c = lines.length > 0 ? (lines.get(last_l) !!).length : 0
+            this.text_sel = TextSelection{
+                key: node.key
+                anchor_line: 0
+                anchor_col: 0
+                focus_line: last_l
+                focus_col: last_c
+                dragging: false
+            }
+            return
+        }
+        if this.click_count == 2 {
+            let line = lines.get(line_idx) !? ""
+            this.text_sel = TextSelection{
+                key: node.key
+                anchor_line: line_idx
+                anchor_col: word_start(line, col)
+                focus_line: line_idx
+                focus_col: word_end(line, col)
+                dragging: false
+            }
+            return
+        }
+        if modifiers.shift && this.text_sel.key == node.key {
+            this.text_sel.focus_line = line_idx
+            this.text_sel.focus_col = col
+            this.text_sel.dragging = true
+            return
+        }
+        this.text_sel = TextSelection{
+            key: node.key
+            anchor_line: line_idx
+            anchor_col: col
+            focus_line: line_idx
+            focus_col: col
+            dragging: true
+        }
+    }
+
+    fn move_text_selection(x: f32, y: f32) bool {
+        if !this.text_sel.dragging : return false
+        let node = this.node_by_key(this.text_sel.key)
+        if !isset(node) {
+            this.text_sel.dragging = false
+            return false
+        }
+        let line_idx, col = this.text_pos_at(node, x, y)
+        this.text_sel.focus_line = line_idx
+        this.text_sel.focus_col = col
+        return true
+    }
+
+    fn end_text_selection() bool {
+        if !this.text_sel.dragging : return false
+        this.text_sel.dragging = false
+        return this.text_sel.has_selection()
+    }
+
+    fn handle_text_selection_key(key: Key, modifiers: Modifiers) bool {
+        if isset(this.focused) || this.text_sel.key == 0 : return false
+        if modifiers.secondary && key == .c && this.text_sel.has_selection() {
+            let txt = this.selected_text()
+            if txt.length > 0 : this.set_clipboard(txt)
+            return true
+        }
+        if modifiers.secondary && key == .a {
+            let node = this.node_by_key(this.text_sel.key) ?! return false
+            let lines = node_text_lines(node)
+            if lines.length == 0 : return false
+            let last_l = lines.length - 1
+            this.text_sel.anchor_line = 0
+            this.text_sel.anchor_col = 0
+            this.text_sel.focus_line = last_l
+            this.text_sel.focus_col = (lines.get(last_l) !!).length
+            return true
+        }
+        if key == .escape && this.text_sel.has_selection() {
+            this.clear_selection()
+            return true
+        }
+        return false
+    }
+
+    fn paint_text_selection(n: Div, line_idx: uint, line: String, x: f32, y: f32, font: ResolvedFont, alpha: f32) {
+        if this.text_sel.key != n.key || !this.text_sel.has_selection() : return
+        let sl, sc, el, ec = this.text_sel.ordered()
+        if line_idx < sl || line_idx > el : return
+        let c1 = line_idx == sl ? sc.min(line.length) : 0
+        let c2 = line_idx == el ? ec.min(line.length) : line.length
+        if c2 <= c1 : return
+        let x1 = x + this.platform.text_width(line.range(0, c1), font)
+        let x2 = x + this.platform.text_width(line.range(0, c2), font)
+        if x2 <= x1 : return
+        this.scene.add(.{
+            kind: .quad
+            bounds: .{ x: x1, y: y, w: x2 - x1, h: font.line_height }
+            color: this.theme.accent.opacity(0.35).fade(alpha)
+        })
+    }
+}

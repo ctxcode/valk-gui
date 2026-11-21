@@ -133,6 +133,7 @@
     + font_italic: ?bool (null)
     + text_underline: ?bool (null)
     + text_strike: ?bool (null)
+    + text_selectable: ?bool (null)
 
     + wrap: bool (false)
     + grid_columns: uint (0)
@@ -324,4 +325,6 @@
     + fn whitespace_nowrap() SELF { this.style.nowrap = true; return this }
     /// Keeps text on one line and ends it with "…" when it does not fit.
     + fn truncate() SELF { this.style.nowrap = true; this.style.ellipsis = true; return this }
+    /// Allows selecting and copying static text with the mouse and Ctrl/Cmd+C. Inherited by children.
+    + fn selectable(on: bool (true)) SELF { this.style.text_selectable = on; return this }
 }

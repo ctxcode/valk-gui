@@ -265,3 +265,84 @@ test "Right-to-left: Hebrew and Arabic in drawing order" {
     assert(gui.visual_text("سلام") == "\u{fee1}\u{fefc}\u{feb3}")
     assert(gui.visual_text("plain text") == "plain text")
 }
+
+class SelectableDemo is gui.Render {
+    link_clicks: uint (0)
+    fn render(win: gui.Window) gui.Div {
+        return gui.div().w(240).p(10).gap(8).selectable()
+            .child(gui.div().id("title").text_size(16).child("Hello World"))
+            .child(gui.div().id("wrapped").w(100).text_size(14).child("alpha beta gamma delta"))
+            .child(gui.div().id("link").text_size(14).cursor_pointer()
+                .hover(fn(s) { s.underline() })
+                .on_click(fn(e) { this.link_clicks++ })
+                .child("https://valk-lang.dev"))
+            .child(gui.button(win, "Press").id("btn"))
+    }
+}
+
+test "Selectable text: drag, double-click, triple-click, copy and link click" {
+    let app = SelectableDemo{}
+    let win = gui.headless(app, 300, 260)
+
+    // Plain selectable text shows text cursor on hover
+    let tb = bounds(win, "title")
+    win.mouse_move(tb.x + 12, tb.center.y)
+    win.draw()
+    assert(win.cursor == .text)
+
+    // Drag across "Hello" (font size 16 -> headless char width 8px, "Hello" = 40px)
+    win.mouse_down(tb.x + 1, tb.center.y)
+    win.mouse_move(tb.x + 40, tb.center.y)
+    win.mouse_up(tb.x + 40, tb.center.y)
+    win.draw()
+    assert(win.selected_text() == "Hello")
+
+    // Ctrl+C copies selection to clipboard
+    win.key_down(.c, .{ ctrl: true })
+    assert(win.clipboard() == "Hello")
+
+    // Double-click selects "World"
+    win.advance(1)
+    let wx = tb.x + 60
+    win.mouse_down(wx, tb.center.y)
+    win.mouse_up(wx, tb.center.y)
+    win.mouse_down(wx, tb.center.y)
+    win.mouse_up(wx, tb.center.y)
+    assert(win.selected_text() == "World")
+
+    // Triple-click selects wrapped text in full
+    win.advance(1)
+    let wb = bounds(win, "wrapped")
+    win.mouse_down(wb.x + 10, wb.y + 6)
+    win.mouse_up(wb.x + 10, wb.y + 6)
+    win.mouse_down(wb.x + 10, wb.y + 6)
+    win.mouse_up(wb.x + 10, wb.y + 6)
+    win.mouse_down(wb.x + 10, wb.y + 6)
+    win.mouse_up(wb.x + 10, wb.y + 6)
+    assert(win.selected_text() == "alpha beta gamma delta")
+
+    // Link keeps pointer cursor; plain click opens it, dragging selects URL without clicking
+    let lb = bounds(win, "link")
+    win.mouse_move(lb.x + 10, lb.center.y)
+    win.draw()
+    assert(win.cursor == .pointer)
+
+    win.advance(1)
+    win.click_on("link")
+    assert(app.link_clicks == 1)
+
+    win.advance(1)
+    win.mouse_down(lb.x + 1, lb.center.y)
+    win.mouse_move(lb.x + 35, lb.center.y)
+    win.mouse_up(lb.x + 35, lb.center.y)
+    assert(win.selected_text() == "https")
+    assert(app.link_clicks == 1)
+
+    // Button opts out via .selectable(false)
+    let bb = bounds(win, "btn")
+    win.advance(1)
+    win.mouse_down(bb.x + 4, bb.center.y)
+    win.mouse_move(bb.right - 4, bb.center.y)
+    win.mouse_up(bb.right - 4, bb.center.y)
+    assert(win.selected_text() == "")
+}

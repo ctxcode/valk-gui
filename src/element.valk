@@ -54,6 +54,7 @@ enum NodeKind { div, text, canvas, image }
     ellipsis: bool (false)
     decor_underline: bool (false)
     decor_strike: bool (false)
+    text_selectable: bool (false)
     // null when the text is one line
     lines: ?Array[String] (null)
     cache: ?Array[LayoutCache] (null)

@@ -71,7 +71,7 @@ gui.div().flex().items_center().gap(8).px(12).h(40)
 | Overflow | `overflow_hidden()`, `overflow_y_scroll()`, `overflow_x_scroll()`, `overflow_scroll()` |
 | Wrapping | `flex_wrap()`; `grid(columns)` with `col_span(n)` on cells |
 | Paint | `bg`, `bg_gradient(from, to, angle)`, `border(w)`, `border_t/r/b/l`, `border_color`, `rounded(r)`, `rounded_t/b/l/r/tl/tr/br/bl(r)`, `rounded_full()`, `shadow_sm/md/lg()`, `opacity`, `cursor_pointer()` |
-| Text | `text_color`, `text_size(px)`, `text_xs` ... `text_3xl`, `font_medium/semibold/bold()`, `italic()`, `underline()`, `line_through()`, `line_height`, `text_center()`, `truncate()`, `whitespace_nowrap()`, `font(name)` |
+| Text | `text_color`, `text_size(px)`, `text_xs` ... `text_3xl`, `font_medium/semibold/bold()`, `italic()`, `underline()`, `line_through()`, `line_height`, `text_center()`, `truncate()`, `whitespace_nowrap()`, `font(name)`, `selectable()` |
 | Images | `gui.img(path)` with `object_cover()` or `object_contain()`; `rounded` clips them |
 | Visibility | `hidden()` (no space), `invisible()` (keeps its space), `tooltip(text)` |
 
