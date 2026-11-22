@@ -7,6 +7,7 @@ use valk.fs
 + fn run(root: Render, options: WindowOptions (WindowOptions{})) !InitError {
     let flags: u32 = raylib.FLAG_WINDOW_HIGHDPI
     if options.resizable : flags = flags | raylib.FLAG_WINDOW_RESIZABLE
+    if options.maximized && options.resizable : flags = flags | raylib.FLAG_WINDOW_MAXIMIZED
     if options.antialias : flags = flags | raylib.FLAG_MSAA_4X_HINT
     if options.hidden || isset(env_hidden()) : flags = flags | raylib.FLAG_WINDOW_HIDDEN
     else : flags = flags | raylib.FLAG_VSYNC_HINT
@@ -16,6 +17,9 @@ use valk.fs
     if !raylib.is_window_ready() : throw .init
     apply_window_icon(options)
     raylib.set_window_min_size(options.min_width, options.min_height)
+    if options.maximized && options.resizable && !raylib.is_window_maximized() {
+        raylib.maximize_window()
+    }
     raylib.set_exit_key(.none)
     raylib.set_target_fps(60)
 
@@ -24,6 +28,9 @@ use valk.fs
     let sdf = Sdf.load()
     let win = Window.new(root, raylib.get_screen_width().to(f32), raylib.get_screen_height().to(f32), platform, options.theme)
     win.title = options.title
+    win.maximized = raylib.is_window_maximized()
+    win.normal_width = options.width.to(f32)
+    win.normal_height = options.height.to(f32)
     each options.fonts as f : win.fonts.append(f)
     fonts.window = win
 
@@ -35,8 +42,13 @@ use valk.fs
         win.time = raylib.get_time()
         let changed = first || isset(shot)
         first = false
+        win.maximized = raylib.is_window_maximized()
         if raylib.is_window_resized() {
             win.resize(raylib.get_screen_width().to(f32), raylib.get_screen_height().to(f32))
+            if !win.maximized {
+                win.normal_width = win.width
+                win.normal_height = win.height
+            }
             changed = true
         }
         if input.poll(win) : changed = true
@@ -80,6 +92,9 @@ use valk.fs
         }
         raylib.end_drawing()
     }
+    win.maximized = raylib.is_window_maximized()
+    let on_close = options.on_close
+    if isset(on_close) : on_close(win)
     sdf.unload()
     fonts.unload()
     platform.unload()

@@ -14,6 +14,8 @@
     + min_width: i32 (200)
     + min_height: i32 (150)
     + resizable: bool (true)
+    /// Opens the window maximized.
+    + maximized: bool (false)
     /// Smooths the edges of shapes.
     + antialias: bool (true)
     + theme: Theme (Theme.dark())
@@ -29,6 +31,8 @@
     + screenshot: String ("")
     /// Opens the window hidden.
     + hidden: bool (false)
+    /// Called right before the window closes, while its size and `maximized` state are still valid.
+    + on_close: ?fn(Window)() (null)
 }
 
 /// A window and everything that lives across frames: focus, hover, scroll positions and
@@ -54,6 +58,11 @@
     /// Whether the last frame changed hover state, so another frame should follow.
     ~+ dirty: bool (false)
     ~+ frames: uint (0)
+    /// Whether the OS window is currently maximized.
+    ~+ maximized: bool (false)
+    /// The last non-maximized window size, useful for saving window state on close.
+    ~+ normal_width: f32 (0)
+    ~+ normal_height: f32 (0)
 
     root: Render
     tree: ?Div (null)
