@@ -17,6 +17,26 @@ use valk.fs
     if !raylib.is_window_ready() : throw .init
     apply_window_icon(options)
     raylib.set_window_min_size(options.min_width, options.min_height)
+    if !options.hidden && !isset(env_hidden()) {
+        let mon = raylib.get_current_monitor()
+        let mon_w = raylib.get_monitor_width(mon)
+        let mon_h = raylib.get_monitor_height(mon)
+        if !options.maximized && mon_w > 0 && mon_h > 0 {
+            let max_w = (mon_w - 40).max(options.min_width)
+            let max_h = (mon_h - 80).max(options.min_height)
+            let clamped_w = options.width.min(max_w)
+            let clamped_h = options.height.min(max_h)
+            if clamped_w != options.width || clamped_h != options.height {
+                raylib.set_window_size(clamped_w, clamped_h)
+                let mp = raylib.get_monitor_position(mon)
+                let px = mp.x.to(i32) + ((mon_w - clamped_w) / 2).max(20)
+                let py = mp.y.to(i32) + ((mon_h - clamped_h) / 2).max(40)
+                raylib.set_window_position(px, py)
+            }
+        }
+        if raylib.is_window_minimized() : raylib.restore_window()
+        raylib.set_window_focused()
+    }
     if options.maximized && options.resizable && !raylib.is_window_maximized() {
         raylib.maximize_window()
     }
