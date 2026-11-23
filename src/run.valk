@@ -7,7 +7,6 @@ use valk.fs
 + fn run(root: Render, options: WindowOptions (WindowOptions{})) !InitError {
     let flags: u32 = raylib.FLAG_WINDOW_HIGHDPI
     if options.resizable : flags = flags | raylib.FLAG_WINDOW_RESIZABLE
-    if options.maximized && options.resizable : flags = flags | raylib.FLAG_WINDOW_MAXIMIZED
     if options.antialias : flags = flags | raylib.FLAG_MSAA_4X_HINT
     if options.hidden || isset(env_hidden()) : flags = flags | raylib.FLAG_WINDOW_HIDDEN
     else : flags = flags | raylib.FLAG_VSYNC_HINT
@@ -52,8 +51,8 @@ use valk.fs
     let win = Window.new(root, init_w, init_h, platform, options.theme)
     win.title = options.title
     win.maximized = raylib.is_window_maximized()
-    win.normal_width = init_w
-    win.normal_height = init_h
+    win.normal_width = options.maximized ? options.width.to(f32) : init_w
+    win.normal_height = options.maximized ? options.height.to(f32) : init_h
     each options.fonts as f : win.fonts.append(f)
     fonts.window = win
 
