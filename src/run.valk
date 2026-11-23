@@ -40,31 +40,36 @@ use valk.fs
     if options.maximized && options.resizable && !raylib.is_window_maximized() {
         raylib.maximize_window()
     }
+    raylib.poll_input_events()
     raylib.set_exit_key(.none)
     raylib.set_target_fps(60)
 
     let fonts = Fonts.new(options.fallback_fonts)
     let platform = RaylibPlatform{ fonts: fonts }
     let sdf = Sdf.load()
-    let win = Window.new(root, raylib.get_screen_width().to(f32), raylib.get_screen_height().to(f32), platform, options.theme)
+    let init_w = raylib.get_screen_width().to(f32)
+    let init_h = raylib.get_screen_height().to(f32)
+    let win = Window.new(root, init_w, init_h, platform, options.theme)
     win.title = options.title
     win.maximized = raylib.is_window_maximized()
-    win.normal_width = options.width.to(f32)
-    win.normal_height = options.height.to(f32)
+    win.normal_width = init_w
+    win.normal_height = init_h
     each options.fonts as f : win.fonts.append(f)
     fonts.window = win
 
     let shot: ?String = options.screenshot.length > 0 ? options.screenshot : env_screenshot()
     let shot_after = (core.getenv("VALK_GUI_SCREENSHOT_AFTER") !? "0").to(f64) !? 0
     let input = RaylibInput{}
-    let first = true
+    let warmup_frames: uint = 3
     while !raylib.window_should_close() && !win.quit_requested {
         win.time = raylib.get_time()
-        let changed = first || isset(shot)
-        first = false
+        let changed = warmup_frames > 0 || isset(shot)
+        if warmup_frames > 0 : warmup_frames--
         win.maximized = raylib.is_window_maximized()
-        if raylib.is_window_resized() {
-            win.resize(raylib.get_screen_width().to(f32), raylib.get_screen_height().to(f32))
+        let sw = raylib.get_screen_width().to(f32)
+        let sh = raylib.get_screen_height().to(f32)
+        if raylib.is_window_resized() || (sw > 0 && sh > 0 && (sw != win.width || sh != win.height)) {
+            win.resize(sw, sh)
             if !win.maximized {
                 win.normal_width = win.width
                 win.normal_height = win.height
@@ -105,7 +110,7 @@ use valk.fs
             break
         }
         // Drawing ends by reading input; without anything pending it waits for some
-        if win.busy() || isset(shot) {
+        if win.busy() || isset(shot) || warmup_frames > 0 {
             raylib.disable_event_waiting()
         } else {
             raylib.enable_event_waiting()
