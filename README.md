@@ -2,8 +2,10 @@
 
 A GUI library for [Valk](https://valk-lang.dev), in the style of [GPUI](https://gpui.rs):
 your state lives in plain classes, `render` builds a tree of elements every frame, and
-elements are styled with chained, Tailwind-like methods. Layout is flexbox. Drawing is done on
-the GPU through [raylib](https://www.raylib.com).
+elements are styled with chained, Tailwind-like methods. Layout is flexbox. Windows, input,
+and presentation run through [SDL3](https://libsdl.org) via [valk-sdl](https://github.com/ctxcode/valk-sdl),
+with a built-in pure-Valk analytical SDF and TrueType renderer so apps work reliably across
+Linux, macOS, Windows, and GPU-less VMs without OpenGL 3.3 requirements.
 
 ![Dashboard](docs/dashboard.png)
 
@@ -30,15 +32,11 @@ fn main() {
 
 ## Requirements
 
-Valk 0.8.7 or newer, and raylib 6.0 on the system, as for
-[valk-raylib](https://github.com/ctxcode/valk-raylib): `pacman -S raylib`, `brew install raylib`,
-or the library from raylib's [release page](https://github.com/raysan5/raylib/releases/tag/6.0).
-When it is not where the linker looks, point the build at it:
-
-```sh
-valk build . -L ~/raylib-6.0_linux_amd64/lib -o app
-LD_LIBRARY_PATH=~/raylib-6.0_linux_amd64/lib ./app
-```
+Valk 0.9.1 or newer. [valk-sdl](https://github.com/ctxcode/valk-sdl) bundles prebuilt SDL3
+libraries directly (`linux-x64`/`linux-arm64` static `libSDL3.a`, `win-x64` static `SDL3.lib`,
+and `macos-x64`/`macos-arm64` universal `libSDL3.dylib`), so no system SDL3 installation is
+required when `"libs": true` is enabled on `sdl` in your project's `valk.json`
+(`vman install github.com/ctxcode/valk-sdl --libs`).
 
 ## Install
 
@@ -298,8 +296,7 @@ moves the clock for timers and animations, and `win.wait_tasks()` waits for `spa
 ## Not supported
 
 - **Input methods (IME):** text typed through an input method (Chinese, Japanese, Korean)
-  arrives when it is committed, but the word being composed is not shown at the caret and the
-  candidate popup is not placed next to it. raylib's GLFW backend has no API for this.
+  arrives when it is committed, but the word being composed is not shown inline at the caret yet.
 - **Accessibility:** no accessibility tree is exposed, so screen readers see an empty window.
 - **Windows:** one operating-system window per program; floating panels live inside it. No
   native menu bar.
@@ -309,10 +306,9 @@ moves the clock for timers and animations, and `win.wait_tasks()` waits for `spa
 ## Development
 
 ```sh
-make raylib              # download raylib 6.0 into vendor/raylib (when it is not installed)
 make test                # headless tests
-make test-window         # opens a hidden window and checks the pixels; needs a display
-make raylib-win test-win # the same tests built for Windows, run under Wine
+make test-window         # opens a hidden window and checks the pixels (works with SDL_VIDEODRIVER=dummy)
+make sdl-win test-win    # the same tests built for Windows, run under Wine
 make kanban              # build and run an example (see Examples)
 make examples            # build them all
 make docs                # docs/api.md

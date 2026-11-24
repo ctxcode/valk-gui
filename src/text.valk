@@ -11,7 +11,7 @@
 }
 
 /// What the window needs from the system it runs on: text metrics, images and the clipboard.
-/// `run` uses raylib; `headless` uses fixed-width metrics for tests.
+/// `run` uses TrueType fonts; `headless` uses fixed-width metrics for tests.
 + interface Platform {
     fn text_width(text: String, font: ResolvedFont) f32;
     fn image_size(path: String) Point;

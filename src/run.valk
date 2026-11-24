@@ -1,167 +1,315 @@
-use raylib
+use image
+use sdl
 use valk.core
 use valk.fs
 
-/// Opens a window, shows `root` in it and handles input until the window closes. Throws when the
-/// system can't open a window, for example without OpenGL 3.3.
+/// Opens a window, shows `root` in it and handles input until the window closes.
 + fn run(root: Render, options: WindowOptions (WindowOptions{})) !InitError {
-    let flags: u32 = raylib.FLAG_WINDOW_HIGHDPI
-    if options.resizable : flags = flags | raylib.FLAG_WINDOW_RESIZABLE
-    if options.antialias : flags = flags | raylib.FLAG_MSAA_4X_HINT
-    if options.hidden || isset(env_hidden()) : flags = flags | raylib.FLAG_WINDOW_HIDDEN
-    else : flags = flags | raylib.FLAG_VSYNC_HINT
-    raylib.set_trace_log_level(.error)
-    raylib.set_config_flags(flags)
-    raylib.init_window(options.width, options.height, options.title)
-    if !raylib.is_window_ready() : throw .init
-    apply_window_icon(options)
-    raylib.set_window_min_size(options.min_width, options.min_height)
-    if !options.hidden && !isset(env_hidden()) {
-        let mon = raylib.get_current_monitor()
-        let mon_w = raylib.get_monitor_width(mon)
-        let mon_h = raylib.get_monitor_height(mon)
-        if !options.maximized && mon_w > 0 && mon_h > 0 {
-            let max_w = (mon_w - 40).max(options.min_width)
-            let max_h = (mon_h - 80).max(options.min_height)
+    sdl.init(sdl.INIT_VIDEO) ! throw .init
+    defer { sdl.quit() }
+
+    let hidden = options.hidden || isset(env_hidden())
+    let flags: u64 = sdl.WINDOW_HIGH_PIXEL_DENSITY
+    if options.resizable : flags = flags | sdl.WINDOW_RESIZABLE
+    if hidden : flags = flags | sdl.WINDOW_HIDDEN
+
+    let sdl_win = sdl.Window.create(options.title, options.width, options.height, flags) ! throw .init
+    defer { sdl_win.destroy() }
+
+    apply_window_icon(sdl_win, options)
+    sdl_win.set_minimum_size(options.min_width, options.min_height)
+
+    if !hidden {
+        let disp = sdl_win.display_id()
+        if disp == 0 : disp = sdl.get_primary_display()
+        let bounds = sdl.get_display_usable_bounds(disp) ?? sdl.get_display_bounds(disp)
+        if !options.maximized && isset(bounds) && bounds.w > 0 && bounds.h > 0 {
+            let max_w = (bounds.w - 40).max(options.min_width)
+            let max_h = (bounds.h - 40).max(options.min_height)
             let clamped_w = options.width.min(max_w)
             let clamped_h = options.height.min(max_h)
             if clamped_w != options.width || clamped_h != options.height {
-                raylib.set_window_size(clamped_w, clamped_h)
-                let mp = raylib.get_monitor_position(mon)
-                let px = mp.x.to(i32) + ((mon_w - clamped_w) / 2).max(20)
-                let py = mp.y.to(i32) + ((mon_h - clamped_h) / 2).max(40)
-                raylib.set_window_position(px, py)
+                sdl_win.set_size(clamped_w, clamped_h)
+                let px = bounds.x + ((bounds.w - clamped_w) / 2).max(0)
+                let py = bounds.y + ((bounds.h - clamped_h) / 2).max(0)
+                sdl_win.set_position(px, py)
             }
         }
-        if raylib.is_window_minimized() : raylib.restore_window()
-        raylib.set_window_focused()
+        if options.maximized && options.resizable && !sdl_win.is_maximized() {
+            sdl_win.maximize()
+        }
+        if sdl_win.is_minimized() : sdl_win.restore()
+        sdl_win.raise()
+        sdl_win.sync()
     }
-    if options.maximized && options.resizable && !raylib.is_window_maximized() {
-        raylib.maximize_window()
-    }
-    raylib.poll_input_events()
-    raylib.set_exit_key(.none)
-    raylib.set_target_fps(60)
 
-    let fonts = Fonts.new(options.fallback_fonts)
-    let platform = RaylibPlatform{ fonts: fonts }
-    let sdf = Sdf.load()
-    let init_w = raylib.get_screen_width().to(f32)
-    let init_h = raylib.get_screen_height().to(f32)
-    let win = Window.new(root, init_w, init_h, platform, options.theme)
+    // Create 2D renderer; automatically falls back to software on GPU-less VMs if needed
+    let ren_opt = sdl.Renderer.create(sdl_win) !? null
+    let ren = ren_opt ?? (sdl.Renderer.create(sdl_win, "software") ! throw .init)
+    defer { ren.destroy() }
+    if !hidden : ren.set_vsync(1)
+    sdl_win.start_text_input()
+
+    let lw, lh = sdl_win.size()
+    let pw, ph = sdl_win.size_in_pixels()
+    if lw <= 0 : lw = options.width
+    if lh <= 0 : lh = options.height
+    if pw <= 0 : pw = lw
+    if ph <= 0 : ph = lh
+    let scale = (pw.to(f32) / lw.to(f32)).max(1.0)
+
+    let fonts = Fonts.new(options.fallback_fonts, scale)
+    let platform = SdlPlatform{ fonts: fonts }
+    let canvas = Canvas.new(pw, ph, scale)
+    let tex: ?sdl.Texture = null
+    defer {
+        if isset(tex) : tex.destroy()
+        fonts.unload()
+        platform.unload()
+    }
+
+    let win = Window.new(root, lw.to(f32), lh.to(f32), platform, options.theme)
     win.title = options.title
-    win.maximized = raylib.is_window_maximized()
-    win.normal_width = options.maximized ? options.width.to(f32) : init_w
-    win.normal_height = options.maximized ? options.height.to(f32) : init_h
+    win.maximized = sdl_win.is_maximized()
+    win.normal_width = options.maximized ? options.width.to(f32) : lw.to(f32)
+    win.normal_height = options.maximized ? options.height.to(f32) : lh.to(f32)
     each options.fonts as f : win.fonts.append(f)
     fonts.window = win
 
     let shot: ?String = options.screenshot.length > 0 ? options.screenshot : env_screenshot()
     let shot_after = (core.getenv("VALK_GUI_SCREENSHOT_AFTER") !? "0").to(f64) !? 0
-    let input = RaylibInput{}
+    let start_ns = sdl.get_ticks_ns()
+    let input = SdlInput{}
+    defer { input.destroy() }
+
     let warmup_frames: uint = 3
-    while !raylib.window_should_close() && !win.quit_requested {
-        win.time = raylib.get_time()
-        let changed = warmup_frames > 0 || isset(shot)
+    let running = true
+    let need_draw = true
+
+    while running && !win.quit_requested {
+        win.time = (sdl.get_ticks_ns() - start_ns).to(f64) / 1000000000.0
+        let changed = need_draw || warmup_frames > 0 || isset(shot)
+        need_draw = false
         if warmup_frames > 0 : warmup_frames--
-        win.maximized = raylib.is_window_maximized()
-        let sw = raylib.get_screen_width().to(f32)
-        let sh = raylib.get_screen_height().to(f32)
-        if raylib.is_window_resized() || (sw > 0 && sh > 0 && (sw != win.width || sh != win.height)) {
-            win.resize(sw, sh)
-            if !win.maximized {
-                win.normal_width = win.width
-                win.normal_height = win.height
+
+        // Drain all pending SDL events
+        while true {
+            let ev = sdl.poll_event() ?! break
+            if handle_event(ev, win, sdl_win, input) {
+                changed = true
             }
-            changed = true
+            if ev.type == sdl.EVENT_QUIT || ev.type == sdl.EVENT_WINDOW_CLOSE_REQUESTED {
+                running = false
+            }
         }
-        if input.poll(win) : changed = true
+        if !running || win.quit_requested : break
+
+        // Sync logical/physical window size and HiDPI scale
+        let cur_w, cur_h = sdl_win.size()
+        let cur_pw, cur_ph = sdl_win.size_in_pixels()
+        if cur_w > 0 && cur_h > 0 {
+            let cur_scale = cur_pw > 0 ? (cur_pw.to(f32) / cur_w.to(f32)).max(1.0) : 1.0
+            if (cur_scale - canvas.scale).abs() > 0.01 {
+                fonts.set_scale(cur_scale)
+                changed = true
+            }
+            if cur_w.to(f32) != win.width || cur_h.to(f32) != win.height || cur_pw != canvas.width || cur_ph != canvas.height {
+                win.maximized = sdl_win.is_maximized()
+                win.resize(cur_w.to(f32), cur_h.to(f32))
+                if !win.maximized {
+                    win.normal_width = win.width
+                    win.normal_height = win.height
+                }
+                canvas.resize(cur_pw > 0 ? cur_pw : cur_w, cur_ph > 0 ? cur_ph : cur_h, cur_scale)
+                changed = true
+            }
+        }
+
         if win.tick() : changed = true
         if win.title_changed {
-            raylib.set_window_title(win.title)
+            sdl_win.set_title(win.title)
             win.title_changed = false
         }
+
         if !changed && !win.frame_requested && !win.dirty {
-            // Nothing to draw: sleep until input, or until the next timer when one is pending
+            // Sleep until input or next timer/task tick
+            let ev: ?sdl.Event = null
             if win.busy() {
-                raylib.disable_event_waiting()
-                raylib.wait_time((win.next_due() - win.time).max(0.001).min(1.0 / 60.0))
+                let wait_ms = ((win.next_due() - win.time) * 1000.0).to(i32).max(1).min(16)
+                ev = sdl.wait_event_timeout(wait_ms)
             } else {
-                raylib.enable_event_waiting()
+                ev = sdl.wait_event()
             }
-            raylib.poll_input_events()
+            if isset(ev) {
+                if handle_event(ev, win, sdl_win, input) : need_draw = true
+                if ev.type == sdl.EVENT_QUIT || ev.type == sdl.EVENT_WINDOW_CLOSE_REQUESTED {
+                    running = false
+                }
+            }
             continue
         }
+
         win.frame_requested = false
         win.draw()
         input.set_cursor(win.cursor)
 
-        raylib.begin_drawing()
-        raylib.clear_background(to_rl(win.theme.background))
-        draw_scene(win, platform, sdf)
+        draw_scene(win, platform, canvas)
+
         if isset(shot) && win.frames >= 3 && win.time >= shot_after {
-            // Ending the scissor mode draws what is batched, before the buffers swap
-            raylib.end_scissor_mode()
-            let image = raylib.load_image_from_screen()
-            raylib.export_image(image, shot)
-            raylib.unload_image(image)
-            raylib.end_drawing()
+            let img = image.Image.from_pixels(canvas.width.to(uint), canvas.height.to(uint), 4, canvas.pixels) !? null
+            if isset(img) : img.write(shot) _
             break
         }
-        // Drawing ends by reading input; without anything pending it waits for some
-        if win.busy() || isset(shot) || warmup_frames > 0 {
-            raylib.disable_event_waiting()
-        } else {
-            raylib.enable_event_waiting()
+
+        // Upload framebuffer to streaming SDL texture and present
+        let recreate = !isset(tex) || tex.width != canvas.width || tex.height != canvas.height
+        if recreate {
+            if isset(tex) : tex.destroy()
+            let t = ren.create_texture(sdl.PIXELFORMAT_RGBA32, .streaming, canvas.width, canvas.height) !? null
+            if isset(t) {
+                t.set_scale_mode(.nearest)
+                t.set_blend_mode(sdl.BLENDMODE_NONE)
+            }
+            tex = t
         }
-        raylib.end_drawing()
+        if isset(tex) {
+            tex.update(canvas.pixels, canvas.width * 4)
+            ren.render_texture(tex)
+            ren.present()
+        }
     }
-    win.maximized = raylib.is_window_maximized()
+
+    win.maximized = sdl_win.is_maximized()
     let on_close = options.on_close
     if isset(on_close) : on_close(win)
-    sdf.unload()
-    fonts.unload()
-    platform.unload()
-    raylib.close_window()
 }
 
-// Sets the window icon from `options.icon` (file path) or `options.icon_png` (embedded PNG bytes).
-// Generates standard sizes capped at 128px so X11/XWayland `_NET_WM_ICON` stays well under the
-// 256 KB property limit and gives crisp icons in titlebars, taskbars, and Alt-Tab previews.
-fn apply_window_icon(options: WindowOptions) {
-    let img = raylib.Image{}
-    if options.icon.length > 0 && fs.is_file(options.icon) {
-        img = raylib.load_image(options.icon)
-    } else if options.icon_png.length > 0 {
-        let tmp = fs.create_temp_file("valk-gui-icon-", ".png") ! return
-        defer { fs.delete_file(tmp) _ }
-        fs.write(tmp, options.icon_png) ! return
-        img = raylib.load_image(tmp)
-    } else {
-        return
+fn handle_event(ev: sdl.Event, win: Window, sdl_win: sdl.Window, input: SdlInput) bool {
+    let t = ev.type
+    if t == sdl.EVENT_WINDOW_EXPOSED || t == sdl.EVENT_WINDOW_SHOWN || t == sdl.EVENT_WINDOW_RESIZED || t == sdl.EVENT_WINDOW_PIXEL_SIZE_CHANGED || t == sdl.EVENT_WINDOW_DISPLAY_SCALE_CHANGED {
+        win.maximized = sdl_win.is_maximized()
+        return true
     }
-    if !raylib.is_image_valid(img) : return
-    defer { raylib.unload_image(img) }
-
-    img.convert_format(.uncompressed_r8g8b8a8)
-    let icons = Array[raylib.Image]{}
-    let sizes = Array[i32]{ 128, 48, 32, 16 }
-    each sizes as sz {
-        if img.width >= sz && img.height >= sz {
-            let copy = raylib.image_copy(img)
-            if copy.width != sz || copy.height != sz : copy.resize(sz, sz)
-            icons.append(copy)
+    if t == sdl.EVENT_WINDOW_MAXIMIZED || t == sdl.EVENT_WINDOW_RESTORED {
+        win.maximized = sdl_win.is_maximized()
+        return true
+    }
+    if t == sdl.EVENT_WINDOW_MOUSE_LEAVE {
+        let buttons, _, _ = sdl.get_mouse_state()
+        if (buttons & sdl.BUTTON_LMASK) == 0 {
+            input.last_x = -1
+            input.last_y = -1
+            win.mouse_move(-1, -1, sdl_modifiers(sdl.get_mod_state()))
+            return true
         }
+        return false
     }
-    if icons.length == 0 {
-        raylib.set_window_icon(img)
-        return
+    if t == sdl.EVENT_MOUSE_MOTION {
+        let m = ev.motion()
+        input.last_x = m.x
+        input.last_y = m.y
+        win.mouse_move(m.x, m.y, sdl_modifiers(sdl.get_mod_state()))
+        return true
     }
-    raylib.set_window_icons(icons)
-    each icons as copy : raylib.unload_image(copy)
+    if t == sdl.EVENT_MOUSE_BUTTON_DOWN {
+        let b = ev.button()
+        input.last_x = b.x
+        input.last_y = b.y
+        let mb = sdl_mouse_button(b.button)
+        if isset(mb) {
+            win.mouse_down(b.x, b.y, mb, sdl_modifiers(sdl.get_mod_state()))
+            return true
+        }
+        return false
+    }
+    if t == sdl.EVENT_MOUSE_BUTTON_UP {
+        let b = ev.button()
+        input.last_x = b.x
+        input.last_y = b.y
+        let mb = sdl_mouse_button(b.button)
+        if isset(mb) {
+            win.mouse_up(b.x, b.y, mb, sdl_modifiers(sdl.get_mod_state()))
+            return true
+        }
+        return false
+    }
+    if t == sdl.EVENT_MOUSE_WHEEL {
+        let w = ev.wheel()
+        let mods = sdl_modifiers(sdl.get_mod_state())
+        let flip: f32 = w.direction == sdl.MOUSEWHEEL_FLIPPED ? -1.0 : 1.0
+        let dx = -w.x * flip * 40.0
+        let dy = -w.y * flip * 40.0
+        if mods.shift && dx == 0 {
+            dx = dy
+            dy = 0
+        }
+        win.scroll(dx, dy, mods)
+        return true
+    }
+    if t == sdl.EVENT_KEY_DOWN {
+        let k = ev.key()
+        let mods = sdl_modifiers(k.mod)
+        let key = sdl_key_from_code(k.key)
+        if key != .unknown {
+            win.key_down(key, mods, k.repeat)
+            return true
+        }
+        return mods.shift != input.last_mods.shift || mods.ctrl != input.last_mods.ctrl || mods.alt != input.last_mods.alt || mods.cmd != input.last_mods.cmd
+    }
+    if t == sdl.EVENT_KEY_UP {
+        let k = ev.key()
+        let mods = sdl_modifiers(k.mod)
+        if mods.shift != input.last_mods.shift || mods.ctrl != input.last_mods.ctrl || mods.alt != input.last_mods.alt || mods.cmd != input.last_mods.cmd {
+            input.last_mods = mods
+            return true
+        }
+        return false
+    }
+    if t == sdl.EVENT_TEXT_INPUT {
+        let txt = ev.text().text
+        if txt.length > 0 {
+            win.input(txt)
+            return true
+        }
+        return false
+    }
+    if t == sdl.EVENT_DROP_BEGIN {
+        input.dropped.clear()
+        return false
+    }
+    if t == sdl.EVENT_DROP_FILE {
+        let path = ev.drop().data
+        if path.length > 0 : input.dropped.append(path)
+        return false
+    }
+    if t == sdl.EVENT_DROP_COMPLETE {
+        if input.dropped.length > 0 {
+            let paths = Array[String]{}
+            each input.dropped as p : paths.append(p)
+            input.dropped.clear()
+            win.drop_files(paths)
+            return true
+        }
+        return false
+    }
+    return false
 }
 
-// VALK_GUI_SCREENSHOT=file.png saves the third frame and exits; for tests and docs
+fn apply_window_icon(sdl_win: sdl.Window, options: WindowOptions) {
+    let decoded: ?image.Image = null
+    if options.icon.length > 0 && fs.is_file(options.icon) {
+        decoded = image.read(options.icon) !? null
+    } else if options.icon_png.length > 0 {
+        decoded = image.decode(options.icon_png) !? null
+    }
+    let img = decoded ?! return
+    let rgba = img.to_rgba()
+    if rgba.width > 128 || rgba.height > 128 {
+        rgba = rgba.resize(128, 128) !? rgba
+    }
+    sdl_win.set_icon_rgba(rgba.width.to(i32), rgba.height.to(i32), rgba.pixels)
+}
+
 fn env_screenshot() ?String {
     let value = core.getenv("VALK_GUI_SCREENSHOT") ! return null
     if value == "" : return null
@@ -173,201 +321,123 @@ fn env_hidden() ?String {
     return value
 }
 
-class RaylibPlatform is Platform {
+class SdlPlatform is Platform {
     fonts: Fonts
-    textures: Map[raylib.Texture] (.{})
+    images: Map[?image.Image] (.{})
 
     fn text_width(text: String, font: ResolvedFont) f32 { return this.fonts.width(text, font) }
 
     fn image_size(path: String) Point {
-        let t = this.texture(path)
-        return .{ x: t.width.to(f32), y: t.height.to(f32) }
+        let img = this.load_image(path)
+        if isset(img) : return .{ x: img.width.to(f32), y: img.height.to(f32) }
+        return .{}
     }
 
-    fn clipboard() String { return raylib.get_clipboard_text() }
-    fn set_clipboard(text: String) { raylib.set_clipboard_text(text) }
+    fn clipboard() String { return sdl.get_clipboard_text() }
+    fn set_clipboard(text: String) { sdl.set_clipboard_text(text) }
 
-    fn texture(path: String) raylib.Texture {
-        let cached = this.textures.get(path) ! {
-            let t = raylib.load_texture(path)
-            if t.id != 0 {
-                t.gen_mipmaps()
-                raylib.set_texture_filter(t, .trilinear)
-            }
-            this.textures.set(path, t)
-            return t
+    fn load_image(path: String) ?image.Image {
+        if path.length == 0 : return null
+        let cached = this.images.get(path) ! {
+            let decoded = image.read(path) !? null
+            let rgba: ?image.Image = isset(decoded) ? decoded.to_rgba() : null
+            this.images.set(path, rgba)
+            return rgba
         }
         return cached
     }
 
     fn unload() {
-        each this.textures as t : raylib.unload_texture(t)
+        this.images.clear()
     }
 }
 
-class RaylibInput {
+class SdlInput {
     last_x: f32 (-1)
     last_y: f32 (-1)
     last_mods: Modifiers (.{})
     cursor: Cursor (.default)
-
-    /// Hands the window the input since the last poll. True when there was any.
-    fn poll(win: Window) bool {
-        let any = false
-        let mods = modifiers()
-        let pos = raylib.get_mouse_position()
-        let x = pos.x
-        let y = pos.y
-        if !raylib.is_cursor_on_screen() && !raylib.is_mouse_button_down(.left) {
-            x = -1
-            y = -1
-        }
-        if x != this.last_x || y != this.last_y {
-            this.last_x = x
-            this.last_y = y
-            win.mouse_move(x, y, mods)
-            any = true
-        }
-        each Array[MouseButton]{ .left, .right, .middle } as button {
-            let rb = to_rl_button(button)
-            if raylib.is_mouse_button_pressed(rb) {
-                win.mouse_down(x, y, button, mods)
-                any = true
-            }
-            if raylib.is_mouse_button_released(rb) {
-                win.mouse_up(x, y, button, mods)
-                any = true
-            }
-        }
-        let wheel = raylib.get_mouse_wheel_move_v()
-        if wheel.x != 0 || wheel.y != 0 {
-            let dx = -wheel.x * 40
-            let dy = -wheel.y * 40
-            if mods.shift && dx == 0 {
-                dx = dy
-                dy = 0
-            }
-            win.scroll(dx, dy, mods)
-            any = true
-        }
-        while true {
-            let code = raylib.get_key_pressed()
-            if code == 0 : break
-            any = true
-            let key = key_from_code(code)
-            if key != .unknown : win.key_down(key, mods)
-        }
-        each Array[raylib.KeyboardKey]{ .backspace, .delete, .left, .right, .up, .down, .page_up, .page_down, .enter, .tab, .z, .y } as rk {
-            if raylib.is_key_pressed_repeat(rk) {
-                win.key_down(key_from_code(rk.to(i32)), mods, true)
-                any = true
-            }
-        }
-        let typed = ""
-        while true {
-            let cp = raylib.get_char_pressed()
-            if cp <= 0 : break
-            typed += codepoint_text(cp.to(u32))
-        }
-        if typed.length > 0 {
-            win.input(typed)
-            any = true
-        }
-        // Modifier changes alone, such as Shift for a drag, also need a frame
-        if mods.shift != this.last_mods.shift || mods.ctrl != this.last_mods.ctrl || mods.alt != this.last_mods.alt || mods.cmd != this.last_mods.cmd {
-            this.last_mods = mods
-            any = true
-        }
-        if raylib.is_file_dropped() {
-            win.drop_files(dropped_files())
-            any = true
-        }
-        return any
-    }
+    cursors: HashMap[int, sdl.Cursor] (.{})
+    dropped: Array[String] (.{})
 
     fn set_cursor(cursor: Cursor) {
         if cursor == this.cursor : return
         this.cursor = cursor
-        raylib.set_mouse_cursor(match cursor : raylib.MouseCursor {
-            .default => .default
-            .pointer => .pointing_hand
-            .text => .ibeam
+        let id = cursor.to(int)
+        let cached = this.cursors.get(id) !? null
+        if isset(cached) {
+            cached.apply()
+            return
+        }
+        let sys = match cursor : sdl.SystemCursor {
+            .default => .default_
+            .pointer => .pointer
+            .text => .text
             .crosshair => .crosshair
             .not_allowed => .not_allowed
-            .resize_ew => .resize_ew
-            .resize_ns => .resize_ns
-            .move => .resize_all
-        })
+            .resize_ew => .ew_resize
+            .resize_ns => .ns_resize
+            .move => .move
+        }
+        let c = sdl.Cursor.system(sys) ! return
+        this.cursors.set(id, c)
+        c.apply()
+    }
+
+    fn destroy() {
+        each this.cursors as c : c.destroy()
+        this.cursors.clear()
     }
 }
 
-fn modifiers() Modifiers {
+fn sdl_modifiers(mod: u16) Modifiers {
     return .{
-        shift: raylib.is_key_down(.left_shift) || raylib.is_key_down(.right_shift),
-        ctrl: raylib.is_key_down(.left_control) || raylib.is_key_down(.right_control),
-        alt: raylib.is_key_down(.left_alt) || raylib.is_key_down(.right_alt),
-        cmd: raylib.is_key_down(.left_super) || raylib.is_key_down(.right_super)
+        shift: (mod & sdl.KMOD_SHIFT) != 0,
+        ctrl: (mod & sdl.KMOD_CTRL) != 0,
+        alt: (mod & sdl.KMOD_ALT) != 0,
+        cmd: (mod & sdl.KMOD_GUI) != 0
     }
 }
 
-fn to_rl_button(b: MouseButton) raylib.MouseButton {
-    return match b : raylib.MouseButton {
-        .left => .left
-        .right => .right
-        .middle => .middle
-    }
+fn sdl_mouse_button(b: u8) ?MouseButton {
+    if b == sdl.BUTTON_LEFT : return .left
+    if b == sdl.BUTTON_RIGHT : return .right
+    if b == sdl.BUTTON_MIDDLE : return .middle
+    return null
 }
 
-/// The key for a raylib (GLFW) key code.
-fn key_from_code(code: i32) Key {
+fn sdl_key_from_code(code: u32) Key {
     let items = Key.items()
-    if code >= 65 && code <= 90 : return items.get((code - 64).to(uint)) !? .unknown
-    if code >= 48 && code <= 57 : return items.get((code - 48 + 27).to(uint)) !? .unknown
-    if code >= 290 && code <= 301 : return items.get((code - 290).to(uint) + Key.f1.to(uint)) !? .unknown
+    if code >= sdl.SDLK_A && code <= sdl.SDLK_Z : return items.get((code - sdl.SDLK_A + 1).to(uint)) !? .unknown
+    if code >= sdl.SDLK_0 && code <= sdl.SDLK_9 : return items.get((code - sdl.SDLK_0 + 27).to(uint)) !? .unknown
+    if code >= sdl.SDLK_F1 && code <= sdl.SDLK_F12 : return items.get((code - sdl.SDLK_F1).to(uint) + Key.f1.to(uint)) !? .unknown
     return match code : Key {
-        32 => .space
-        256 => .escape
-        257, 335 => .enter
-        258 => .tab
-        259 => .backspace
-        260 => .insert
-        261 => .delete
-        262 => .right
-        263 => .left
-        264 => .down
-        265 => .up
-        266 => .page_up
-        267 => .page_down
-        268 => .home
-        269 => .end
-        45 => .minus
-        61 => .equal
-        44 => .comma
-        46 => .period
-        47 => .slash
-        59 => .semicolon
-        39 => .apostrophe
-        91 => .left_bracket
-        92 => .backslash
-        93 => .right_bracket
-        96 => .grave
+        sdl.SDLK_SPACE => .space
+        sdl.SDLK_ESCAPE => .escape
+        sdl.SDLK_RETURN, sdl.SDLK_KP_ENTER => .enter
+        sdl.SDLK_TAB => .tab
+        sdl.SDLK_BACKSPACE => .backspace
+        sdl.SDLK_INSERT => .insert
+        sdl.SDLK_DELETE => .delete
+        sdl.SDLK_RIGHT => .right
+        sdl.SDLK_LEFT => .left
+        sdl.SDLK_DOWN => .down
+        sdl.SDLK_UP => .up
+        sdl.SDLK_PAGEUP => .page_up
+        sdl.SDLK_PAGEDOWN => .page_down
+        sdl.SDLK_HOME => .home
+        sdl.SDLK_END => .end
+        sdl.SDLK_MINUS => .minus
+        sdl.SDLK_EQUALS => .equal
+        sdl.SDLK_COMMA => .comma
+        sdl.SDLK_PERIOD => .period
+        sdl.SDLK_SLASH => .slash
+        sdl.SDLK_SEMICOLON => .semicolon
+        sdl.SDLK_APOSTROPHE => .apostrophe
+        sdl.SDLK_LEFTBRACKET => .left_bracket
+        sdl.SDLK_BACKSLASH => .backslash
+        sdl.SDLK_RIGHTBRACKET => .right_bracket
+        sdl.SDLK_GRAVE => .grave
         default => .unknown
     }
-}
-
-
-fn dropped_files() Array[String] {
-    let list = raylib.load_dropped_files()
-    let result = Array[String]{}
-    let paths = list.paths
-    if isset(paths) {
-        let items = paths.@cast(*[?cstring])
-        each 0 .. list.count.to(uint) as i {
-            @unsafe
-            let p = items[i]
-            if isset(p) : result.append(p.to_string())
-        }
-    }
-    raylib.unload_dropped_files(list)
-    return result
 }

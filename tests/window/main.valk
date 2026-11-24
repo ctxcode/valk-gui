@@ -1,7 +1,7 @@
 use gui
-use raylib
+use image
 
-// Opens a hidden window, saves a frame, and checks the pixels raylib drew
+// Opens a hidden window, saves a frame, and checks the pixels drawn
 
 class Shapes is gui.Render {
     fn render(win: gui.Window) gui.Div {
@@ -14,19 +14,24 @@ class Shapes is gui.Render {
                 .child(gui.div().w(300).h(30).bg(gui.rgb(0xff00ff))))
             .child(gui.div().size(40).rounded_full().bg(gui.rgb(0xffffff)))
             .child(gui.div().h(20).bg_gradient(gui.rgb(0xff0000), gui.rgb(0x0000ff), 90))
+            .child(gui.div().h(30).flex().items_center().gap(10)
+                .child(gui.div().w(40).h(20).bg(gui.rgb(0x222222)).rounded(6).shadow_md())
+                .child(gui.icon(.refresh, 20).text_color(gui.rgb(0x00ffff))))
     }
 }
 
 global failures: uint (0)
 
-fn expect(img: raylib.Image, x: i32, y: i32, rgb: u32, what: String) {
-    let c = raylib.get_image_color(img, x, y)
+fn expect(img: image.Image, x: uint, y: uint, rgb: u32, what: String) {
+    let r = img.get(x, y, 0)
+    let g = img.get(x, y, 1)
+    let b = img.get(x, y, 2)
     let want = gui.rgb(rgb)
-    let close = (c.r.to(int) - want.r.to(int)).abs() < 8 && (c.g.to(int) - want.g.to(int)).abs() < 8 && (c.b.to(int) - want.b.to(int)).abs() < 8
+    let close = (r.to(int) - want.r.to(int)).abs() < 8 && (g.to(int) - want.g.to(int)).abs() < 8 && (b.to(int) - want.b.to(int)).abs() < 8
     if close {
         println("ok   %what")
     } else {
-        println("FAIL %what: (%x,%y) is %{c.r},%{c.g},%{c.b}")
+        println("FAIL %what: (%x,%y) is %r,%g,%b")
         failures++
     }
 }
@@ -37,9 +42,12 @@ fn main() {
         println("FAIL could not open a window")
         exit(1)
     }
-    let img = raylib.load_image(path)
-    if img.width != 300 {
+    let img = image.read(path) ! {
         println("FAIL no screenshot")
+        exit(1)
+    }
+    if img.width != 300 {
+        println("FAIL wrong screenshot width: %{img.width}")
         exit(1)
     }
     expect(img, 5, 5, 0x101010, "background")
@@ -59,8 +67,9 @@ fn main() {
     let bright: uint = 0
     each 0 .. 100 as x {
         each 0 .. 30 as y {
-            let c = raylib.get_image_color(img, 20 + x.to(i32), 170 + y.to(i32))
-            if c.r > 200 && c.g > 200 : bright++
+            let r = img.get(20 + x, 170 + y, 0)
+            let g = img.get(20 + x, 170 + y, 1)
+            if r > 200 && g > 200 : bright++
         }
     }
     if bright > 20 {
@@ -72,8 +81,8 @@ fn main() {
     // Without multisampling, the edge of a circle still has pixels between the two colors
     let blended: uint = 0
     each 0 .. 40 as i {
-        let c = raylib.get_image_color(img, 20 + i.to(i32), 252)
-        if c.r > 40 && c.r < 220 : blended++
+        let r = img.get(20 + i, 252, 0)
+        if r > 40 && r < 220 : blended++
     }
     expect(img, 40, 270, 0xffffff, "circle center")
     expect(img, 21, 310, 0xff0000, "gradient: starts red")
@@ -85,7 +94,22 @@ fn main() {
         println("FAIL smooth edges: %blended blended pixels")
         failures++
     }
-    raylib.unload_image(img)
+    // Cyan refresh icon (SDF arc + triangle arrowhead) draws bright cyan pixels
+    let cyan: uint = 0
+    each 0 .. 40 as x {
+        each 0 .. 34 as y {
+            let r = img.get(60 + x, 330 + y, 0)
+            let g = img.get(60 + x, 330 + y, 1)
+            let b = img.get(60 + x, 330 + y, 2)
+            if r < 60 && g > 140 && b > 140 : cyan++
+        }
+    }
+    if cyan > 15 {
+        println("ok   arc & icon drawn")
+    } else {
+        println("FAIL arc & icon drawn: %cyan cyan pixels")
+        failures++
+    }
     if failures > 0 : exit(1)
     println("All window checks passed")
 }

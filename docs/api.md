@@ -29,7 +29,7 @@ Namespaces: [main](#main)
 + enum MouseButton { left, right, middle }
 + enum Overflow { visible, hidden, scroll }
 + enum Position { relative, absolute }
-+ enum PrimitiveKind { quad, shadow, text, image, line, circle, ring, triangle, clip, unclip }
++ enum PrimitiveKind { quad, shadow, text, image, line, arc, circle, ring, triangle, clip, unclip }
 + enum TextAlign { left, center, right }
 ```
 
@@ -89,7 +89,7 @@ Namespaces: [main](#main)
 + fn rgb(hex: u32) Color
 // A color from a hex number with alpha in the lowest byte, such as `0x3b82f680`.
 + fn rgba(hex: u32) Color
-// Opens a window, shows `root` in it and handles input until the window closes. Throws when the system can't open a window, for example without OpenGL 3.3.
+// Opens a window, shows `root` in it and handles input until the window closes.
 + fn run(root: Render, options: WindowOptions (WindowOptions{})) void !InitError
 // A horizontal slider for a value from 0 to 1. `on_change` gets the new value while the track is pressed or dragged.
 + fn slider(win: Window, value: f32, on_change: fn(f32)()) Div
@@ -353,6 +353,8 @@ Namespaces: [main](#main)
     + fn rounded_t(radius: f32) Div
     + fn rounded_tl(radius: f32) Div
     + fn rounded_tr(radius: f32) Div
+    // Allows selecting and copying static text with the mouse and Ctrl/Cmd+C. Inherited by children.
+    + fn selectable(on: bool (true)) Div
     + fn self_center() Div
     + fn self_end() Div
     + fn self_start() Div
@@ -608,7 +610,7 @@ Namespaces: [main](#main)
 ```
 
 ```js
-// What the window needs from the system it runs on: text metrics, images and the clipboard. `run` uses raylib; `headless` uses fixed-width metrics for tests.
+// What the window needs from the system it runs on: text metrics, images and the clipboard. `run` uses TrueType fonts; `headless` uses fixed-width metrics for tests.
 + interface Platform {
 }
 ```
@@ -797,6 +799,7 @@ Namespaces: [main](#main)
     + row_gap: f32
     + shrink: f32
     + text_align: ?TextAlign
+    + text_selectable: ?bool
     + text_strike: ?bool
     + text_underline: ?bool
     + visible: bool
@@ -927,6 +930,8 @@ Namespaces: [main](#main)
     + fn rounded_t(radius: f32) Style
     + fn rounded_tl(radius: f32) Style
     + fn rounded_tr(radius: f32) Style
+    // Allows selecting and copying static text with the mouse and Ctrl/Cmd+C. Inherited by children.
+    + fn selectable(on: bool (true)) Style
     + fn self_center() Style
     + fn self_end() Style
     + fn self_start() Style
@@ -1090,8 +1095,13 @@ Namespaces: [main](#main)
     ~+ frame_requested: bool
     ~+ frames: uint
     + height: f32
+    // Whether the OS window is currently maximized.
+    ~+ maximized: bool
     ~+ mouse_x: f32
     ~+ mouse_y: f32
+    ~+ normal_height: f32
+    // The last non-maximized window size, useful for saving window state on close.
+    ~+ normal_width: f32
     + platform: Platform
     ~+ quit_requested: bool
     // What the last frame drew.
@@ -1113,6 +1123,8 @@ Namespaces: [main](#main)
     + fn bind(keys: String, action: String) void !SyntaxError
     // The bounds of the element with this `id` in the last frame.
     + fn bounds_of(id: String) ?Bounds
+    // Clears any active static text selection.
+    + fn clear_selection() void
     // Presses and releases the left button at a point, then draws a frame.
     + fn click(x: f32, y: f32, modifiers: Modifiers (.{})) void
     // Clicks the center of the element with this `id`; false when there is none.
@@ -1157,6 +1169,8 @@ Namespaces: [main](#main)
     + fn scroll(dx: f32, dy: f32, modifiers: Modifiers (.{})) void
     // Scrolls at a point, then draws a frame.
     + fn scroll_at(x: f32, y: f32, dx: f32, dy: f32) void
+    // Returns the currently selected text from a `.selectable()` element, or "".
+    + fn selected_text() String
     + fn set_clipboard(text: String) void
     + fn set_title(title: String) void
     // The key combination bound to `action`, as text such as "Ctrl+Shift+P", or "" when none is.
@@ -1185,8 +1199,16 @@ Namespaces: [main](#main)
     + height: i32
     // Opens the window hidden.
     + hidden: bool
+    // Path to an image file (such as a `.png`) for the window icon on X11 and Windows.
+    + icon: String
+    // Raw PNG bytes (for example from `#embed`) for the window icon on X11 and Windows.
+    + icon_png: String
+    // Opens the window maximized.
+    + maximized: bool
     + min_height: i32
     + min_width: i32
+    // Called right before the window closes, while its size and `maximized` state are still valid.
+    + on_close: ?fn(Window)()
     + resizable: bool
     // Saves the third frame to this PNG file and closes the window, for tests and images.
     + screenshot: String

@@ -4,11 +4,18 @@
         "gui": {
             "src": "../../"
         },
-        "raylib": {
-            "src": "github.com/ctxcode/valk-raylib",
+        "sdl": {
+            "src": "github.com/ctxcode/valk-sdl",
             "version": "0.1.x",
-            "current": "0.1.4",
-            "current_hash": "bf9c486ff1f834597ba424f5061bbaac60c87dcc"
+            "libs": true,
+            "current": "0.1.0",
+            "current_hash": "ec5d29ac07e6745a627f81108a7fbc44cd1ee725"
+        },
+        "image": {
+            "src": "github.com/ctxcode/valk-image",
+            "version": "0.4.x",
+            "current": "0.4.0",
+            "current_hash": "0ba9e12ab99b7d737028ad0e9c2cfc7c0e6af2b1"
         }
     }
 }
