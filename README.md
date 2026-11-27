@@ -3,7 +3,7 @@
 A GUI library for [Valk](https://valk-lang.dev), in the style of [GPUI](https://gpui.rs):
 your state lives in plain classes, `render` builds a tree of elements every frame, and
 elements are styled with chained, Tailwind-like methods. Layout is flexbox. Windows, input,
-and presentation run through [SDL3](https://libsdl.org) via [valk-sdl](https://github.com/ctxcode/valk-sdl),
+and presentation run through [SDL3](https://libsdl.org) via [valk-sdl](https://github.com/zikue/valk-sdl),
 with a built-in pure-Valk analytical SDF and TrueType renderer so apps work reliably across
 Linux, macOS, Windows, and GPU-less VMs without OpenGL 3.3 requirements.
 
@@ -32,16 +32,16 @@ fn main() {
 
 ## Requirements
 
-Valk 0.9.1 or newer. [valk-sdl](https://github.com/ctxcode/valk-sdl) bundles prebuilt SDL3
+Valk 0.9.1 or newer. [valk-sdl](https://github.com/zikue/valk-sdl) bundles prebuilt SDL3
 libraries directly (`linux-x64`/`linux-arm64` static `libSDL3.a`, `win-x64` static `SDL3.lib`,
 and `macos-x64`/`macos-arm64` universal `libSDL3.dylib`), so no system SDL3 installation is
 required when `"libs": true` is enabled on `sdl` in your project's `valk.json`
-(`vman install github.com/ctxcode/valk-sdl --libs`).
+(`vman install github.com/zikue/valk-sdl --libs`).
 
 ## Install
 
 ```
-vman install github.com/ctxcode/valk-gui
+vman install github.com/zikue/valk-gui
 ```
 
 ## Elements and styles

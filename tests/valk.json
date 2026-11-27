@@ -5,7 +5,7 @@
             "src": "../"
         },
         "sdl": {
-            "src": "github.com/ctxcode/valk-sdl",
+            "src": "github.com/zikue/valk-sdl",
             "version": "0.1.x",
             "libs": true,
             "current": "0.1.0",
