@@ -1,0 +1,302 @@
+use sdl
+
+// Multi-window application host: manages multiple independent OS windows (secondary windows,
+// popout tool windows, independent render roots, focus, and lifecycle) in one event loop.
+
+class PendingWindowSpec {
+    root: Render
+    options: WindowOptions
+}
+
+class ManagedWindow {
+    sdl_win: sdl.Window
+    sdl_id: u32
+    ren: sdl.Renderer
+    gpu: ?GpuRenderer (null)
+    canvas: Canvas
+    tex: ?sdl.Texture (null)
+    fonts: Fonts
+    platform: SdlPlatform
+    win: Window
+    input: SdlInput
+    options: WindowOptions
+    prev_items: Array[Primitive] (.{})
+    prev_bg: Color (.{})
+    warmup: uint (3)
+    need_draw: bool (true)
+    closed: bool (false)
+
+    fn destroy() {
+        if this.closed : return
+        this.closed = true
+        this.win.maximized = this.sdl_win.is_maximized()
+        this.win.minimized = this.sdl_win.is_minimized()
+        this.win.fullscreen = (this.sdl_win.flags() & sdl.WINDOW_FULLSCREEN) != 0
+        let on_close = this.options.on_close
+        if isset(on_close) : on_close(this.win)
+        let g = this.gpu
+        if isset(g) : g.destroy()
+        let t = this.tex
+        if isset(t) : t.destroy()
+        this.input.destroy()
+        this.fonts.unload()
+        this.platform.unload()
+        this.ren.destroy()
+        this.sdl_win.destroy()
+    }
+}
+
+/// Manages one or more independent OS windows in a single application event loop.
+/// Call `app.open(root, options)` before or during `app.run()`.
++ class App {
+    ~+ windows: Array[Window] (.{})
+    - pending: Array[PendingWindowSpec] (.{})
+    - managed: Array[ManagedWindow] (.{})
+    - quit_all: bool (false)
+
+    + static fn new() App { return App{} }
+
+    /// Queues a new OS window to open with `root` and `options`.
+    + fn open(root: Render, options: WindowOptions (WindowOptions{})) {
+        this.pending.append(PendingWindowSpec{ root: root, options: options })
+    }
+
+    /// Requests all open windows to close and exits `run()`.
+    + fn quit() {
+        this.quit_all = true
+        each this.managed as mw : mw.win.quit()
+    }
+
+    /// Opens all queued windows and runs the shared multi-window event loop until all windows close.
+    + fn run() !InitError {
+        sdl.init(sdl.INIT_VIDEO) ! throw .init
+        defer { sdl.quit() }
+
+        let start_ns = sdl.get_ticks_ns()
+        this.drain_pending() ! throw .init
+        if this.managed.length == 0 : return
+
+        while !this.quit_all && this.managed.length > 0 {
+            this.drain_pending() _
+            let now_ns = sdl.get_ticks_ns()
+            let now = (now_ns - start_ns).to(f64) / 1000000000.0
+
+            // Drain SDL events and route each event to its target window by window_id
+            while true {
+                let ev = sdl.poll_event() ?! break
+                this.dispatch_event(ev)
+            }
+            if this.quit_all : break
+
+            let any_changed = false
+            let any_busy = false
+            let next_due = INF
+            let to_close = Array[ManagedWindow]{}
+
+            each this.managed as mw {
+                mw.win.time = now
+                if mw.win.pending_cmds.length > 0 {
+                    apply_window_cmds(mw.win, mw.sdl_win)
+                    mw.need_draw = true
+                }
+                if poll_native_file_dialog() : mw.need_draw = true
+                if mw.win.tick() : mw.need_draw = true
+                if mw.win.title_changed {
+                    mw.sdl_win.set_title(mw.win.title)
+                    mw.win.title_changed = false
+                }
+                let cur_w, cur_h = mw.sdl_win.size()
+                let cur_pw, cur_ph = mw.sdl_win.size_in_pixels()
+                let cx, cy = mw.sdl_win.position()
+                mw.win.x = cx
+                mw.win.y = cy
+                if cur_w > 0 && cur_h > 0 {
+                    let cur_scale = cur_pw > 0 ? (cur_pw.to(f32) / cur_w.to(f32)).max(1.0) : 1.0
+                    if cur_w.to(f32) != mw.win.width || cur_h.to(f32) != mw.win.height || cur_pw != mw.canvas.width || cur_ph != mw.canvas.height {
+                        mw.fonts.set_scale(cur_scale)
+                        let g = mw.gpu
+                        if isset(g) : g.set_scale(cur_scale)
+                        mw.win.resize(cur_w.to(f32), cur_h.to(f32))
+                        mw.canvas.resize(cur_pw > 0 ? cur_pw : cur_w, cur_ph > 0 ? cur_ph : cur_h, cur_scale)
+                        mw.prev_items.clear()
+                        mw.need_draw = true
+                    }
+                }
+                if mw.win.quit_requested {
+                    to_close.append(mw)
+                    continue
+                }
+                if mw.warmup > 0 {
+                    mw.warmup--
+                    mw.need_draw = true
+                }
+                if mw.need_draw || mw.win.frame_requested || mw.win.dirty {
+                    any_changed = true
+                    mw.need_draw = false
+                    mw.win.frame_requested = false
+                    let fstart = sdl.get_ticks_ns()
+                    mw.win.draw()
+                    if mw.win.window_focused : mw.input.set_cursor(mw.win.cursor)
+                    let g = mw.gpu
+                    if isset(g) && g.supports_scene(mw.win.scene) {
+                        g.draw_scene(mw.win, mw.platform)
+                        mw.win.last_frame_ms = (sdl.get_ticks_ns() - fstart).to(f64) / 1000000.0
+                        continue
+                    }
+                    draw_scene(mw.win, mw.platform, mw.canvas)
+                    let cur_t = mw.tex
+                    let recreate = !isset(cur_t) || cur_t.width != mw.canvas.width || cur_t.height != mw.canvas.height
+                    if recreate {
+                        if isset(cur_t) : cur_t.destroy()
+                        let nt = mw.ren.create_texture(sdl.PIXELFORMAT_RGBA32, .streaming, mw.canvas.width, mw.canvas.height) !? null
+                        if isset(nt) {
+                            nt.set_scale_mode(.nearest)
+                            nt.set_blend_mode(sdl.BLENDMODE_NONE)
+                        }
+                        mw.tex = nt
+                    }
+                    let t = mw.tex
+                    if isset(t) {
+                        t.update(mw.canvas.pixels, mw.canvas.width * 4)
+                        mw.ren.render_texture(t)
+                        mw.ren.present()
+                    }
+                    mw.win.last_frame_ms = (sdl.get_ticks_ns() - fstart).to(f64) / 1000000.0
+                }
+                if mw.win.busy() {
+                    any_busy = true
+                    next_due = next_due.min(mw.win.next_due())
+                }
+            }
+
+            each to_close as mw {
+                mw.destroy()
+                this.managed.remove_value(mw)
+                this.windows.remove_value(mw.win)
+            }
+            if this.managed.length == 0 : break
+
+            if !any_changed && this.pending.length == 0 {
+                let ev: ?sdl.Event = null
+                if any_busy {
+                    let wait_ms = ((next_due - now) * 1000.0).to(i32).max(1).min(16)
+                    ev = sdl.wait_event_timeout(wait_ms)
+                } else {
+                    ev = sdl.wait_event()
+                }
+                if isset(ev) : this.dispatch_event(ev)
+            }
+        }
+
+        each this.managed as mw : mw.destroy()
+        this.managed.clear()
+        this.windows.clear()
+    }
+
+    - fn drain_pending() !InitError {
+        while this.pending.length > 0 {
+            let spec = this.pending.get(0) ! break
+            this.pending.remove(0)
+            let mw = create_managed_window(spec.root, spec.options) !>
+            this.managed.append(mw)
+            this.windows.append(mw.win)
+        }
+    }
+
+    - fn find_by_sdl_id(id: u32) ?ManagedWindow {
+        each this.managed as mw {
+            if mw.sdl_id == id : return mw
+        }
+        return null
+    }
+
+    - fn dispatch_event(ev: sdl.Event) {
+        let t = ev.type
+        if t == sdl.EVENT_QUIT {
+            let allow = true
+            each this.managed as mw {
+                if !mw.win.request_close() : allow = false
+            }
+            if allow : this.quit_all = true
+            return
+        }
+        let wid = event_window_id(ev)
+        let target = wid != 0 ? this.find_by_sdl_id(wid) : this.managed.get(0) !? null
+        if !isset(target) : return
+        if t == sdl.EVENT_WINDOW_CLOSE_REQUESTED {
+            target.win.request_close()
+            return
+        }
+        if handle_event(ev, target.win, target.sdl_win, target.input) {
+            target.need_draw = true
+        }
+    }
+}
+
+fn event_window_id(ev: sdl.Event) u32 {
+    let t = ev.type
+    if t >= 0x200 && t < 0x300 : return ev.window().window_id
+    if t == sdl.EVENT_KEY_DOWN || t == sdl.EVENT_KEY_UP : return ev.key().window_id
+    if t == sdl.EVENT_TEXT_INPUT : return ev.text().window_id
+    if t == sdl.EVENT_TEXT_EDITING : return ev.text_editing().window_id
+    if t == sdl.EVENT_MOUSE_MOTION : return ev.motion().window_id
+    if t == sdl.EVENT_MOUSE_BUTTON_DOWN || t == sdl.EVENT_MOUSE_BUTTON_UP : return ev.button().window_id
+    if t == sdl.EVENT_MOUSE_WHEEL : return ev.wheel().window_id
+    if t >= 0x1000 && t <= 0x1003 : return ev.drop().window_id
+    return 0
+}
+
+fn create_managed_window(root: Render, options: WindowOptions) ManagedWindow !InitError {
+    let hidden = options.hidden || isset(env_hidden())
+    let flags: u64 = sdl.WINDOW_HIGH_PIXEL_DENSITY
+    if options.resizable : flags = flags | sdl.WINDOW_RESIZABLE
+    if !options.decorated : flags = flags | sdl.WINDOW_BORDERLESS
+    if options.always_on_top : flags = flags | sdl.WINDOW_ALWAYS_ON_TOP
+    if hidden : flags = flags | sdl.WINDOW_HIDDEN
+
+    let sdl_win = sdl.Window.create(options.title, options.width, options.height, flags) ! throw .init
+    apply_window_icon(sdl_win, options)
+    sdl_win.set_minimum_size(options.min_width, options.min_height)
+    if options.max_width > 0 && options.max_height > 0 : sdl_win.set_maximum_size(options.max_width, options.max_height)
+    let ox = options.x
+    let oy = options.y
+    if isset(ox) && isset(oy) : sdl_win.set_position(ox, oy)
+    if !hidden {
+        if options.fullscreen : sdl_win.set_fullscreen(true)
+        else if options.maximized && options.resizable : sdl_win.maximize()
+        sdl_win.raise()
+    }
+    let ren_opt = sdl.Renderer.create(sdl_win) !? null
+    let ren = ren_opt ?? (sdl.Renderer.create(sdl_win, "software") ! throw .init)
+    if !hidden : ren.set_vsync(1)
+    sdl_win.start_text_input()
+
+    let lw, lh = sdl_win.size()
+    let pw, ph = sdl_win.size_in_pixels()
+    if lw <= 0 : lw = options.width
+    if lh <= 0 : lh = options.height
+    if pw <= 0 : pw = lw
+    if ph <= 0 : ph = lh
+    let scale = (pw.to(f32) / lw.to(f32)).max(1.0)
+    let fonts = Fonts.new(options.fallback_fonts, scale)
+    let platform = SdlPlatform{ fonts: fonts }
+    let canvas = Canvas.new(pw, ph, scale)
+    let ren_driver = ren.name()
+    let want_gpu = (options.renderer == .gpu || isset(env_gpu())) && !isset(env_software())
+    let use_gpu = want_gpu && ren_driver != "software" && ren_driver.length > 0 && !hidden
+    let gpu: ?GpuRenderer = use_gpu ? GpuRenderer.create(ren, scale) : null
+    let win = Window.new(root, lw.to(f32), lh.to(f32), platform, options.theme)
+    win.renderer_name = use_gpu ? "gpu (" + ren_driver + ")" : "software"
+    win.title = options.title
+    win.decorated = options.decorated
+    win.on_close_request = options.on_close_request
+    win.on_window_focus = options.on_window_focus
+    win.on_system_theme_change = options.on_system_theme_change
+    each options.fonts as f : win.fonts.append(f)
+    fonts.window = win
+    return ManagedWindow{
+        sdl_win: sdl_win, sdl_id: sdl_win.id(), ren: ren, gpu: gpu, canvas: canvas,
+        fonts: fonts, platform: platform, win: win, input: SdlInput{},
+        options: options, prev_bg: options.theme.background
+    }
+}

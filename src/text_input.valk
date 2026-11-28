@@ -10,6 +10,8 @@
     + on_submit: ?fn(String)() (null)
     /// Shows dots instead of the text.
     + password: bool (false)
+    /// Disables editing and interaction.
+    + disabled: bool (false)
     /// The text size; the theme's when unset.
     + font_size: ?f32 (null)
     /// The caret position as a byte offset.
@@ -60,12 +62,17 @@
         let focused = fh.is_focused()
         return div().h(round32(this.size * 2.3)).px(10).flex().items_center()
             .bg(theme.surface).border(1).border_color(focused ? theme.accent : theme.border).rounded(theme.radius)
-            .cursor_text()
+            .cursor_text().role(.textbox).aria_label(this.placeholder).disabled(this.disabled)
             .track_focus(fh)
             .on_key_down(fn(e) { this.key(win, e) })
             .on_input(fn(t) { this.insert(t) })
             .child(canvas(fn(p, b) { this.paint(win, p, b) }).flex_1().h_full()
                 .on_mouse_down(fn(e) {
+                    if e.button == .middle {
+                        let sel = win.primary_selection()
+                        if sel.length > 0 : this.insert(sel)
+                        return
+                    }
                     let at = this.index_at(win, e.local_x + this.scroll)
                     if e.click_count == 2 {
                         this.anchor = word_start(this.text, at)
@@ -122,12 +129,29 @@
             let x2 = this.x_of(win, this.anchor.max(this.cursor))
             p.fill(.{ x: x + x1, y: top, w: x2 - x1, h: line }, theme.accent.opacity(focused ? 0.4 : 0.2))
         }
-        if this.text.length == 0 {
+        if this.text.length == 0 && !(focused && win.ime_text.length > 0) {
             if this.placeholder.length > 0 : p.text(b.x, top, this.placeholder, theme.muted, this.size)
         } else {
-            p.text(x, top, this.shown(), theme.text, this.size)
+            let shown = this.shown()
+            if focused && win.ime_text.length > 0 {
+                let ime = win.ime_text
+                let ime_w = win.text_width(ime, this.size)
+                let before = this.password ? "•".repeat(this.text.range(0, this.cursor).utf8.length) : shown.range(0, this.cursor)
+                let after = this.password ? "•".repeat(this.text.range(this.cursor, this.text.length - this.cursor).utf8.length) : shown.range(this.cursor, shown.length - this.cursor)
+                p.text(x, top, before, theme.text, this.size)
+                p.text(x + caret, top, ime, theme.text, this.size)
+                p.fill(.{ x: x + caret, y: top + line - 2, w: ime_w, h: 1.5 }, theme.accent)
+                p.text(x + caret + ime_w, top, after, theme.text, this.size)
+                caret += ime_w
+            } else {
+                p.text(x, top, shown, theme.text, this.size)
+            }
         }
-        if focused : p.fill(.{ x: x + caret, y: top, w: 1.5, h: line }, theme.text)
+        if focused {
+            let caret_b = Bounds{ x: x + caret, y: top, w: 1.5, h: line }
+            p.fill(caret_b, theme.text)
+            win.set_ime_area(caret_b)
+        }
     }
 
     + fn undo() {

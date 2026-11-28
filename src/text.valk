@@ -1,4 +1,6 @@
 
+use image
+
 /// The font a text is drawn with, after inheritance.
 + struct ResolvedFont {
     /// The family name, "" for the built-in Inter.
@@ -15,28 +17,56 @@
 + interface Platform {
     fn text_width(text: String, font: ResolvedFont) f32;
     fn image_size(path: String) Point;
+    fn image_bytes_size(bytes: String) Point;
     fn clipboard() String;
     fn set_clipboard(text: String);
+    fn primary_selection() String;
+    fn set_primary_selection(text: String);
+    fn clipboard_html() String;
+    fn set_clipboard_html(html: String, fallback_text: String);
+    fn clipboard_files() Array[String];
+    fn clipboard_image() ?image.Image;
+    fn set_clipboard_image(img: image.Image) bool;
+    fn has_clipboard_image() bool;
 }
 
 /// Text metrics without a window: every character is half the font size wide.
 + class HeadlessPlatform is Platform {
     - clip: String ("")
+    - primary_clip: String ("")
+    - html_clip: String ("")
+    - img_clip: ?image.Image (null)
+    + clip_files: Array[String] (.{})
     + images: Map[Point] (.{})
 
     + fn text_width(text: String, font: ResolvedFont) f32 {
         return text.utf8.length.to(f32) * font.size * 0.5
     }
     + fn image_size(path: String) Point { return this.images[path] ?? Point{} }
+    + fn image_bytes_size(bytes: String) Point { return Point{} }
     + fn clipboard() String { return this.clip }
     + fn set_clipboard(text: String) { this.clip = text }
+    + fn primary_selection() String { return this.primary_clip }
+    + fn set_primary_selection(text: String) { this.primary_clip = text }
+    + fn clipboard_html() String { return this.html_clip }
+    + fn set_clipboard_html(html: String, fallback_text: String) {
+        this.html_clip = html
+        this.clip = fallback_text
+    }
+    + fn clipboard_files() Array[String] { return this.clip_files }
+    + fn clipboard_image() ?image.Image { return this.img_clip }
+    + fn set_clipboard_image(img: image.Image) bool {
+        this.img_clip = img.clone()
+        return true
+    }
+    + fn has_clipboard_image() bool { return isset(this.img_clip) }
 }
 
 value ELLIPSIS ("…")
 
 /// The lines `content` breaks into at `max_width`. Lines break between words; a word wider
 /// than `max_width` stays whole. `\n` always breaks.
-fn wrap_text(p: Platform, content: String, font: ResolvedFont, max_width: f32, nowrap: bool, ellipsis: bool) Array[String] {
+fn wrap_text(p: Platform, content: String, font: ResolvedFont, max_width: f32, nowrap: bool, ellipsis: bool, line_clamp: uint (0)) Array[String] {
     let lines = Array[String]{}
     if !content.contains("\n") {
         let w = p.text_width(content, font)
@@ -54,7 +84,7 @@ fn wrap_text(p: Platform, content: String, font: ResolvedFont, max_width: f32, n
                 lines.append(para)
             }
         }
-        return lines
+        return clamp_lines(p, lines, font, max_width, line_clamp)
     }
     let space = p.text_width(" ", font)
     each paragraphs as para {
@@ -80,11 +110,25 @@ fn wrap_text(p: Platform, content: String, font: ResolvedFont, max_width: f32, n
         }
         lines.append(line)
     }
-    return lines
+    return clamp_lines(p, lines, font, max_width, line_clamp)
+}
+
+fn clamp_lines(p: Platform, lines: Array[String], font: ResolvedFont, max_width: f32, max_lines: uint) Array[String] {
+    if max_lines == 0 || lines.length <= max_lines : return lines
+    let out = Array[String]{}
+    each 0 .. max_lines - 1 as i : out.append(lines.get(i) !? "")
+    let last = lines.get(max_lines - 1) !? ""
+    let ell_w = p.text_width(ELLIPSIS, font)
+    if p.text_width(last, font) + ell_w <= max_width + 0.01 {
+        out.append(last.trim() + ELLIPSIS)
+    } else {
+        out.append(truncate_text(p, last, font, max_width))
+    }
+    return out
 }
 
 /// The width of the widest line and the number of lines of `wrap_text`, without making the lines.
-fn text_extent(p: Platform, content: String, font: ResolvedFont, max_width: f32, nowrap: bool, ellipsis: bool) (f32, uint) {
+fn text_extent(p: Platform, content: String, font: ResolvedFont, max_width: f32, nowrap: bool, ellipsis: bool, line_clamp: uint (0)) (f32, uint) {
     if !content.contains("\n") {
         let w = p.text_width(content, font)
         if nowrap : return (ellipsis ? w.min(max_width.max(0)) : w, 1)
@@ -96,6 +140,7 @@ fn text_extent(p: Platform, content: String, font: ResolvedFont, max_width: f32,
             widest = widest.max(p.text_width(para, font))
             count++
         }
+        if line_clamp > 0 : count = count.min(line_clamp)
         return (ellipsis ? widest.min(max_width.max(0)) : widest, count)
     }
     let space = p.text_width(" ", font)
@@ -120,6 +165,7 @@ fn text_extent(p: Platform, content: String, font: ResolvedFont, max_width: f32,
         widest = widest.max(line_w)
         count++
     }
+    if line_clamp > 0 && count > line_clamp : count = line_clamp
     return (widest, count)
 }
 

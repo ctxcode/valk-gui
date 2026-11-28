@@ -7,15 +7,17 @@ value EM_SCALE (1.21)
 fn system_fallback_fonts() Array[String] {
     #if OS == "macos"
     return .{ "/System/Library/Fonts/Supplemental/Arial Unicode.ttf", "/System/Library/Fonts/Hiragino Sans GB.ttc",
-        "/System/Library/Fonts/AppleSDGothicNeo.ttc", "/System/Library/Fonts/Apple Symbols.ttf" }
+        "/System/Library/Fonts/AppleSDGothicNeo.ttc", "/System/Library/Fonts/Apple Symbols.ttf",
+        "/System/Library/Fonts/Apple Color Emoji.ttc" }
     #elif OS == "win"
     return .{ "C:/Windows/Fonts/segoeui.ttf", "C:/Windows/Fonts/msyh.ttc", "C:/Windows/Fonts/YuGothM.ttc",
-        "C:/Windows/Fonts/malgun.ttf", "C:/Windows/Fonts/seguisym.ttf" }
+        "C:/Windows/Fonts/malgun.ttf", "C:/Windows/Fonts/seguisym.ttf", "C:/Windows/Fonts/seguiemj.ttf" }
     #else
     return .{ "/usr/share/fonts/TTF/DejaVuSans.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
         "/usr/share/fonts/noto/NotoSans-Regular.ttf", "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
         "/usr/share/fonts/wenquanyi/wqy-microhei/wqy-microhei.ttc",
-        "/usr/share/fonts/noto/NotoSansSymbols2-Regular.ttf", "/usr/share/fonts/truetype/noto/NotoSansSymbols2-Regular.ttf" }
+        "/usr/share/fonts/noto/NotoSansSymbols2-Regular.ttf", "/usr/share/fonts/truetype/noto/NotoSansSymbols2-Regular.ttf",
+        "/usr/share/fonts/noto/NotoColorEmoji.ttf", "/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf" }
     #end
 }
 
@@ -49,19 +51,33 @@ fn glyph_optical_middle(face: Face, codepoint: u32, scale: f32) f32 {
 
 // One font file rasterized lazily at one pixel size.
 class Face {
+    key: u64 (0)
     ttf: TtfFont
     px: f32
     scale: f32
     glyphs: HashMap[u32, RasterGlyph] (.{})
+    ascii: [?RasterGlyph x 128] ({ null ... })
     // The logical size, distance to baseline, and optical center of a capital letter
     size: f32
     baseline: f32
     cap_mid: f32
 
+    fn kern(left_cp: u32, right_cp: u32) f32 {
+        return this.ttf.kern_advance(left_cp, right_cp, this.px)
+    }
+
     fn glyph(cp: u32) RasterGlyph {
+        if cp < 128 {
+            let fast = this.ascii[cp.to(uint)]
+            if isset(fast) : return fast
+            let g = this.ttf.rasterize(cp, this.px)
+            this.ascii[cp.to(uint)] = g
+            return g
+        }
         let cached = this.glyphs.get(cp) !? null
         if isset(cached) : return cached
-        let g = this.ttf.rasterize(cp, this.px)
+        let color_g = this.ttf.rasterize_color_emoji(this.ttf.glyph_index(cp), this.px)
+        let g = isset(color_g) ? color_g : this.ttf.rasterize(cp, this.px)
         this.glyphs.set(cp, g)
         return g
     }
@@ -73,9 +89,13 @@ class Face {
     fn measure(text: String) f32 {
         let total: f32 = 0
         let i: uint = 0
+        let prev_cp: u32 = 0
         while i < text.length {
             let cp, len = decode_utf8(text, i)
             i += len
+            if is_zero_width(cp) || is_combining_mark(cp) : continue
+            if prev_cp != 0 : total += this.kern(prev_cp, cp)
+            prev_cp = cp
             let g = this.glyph(cp)
             total += g.advance
         }
@@ -97,6 +117,7 @@ class Fonts {
     files: Map[String] (.{})
     fallbacks: Array[String] (.{})
     visual: Map[String] (.{})
+    lut_cache: HashMap[u32, [u8 x 256]] (.{})
 
     static fn new(extra_fallbacks: Array[String], scale: f32 (1.0)) Fonts {
         let f = Fonts{ scale: scale.max(1.0) }
@@ -131,7 +152,7 @@ class Fonts {
         let px = round32(font.size * ratio * scale).max(4.0)
         let size = px / scale
         let face = Face{
-            ttf: ttf, px: px, scale: scale,
+            key: key, ttf: ttf, px: px, scale: scale,
             size: size, baseline: size * ascent / ratio, cap_mid: 0
         }
         face.cap_mid = glyph_optical_middle(face, 72, scale)
@@ -184,7 +205,19 @@ class Fonts {
         return primary
     }
 
+    fn text_lut(color: Color) [u8 x 256] {
+        let key: u32 = color.r.to(u32) | (color.g.to(u32) << 8) | (color.b.to(u32) << 16) | (color.a.to(u32) << 24)
+        let cached = this.lut_cache.get(key) !? null
+        if isset(cached) : return cached
+        if this.lut_cache.length >= 64 : this.lut_cache.clear()
+        let lut = build_text_alpha_lut(color)
+        this.lut_cache.set(key, lut)
+        return lut
+    }
+
     fn width(text: String, font: ResolvedFont) f32 {
+        if text.length == 0 : return 0
+        if is_ascii(text) : return this.face(font, 0).measure(text)
         let w: f32 = 0
         each this.runs(text, font) as run : w += run.face.measure(run.text)
         return w
@@ -194,21 +227,51 @@ class Fonts {
         if text.length == 0 || color.a == 0 : return
         let primary = this.face(font, 0)
         let scale = this.scale
-        let lut = build_text_alpha_lut(color)
+        let lut = this.text_lut(color)
         let pos_px = round32(x * scale)
+        if is_ascii(text) {
+            let dy_px = round32(y * scale).to(i32)
+            let i: uint = 0
+            let prev_cp: u32 = 0
+            while i < text.length {
+                let cp = text[i].to(u32)
+                if prev_cp != 0 : pos_px += primary.kern(prev_cp, cp)
+                prev_cp = cp
+                let g = primary.glyph(cp)
+                if g.width > 0 && g.height > 0 {
+                    canvas.blit_glyph(g, round32(pos_px).to(i32) + g.offset_x, dy_px + g.offset_y, color, lut)
+                }
+                pos_px += g.advance
+                i++
+            }
+            return
+        }
         each this.runs(text, font) as run {
             let dy_px = round32((y + primary.baseline - run.face.baseline) * scale).to(i32)
             let i: uint = 0
+            let prev_cp: u32 = 0
+            let last_adv: f32 = 0
             while i < run.text.length {
                 let cp, len = decode_utf8(run.text, i)
                 i += len
+                if is_zero_width(cp) : continue
+                let combining = is_combining_mark(cp)
+                if !combining && prev_cp != 0 : pos_px += run.face.kern(prev_cp, cp)
                 let g = run.face.glyph(cp)
                 if g.width > 0 && g.height > 0 {
-                    let gx = round32(pos_px).to(i32) + g.offset_x
+                    let gx = combining ? round32(pos_px - last_adv * 0.5).to(i32) - g.width / 2 : round32(pos_px).to(i32) + g.offset_x
                     let gy = dy_px + g.offset_y
-                    canvas.blit_glyph(g, gx, gy, color, lut)
+                    if g.is_color {
+                        canvas.blit_color_glyph(g, gx, gy, color.a)
+                    } else {
+                        canvas.blit_glyph(g, gx, gy, color, lut)
+                    }
                 }
-                pos_px += g.advance
+                if !combining {
+                    prev_cp = cp
+                    last_adv = g.advance
+                    pos_px += g.advance
+                }
             }
         }
     }
@@ -221,6 +284,15 @@ class Fonts {
     /// For text made only of symbols, such as "+" or "×": the middle of its ink below the top of
     /// the text, in logical pixels. Symbols sit at different heights, so they center on themselves.
     fn symbol_middle(font: ResolvedFont, text: String) ?f32 {
+        if text.length == 0 : return null
+        // Fast bailout: almost all labels contain ASCII letters/digits
+        let k: uint = 0
+        while k < text.length {
+            let b = text[k].to(u32)
+            if b < 0x80 && b != ' ' && !is_symbol(b) : return null
+            if b >= 0x80 : break
+            k++
+        }
         let primary = this.face(font, 0)
         let scale = this.scale
         let top: f32 = INF
@@ -310,6 +382,16 @@ fn read_u32(d: String, at: uint) u32 {
 }
 fn read_u16(d: String, at: uint) u32 {
     return (d[at].to(u32) << 8) | d[at + 1].to(u32)
+}
+
+fn is_zero_width(cp: u32) bool {
+    return cp == 0x200b || cp == 0x200c || cp == 0x200d || cp == 0xfeff || (cp >= 0xfe00 && cp <= 0xfe0f)
+}
+
+fn is_combining_mark(cp: u32) bool {
+    return (cp >= 0x0300 && cp <= 0x036f) || (cp >= 0x0591 && cp <= 0x05bd) || (cp >= 0x064b && cp <= 0x065f) ||
+        (cp >= 0x1ab0 && cp <= 0x1aff) || (cp >= 0x1dc0 && cp <= 0x1dff) || (cp >= 0x20d0 && cp <= 0x20ff) ||
+        (cp >= 0xfe20 && cp <= 0xfe2f)
 }
 
 fn is_ascii(text: String) bool {

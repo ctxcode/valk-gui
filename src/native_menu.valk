@@ -1,0 +1,215 @@
+// Native macOS application menu bar (NSMenu via Objective-C runtime).
+// On Linux and Windows, `set_app_menu` returns false and `MenuBar` renders in-window.
+
+global native_menu_callbacks: HashMap[int, fn()()] (.{})
+global next_native_menu_id: int (1)
+
+/// Modifier mask values matching macOS NSEventModifierFlags.
+value MAC_MOD_SHIFT (0x00020000)
+value MAC_MOD_CTRL  (0x00040000)
+value MAC_MOD_OPT   (0x00080000)
+value MAC_MOD_CMD   (0x00100000)
+
+/// Parses a human-readable shortcut such as "Cmd+Shift+P" or "Ctrl+S" into a key equivalent
+/// character and macOS NSEventModifierFlags bitmask.
+fn parse_menu_shortcut(shortcut: String) (String, u64) {
+    if shortcut.length == 0 : return ("", 0)
+    let parts = shortcut.lower().replace("+", "-").split("-")
+    let mask: u64 = 0
+    let key = ""
+    each parts as p, i {
+        let part = p.trim()
+        if part.length == 0 : continue
+        if i + 1 < parts.length {
+            if part == "cmd" || part == "command" || part == "super" || part == "secondary" : mask = mask | MAC_MOD_CMD
+            else if part == "ctrl" || part == "control" : mask = mask | MAC_MOD_CTRL
+            else if part == "shift" : mask = mask | MAC_MOD_SHIFT
+            else if part == "alt" || part == "option" || part == "opt" : mask = mask | MAC_MOD_OPT
+        } else {
+            key = part
+        }
+    }
+    if key.length == 1 : return (key, mask)
+    return ("", 0)
+}
+
+#if OS == "macos"
+link "objc"
+
+extern fn objc_getClass(name: cstring) ?ptr;
+extern fn sel_registerName(name: cstring) ?ptr;
+extern fn objc_msgSend() void;
+extern fn objc_allocateClassPair(superclass: ?ptr, name: cstring, extra_bytes: uint) ?ptr;
+extern fn class_addMethod(cls: ?ptr, name: ?ptr, imp: ?ptr, types: cstring) bool;
+extern fn objc_registerClassPair(cls: ?ptr) void;
+
+global mac_menu_target: ?ptr (null)
+
+fn mac_sel(name: String) ?ptr {
+    @unsafe
+    return sel_registerName(name.data_cstring)
+}
+
+fn mac_cls(name: String) ?ptr {
+    @unsafe
+    return objc_getClass(name.data_cstring)
+}
+
+fn msg0(obj: ?ptr, sel: ?ptr) ?ptr {
+    @unsafe
+    let f = objc_msgSend.@cast(fnptr(?ptr, ?ptr)(?ptr))
+    return f(obj, sel)
+}
+
+fn msg1_ptr(obj: ?ptr, sel: ?ptr, a: ?ptr) ?ptr {
+    @unsafe
+    let f = objc_msgSend.@cast(fnptr(?ptr, ?ptr, ?ptr)(?ptr))
+    return f(obj, sel, a)
+}
+
+fn msg1_cstr(obj: ?ptr, sel: ?ptr, a: cstring) ?ptr {
+    @unsafe
+    let f = objc_msgSend.@cast(fnptr(?ptr, ?ptr, cstring)(?ptr))
+    return f(obj, sel, a)
+}
+
+fn msg1_void_ptr(obj: ?ptr, sel: ?ptr, a: ?ptr) {
+    @unsafe
+    let f = objc_msgSend.@cast(fnptr(?ptr, ?ptr, ?ptr)())
+    f(obj, sel, a)
+}
+
+fn msg1_void_i64(obj: ?ptr, sel: ?ptr, a: i64) {
+    @unsafe
+    let f = objc_msgSend.@cast(fnptr(?ptr, ?ptr, i64)())
+    f(obj, sel, a)
+}
+
+fn msg1_void_u64(obj: ?ptr, sel: ?ptr, a: u64) {
+    @unsafe
+    let f = objc_msgSend.@cast(fnptr(?ptr, ?ptr, u64)())
+    f(obj, sel, a)
+}
+
+fn msg1_void_bool(obj: ?ptr, sel: ?ptr, a: bool) {
+    @unsafe
+    let f = objc_msgSend.@cast(fnptr(?ptr, ?ptr, bool)())
+    f(obj, sel, a)
+}
+
+fn msg0_i64(obj: ?ptr, sel: ?ptr) i64 {
+    @unsafe
+    let f = objc_msgSend.@cast(fnptr(?ptr, ?ptr)(i64))
+    return f(obj, sel)
+}
+
+fn msg3_ptr(obj: ?ptr, sel: ?ptr, a: ?ptr, b: ?ptr, c: ?ptr) ?ptr {
+    @unsafe
+    let f = objc_msgSend.@cast(fnptr(?ptr, ?ptr, ?ptr, ?ptr, ?ptr)(?ptr))
+    return f(obj, sel, a, b, c)
+}
+
+fn ns_string(s: String) ?ptr {
+    @unsafe
+    return msg1_cstr(mac_cls("NSString"), mac_sel("stringWithUTF8String:"), s.data_cstring)
+}
+
+fn mac_menu_dispatch(self: ?ptr, _cmd: ?ptr, sender: ?ptr) {
+    if !isset(sender) : return
+    let tag = msg0_i64(sender, mac_sel("tag")).to(int)
+    let cb = native_menu_callbacks.get(tag) ! return
+    cb()
+}
+
+fn ensure_mac_target() ?ptr {
+    if isset(mac_menu_target) : return mac_menu_target
+    let cls = mac_cls("ValkGuiMenuTarget")
+    if !isset(cls) {
+        let base = mac_cls("NSObject")
+        @unsafe
+        cls = objc_allocateClassPair(base, "ValkGuiMenuTarget".data_cstring, 0)
+        if isset(cls) {
+            @unsafe
+            class_addMethod(cls, mac_sel("onMenuItem:"), mac_menu_dispatch.@cast(?ptr), "v@:@".data_cstring)
+            objc_registerClassPair(cls)
+        }
+    }
+    if isset(cls) {
+        mac_menu_target = msg0(msg0(cls, mac_sel("alloc")), mac_sel("init"))
+    }
+    return mac_menu_target
+}
+#end
+
+/// Installs `menus` as the native OS application menu bar (macOS top menu bar).
+/// Returns `true` when installed natively, or `false` on platforms that use an in-window `MenuBar`.
++ fn set_app_menu(menus: Array[AppMenu]) bool {
+    #if OS == "macos"
+    let ns_app = msg0(mac_cls("NSApplication"), mac_sel("sharedApplication"))
+    if !isset(ns_app) : return false
+    let target = ensure_mac_target()
+    native_menu_callbacks.clear()
+    next_native_menu_id = 1
+
+    let main_menu = msg1_ptr(msg0(mac_cls("NSMenu"), mac_sel("alloc")), mac_sel("initWithTitle:"), ns_string(""))
+    let sel_add = mac_sel("addItem:")
+    let sel_sub = mac_sel("setSubmenu:")
+    let sel_alloc = mac_sel("alloc")
+    let sel_init_title = mac_sel("initWithTitle:")
+    let sel_init_item = mac_sel("initWithTitle:action:keyEquivalent:")
+    let sel_sep = mac_sel("separatorItem")
+    let sel_target = mac_sel("setTarget:")
+    let sel_tag = mac_sel("setTag:")
+    let sel_enabled = mac_sel("setEnabled:")
+    let sel_mod = mac_sel("setKeyEquivalentModifierMask:")
+    let sel_action = mac_sel("onMenuItem:")
+    let cls_menu = mac_cls("NSMenu")
+    let cls_item = mac_cls("NSMenuItem")
+
+    // Preserve the macOS application menu (first slot) if one already exists
+    let cur_main = msg0(ns_app, mac_sel("mainMenu"))
+    if isset(cur_main) {
+        let count = msg0_i64(cur_main, mac_sel("numberOfItems"))
+        if count > 0 {
+            let app_item = msg1_ptr(cur_main, mac_sel("itemAtIndex:"), null)
+            if isset(app_item) {
+                msg1_void_ptr(cur_main, mac_sel("removeItemAtIndex:"), null)
+                msg1_void_ptr(main_menu, sel_add, app_item)
+            }
+        }
+    }
+
+    each menus as m {
+        let top_item = msg3_ptr(msg0(cls_item, sel_alloc), sel_init_item, ns_string(m.title), null, ns_string(""))
+        let sub = msg1_ptr(msg0(cls_menu, sel_alloc), sel_init_title, ns_string(m.title))
+        msg1_void_bool(sub, mac_sel("setAutoenablesItems:"), false)
+        each m.items as entry {
+            if entry.separator {
+                msg1_void_ptr(sub, sel_add, msg0(cls_item, sel_sep))
+                continue
+            }
+            let ke, mask = parse_menu_shortcut(entry.shortcut)
+            let mi = msg3_ptr(msg0(cls_item, sel_alloc), sel_init_item, ns_string(entry.label), sel_action, ns_string(ke))
+            if mask != 0 : msg1_void_u64(mi, sel_mod, mask)
+            msg1_void_bool(mi, sel_enabled, !entry.disabled)
+            let act = entry.action
+            if isset(act) && isset(target) {
+                let id = next_native_menu_id
+                next_native_menu_id++
+                native_menu_callbacks.set(id, act)
+                msg1_void_i64(mi, sel_tag, id.to(i64))
+                msg1_void_ptr(mi, sel_target, target)
+            }
+            msg1_void_ptr(sub, sel_add, mi)
+        }
+        msg1_void_ptr(top_item, sel_sub, sub)
+        msg1_void_ptr(main_menu, sel_add, top_item)
+    }
+
+    msg1_void_ptr(ns_app, mac_sel("setMainMenu:"), main_menu)
+    return true
+    #else
+    let _ = menus.length
+    return false
+    #end
+}

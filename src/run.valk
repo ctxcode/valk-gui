@@ -3,6 +3,64 @@ use sdl
 use valk.core
 use valk.fs
 
+extern fn SDL_GetWindowFromID(id: u32) ?ptr;
+extern fn SDL_SetWindowAlwaysOnTop(window: ?ptr, on_top: bool) bool;
+extern fn SDL_GetPrimarySelectionText() ?cstring;
+extern fn SDL_SetPrimarySelectionText(text: ?cstring) bool;
+extern fn SDL_GetClipboardData(mime_type: ?cstring, size: *uint) ?ptr;
+extern fn SDL_HasClipboardData(mime_type: ?cstring) bool;
+extern fn SDL_SetClipboardData(callback: ?fnptr(?ptr, ?cstring, *[uint])(?ptr), cleanup: ?fnptr(?ptr)(), userdata: ?ptr, mime_types: ?*[?cstring], num_mime_types: uint) bool;
+extern fn SDL_SetWindowHitTest(window: ?ptr, callback: ?fnptr(?ptr, *[sdl.Point], ?ptr)(i32), callback_data: ?ptr) bool;
+
+class ClipboardPayload {
+    png: String ("")
+    bmp: String ("")
+    html: String ("")
+    plain: String ("")
+}
+
+global active_clipboard_payload: ?ClipboardPayload (null)
+
+fn sdl_clipboard_data_cb(userdata: ?ptr, mime_type: ?cstring, size: *[uint]) ?ptr {
+    let p = active_clipboard_payload ?! return null
+    let m = isset(mime_type) ? mime_type.to_string() : ""
+    let data = ""
+    if m == "image/png" : data = p.png
+    else if m == "image/bmp" : data = p.bmp
+    else if m == "text/html" : data = p.html
+    else if m == "text/plain" || m == "text/plain;charset=utf-8" : data = p.plain
+    if data.length == 0 : return null
+    @unsafe
+    size[0] = data.length
+    return data.data.@cast(?ptr)
+}
+
+fn sdl_clipboard_cleanup_cb(userdata: ?ptr) {
+    active_clipboard_payload = null
+}
+
+value SDL_EVENT_SYSTEM_THEME_CHANGED (0x105)
+
+global active_hit_test_win: ?Window (null)
+
+fn sdl_window_hit_test_cb(sdl_w: ?ptr, area: *[sdl.Point], data: ?ptr) i32 {
+    let win = active_hit_test_win ?! return 0
+    @unsafe
+    let pt = area[0]
+    return match win.hit_test_region(pt.x.to(f32), pt.y.to(f32)) : i32 {
+        .normal => 0
+        .draggable => 1
+        .resize_top_left => 2
+        .resize_top => 3
+        .resize_top_right => 4
+        .resize_right => 5
+        .resize_bottom_right => 6
+        .resize_bottom => 7
+        .resize_bottom_left => 8
+        .resize_left => 9
+    }
+}
+
 /// Opens a window, shows `root` in it and handles input until the window closes.
 + fn run(root: Render, options: WindowOptions (WindowOptions{})) !InitError {
     sdl.init(sdl.INIT_VIDEO) ! throw .init
@@ -11,19 +69,32 @@ use valk.fs
     let hidden = options.hidden || isset(env_hidden())
     let flags: u64 = sdl.WINDOW_HIGH_PIXEL_DENSITY
     if options.resizable : flags = flags | sdl.WINDOW_RESIZABLE
+    if !options.decorated : flags = flags | sdl.WINDOW_BORDERLESS
+    if options.always_on_top : flags = flags | sdl.WINDOW_ALWAYS_ON_TOP
     if hidden : flags = flags | sdl.WINDOW_HIDDEN
 
     let sdl_win = sdl.Window.create(options.title, options.width, options.height, flags) ! throw .init
-    defer { sdl_win.destroy() }
+    defer {
+        active_sdl_window_ptr = null
+        active_hit_test_win = null
+        sdl_win.destroy()
+    }
 
     apply_window_icon(sdl_win, options)
     sdl_win.set_minimum_size(options.min_width, options.min_height)
+    if options.max_width > 0 && options.max_height > 0 {
+        sdl_win.set_maximum_size(options.max_width, options.max_height)
+    }
 
     if !hidden {
         let disp = sdl_win.display_id()
         if disp == 0 : disp = sdl.get_primary_display()
         let bounds = sdl.get_display_usable_bounds(disp) ?? sdl.get_display_bounds(disp)
-        if !options.maximized && isset(bounds) && bounds.w > 0 && bounds.h > 0 {
+        let opt_x = options.x
+        let opt_y = options.y
+        if isset(opt_x) && isset(opt_y) {
+            sdl_win.set_position(opt_x, opt_y)
+        } else if !options.maximized && isset(bounds) && bounds.w > 0 && bounds.h > 0 {
             let max_w = (bounds.w - 40).max(options.min_width)
             let max_h = (bounds.h - 40).max(options.min_height)
             let clamped_w = options.width.min(max_w)
@@ -35,7 +106,9 @@ use valk.fs
                 sdl_win.set_position(px, py)
             }
         }
-        if options.maximized && options.resizable && !sdl_win.is_maximized() {
+        if options.fullscreen {
+            sdl_win.set_fullscreen(true)
+        } else if options.maximized && options.resizable && !sdl_win.is_maximized() {
             sdl_win.maximize()
         }
         if sdl_win.is_minimized() : sdl_win.restore()
@@ -61,20 +134,50 @@ use valk.fs
     let fonts = Fonts.new(options.fallback_fonts, scale)
     let platform = SdlPlatform{ fonts: fonts }
     let canvas = Canvas.new(pw, ph, scale)
+    let ren_driver = ren.name()
+    let want_gpu = (options.renderer == .gpu || isset(env_gpu())) && !isset(env_software())
+    let use_gpu = want_gpu && ren_driver != "software" && ren_driver.length > 0 && !hidden
+    let gpu: ?GpuRenderer = use_gpu ? GpuRenderer.create(ren, scale) : null
     let tex: ?sdl.Texture = null
     defer {
+        if isset(gpu) : gpu.destroy()
         if isset(tex) : tex.destroy()
         fonts.unload()
         platform.unload()
     }
 
+    let wx, wy = sdl_win.position()
     let win = Window.new(root, lw.to(f32), lh.to(f32), platform, options.theme)
+    win.renderer_name = use_gpu ? "gpu (" + ren_driver + ")" : "software"
     win.title = options.title
+    win.x = wx
+    win.y = wy
+    win.decorated = options.decorated
+    win.min_width = options.min_width
+    win.min_height = options.min_height
+    win.max_width = options.max_width
+    win.max_height = options.max_height
+    win.always_on_top = options.always_on_top
     win.maximized = sdl_win.is_maximized()
-    win.normal_width = options.maximized ? options.width.to(f32) : lw.to(f32)
-    win.normal_height = options.maximized ? options.height.to(f32) : lh.to(f32)
+    win.minimized = sdl_win.is_minimized()
+    win.fullscreen = (sdl_win.flags() & sdl.WINDOW_FULLSCREEN) != 0
+    win.display_id = sdl_win.display_id()
+    win.normal_width = (options.maximized || options.fullscreen) ? options.width.to(f32) : lw.to(f32)
+    win.normal_height = (options.maximized || options.fullscreen) ? options.height.to(f32) : lh.to(f32)
+    win.on_close_request = options.on_close_request
+    win.on_window_focus = options.on_window_focus
+    win.on_system_theme_change = options.on_system_theme_change
+    if isset(env_debug()) : win.debug_overlay = true
+    if isset(env_inspector()) : win.inspector_open = true
     each options.fonts as f : win.fonts.append(f)
     fonts.window = win
+    let raw_win = SDL_GetWindowFromID(sdl_win.id())
+    active_sdl_window_ptr = raw_win
+    if !options.decorated {
+        active_hit_test_win = win
+        @unsafe
+        SDL_SetWindowHitTest(raw_win, sdl_window_hit_test_cb, null)
+    }
 
     let shot: ?String = options.screenshot.length > 0 ? options.screenshot : env_screenshot()
     let shot_after = (core.getenv("VALK_GUI_SCREENSHOT_AFTER") !? "0").to(f64) !? 0
@@ -82,12 +185,15 @@ use valk.fs
     let input = SdlInput{}
     defer { input.destroy() }
 
+    let prev_items = Array[Primitive]{}
+    let prev_bg = win.theme.background
     let warmup_frames: uint = 3
     let running = true
     let need_draw = true
 
     while running && !win.quit_requested {
-        win.time = (sdl.get_ticks_ns() - start_ns).to(f64) / 1000000000.0
+        let frame_start_ns = sdl.get_ticks_ns()
+        win.time = (frame_start_ns - start_ns).to(f64) / 1000000000.0
         let changed = need_draw || warmup_frames > 0 || isset(shot)
         need_draw = false
         if warmup_frames > 0 : warmup_frames--
@@ -99,28 +205,46 @@ use valk.fs
                 changed = true
             }
             if ev.type == sdl.EVENT_QUIT || ev.type == sdl.EVENT_WINDOW_CLOSE_REQUESTED {
-                running = false
+                if win.request_close() {
+                    running = false
+                }
             }
         }
         if !running || win.quit_requested : break
 
-        // Sync logical/physical window size and HiDPI scale
+        // Drain runtime window control commands
+        if win.pending_cmds.length > 0 {
+            apply_window_cmds(win, sdl_win)
+            changed = true
+        }
+        if poll_native_file_dialog() : changed = true
+
+        // Sync logical/physical window size, position and HiDPI scale
         let cur_w, cur_h = sdl_win.size()
         let cur_pw, cur_ph = sdl_win.size_in_pixels()
+        let cur_x, cur_y = sdl_win.position()
+        win.x = cur_x
+        win.y = cur_y
+        win.display_id = sdl_win.display_id()
         if cur_w > 0 && cur_h > 0 {
             let cur_scale = cur_pw > 0 ? (cur_pw.to(f32) / cur_w.to(f32)).max(1.0) : 1.0
             if (cur_scale - canvas.scale).abs() > 0.01 {
                 fonts.set_scale(cur_scale)
+                if isset(gpu) : gpu.set_scale(cur_scale)
+                prev_items.clear()
                 changed = true
             }
             if cur_w.to(f32) != win.width || cur_h.to(f32) != win.height || cur_pw != canvas.width || cur_ph != canvas.height {
                 win.maximized = sdl_win.is_maximized()
+                win.minimized = sdl_win.is_minimized()
+                win.fullscreen = (sdl_win.flags() & sdl.WINDOW_FULLSCREEN) != 0
                 win.resize(cur_w.to(f32), cur_h.to(f32))
-                if !win.maximized {
+                if !win.maximized && !win.fullscreen {
                     win.normal_width = win.width
                     win.normal_height = win.height
                 }
                 canvas.resize(cur_pw > 0 ? cur_pw : cur_w, cur_ph > 0 ? cur_ph : cur_h, cur_scale)
+                prev_items.clear()
                 changed = true
             }
         }
@@ -130,8 +254,15 @@ use valk.fs
             sdl_win.set_title(win.title)
             win.title_changed = false
         }
+        if win.ime_area_changed {
+            let area = win.ime_area
+            if isset(area) {
+                sdl_win.set_text_input_area(.{ x: round32(area.x).to(i32), y: round32(area.y).to(i32), w: round32(area.w).to(i32).max(1), h: round32(area.h).to(i32).max(1) }, 0)
+            }
+            win.ime_area_changed = false
+        }
 
-        if !changed && !win.frame_requested && !win.dirty {
+        if !changed && !win.frame_requested && !win.dirty && !isset(active_file_dialog) {
             // Sleep until input or next timer/task tick
             let ev: ?sdl.Event = null
             if win.busy() {
@@ -143,7 +274,9 @@ use valk.fs
             if isset(ev) {
                 if handle_event(ev, win, sdl_win, input) : need_draw = true
                 if ev.type == sdl.EVENT_QUIT || ev.type == sdl.EVENT_WINDOW_CLOSE_REQUESTED {
-                    running = false
+                    if win.request_close() {
+                        running = false
+                    }
                 }
             }
             continue
@@ -153,7 +286,24 @@ use valk.fs
         win.draw()
         input.set_cursor(win.cursor)
 
-        draw_scene(win, platform, canvas)
+        if isset(gpu) && !isset(shot) && gpu.supports_scene(win.scene) {
+            gpu.draw_scene(win, platform)
+            prev_items.clear()
+            win.last_frame_ms = (sdl.get_ticks_ns() - frame_start_ns).to(f64) / 1000000.0
+            continue
+        }
+
+        let full = Bounds{ x: 0, y: 0, w: win.width, h: win.height }
+        let bg_changed = prev_bg.r != win.theme.background.r || prev_bg.g != win.theme.background.g || prev_bg.b != win.theme.background.b
+        let dirty: ?Bounds = (bg_changed || isset(shot) || !isset(tex) || tex.width != canvas.width || tex.height != canvas.height) ? null : compute_dirty_rect(prev_items, win.scene.items, full)
+        prev_bg = win.theme.background
+
+        let skip_upload = isset(dirty) && (dirty.w <= 0 || dirty.h <= 0)
+        if !skip_upload {
+            draw_scene(win, platform, canvas, dirty)
+            prev_items = Array[Primitive]{}
+            each win.scene.items as it : prev_items.append(it)
+        }
 
         if isset(shot) && win.frames >= 3 && win.time >= shot_after {
             let img = image.Image.from_pixels(canvas.width.to(uint), canvas.height.to(uint), 4, canvas.pixels) !? null
@@ -173,25 +323,78 @@ use valk.fs
             tex = t
         }
         if isset(tex) {
-            tex.update(canvas.pixels, canvas.width * 4)
+            if !skip_upload : tex.update(canvas.pixels, canvas.width * 4)
             ren.render_texture(tex)
             ren.present()
         }
+        win.last_frame_ms = (sdl.get_ticks_ns() - frame_start_ns).to(f64) / 1000000.0
     }
 
     win.maximized = sdl_win.is_maximized()
+    win.minimized = sdl_win.is_minimized()
+    win.fullscreen = (sdl_win.flags() & sdl.WINDOW_FULLSCREEN) != 0
     let on_close = options.on_close
     if isset(on_close) : on_close(win)
 }
 
+fn apply_window_cmds(win: Window, sdl_win: sdl.Window) {
+    each win.pending_cmds as cmd {
+        match cmd.kind {
+            .set_fullscreen => sdl_win.set_fullscreen(cmd.flag)
+            .maximize => sdl_win.maximize()
+            .unmaximize => sdl_win.restore()
+            .minimize => sdl_win.minimize()
+            .restore => sdl_win.restore()
+            .raise => sdl_win.raise()
+            .focus => sdl_win.raise()
+            .set_size => sdl_win.set_size(cmd.a, cmd.b)
+            .set_position => sdl_win.set_position(cmd.a, cmd.b)
+            .set_min_size => sdl_win.set_minimum_size(cmd.a, cmd.b)
+            .set_max_size => sdl_win.set_maximum_size(cmd.a, cmd.b)
+            .set_always_on_top => {
+                @unsafe
+                SDL_SetWindowAlwaysOnTop(SDL_GetWindowFromID(sdl_win.id()), cmd.flag)
+            }
+        }
+    }
+    win.pending_cmds.clear()
+}
+
 fn handle_event(ev: sdl.Event, win: Window, sdl_win: sdl.Window, input: SdlInput) bool {
     let t = ev.type
+    if t == SDL_EVENT_SYSTEM_THEME_CHANGED {
+        let cb = win.on_system_theme_change
+        if isset(cb) : cb(system_theme())
+        return true
+    }
+    if t == sdl.EVENT_WINDOW_FOCUS_GAINED {
+        win.set_window_focused(true)
+        return true
+    }
+    if t == sdl.EVENT_WINDOW_FOCUS_LOST {
+        win.set_window_focused(false)
+        return true
+    }
+    if t == sdl.EVENT_WINDOW_MOVED {
+        let we = ev.window()
+        win.x = we.data1
+        win.y = we.data2
+        return false
+    }
+    if t == sdl.EVENT_WINDOW_MINIMIZED {
+        win.minimized = true
+        return false
+    }
     if t == sdl.EVENT_WINDOW_EXPOSED || t == sdl.EVENT_WINDOW_SHOWN || t == sdl.EVENT_WINDOW_RESIZED || t == sdl.EVENT_WINDOW_PIXEL_SIZE_CHANGED || t == sdl.EVENT_WINDOW_DISPLAY_SCALE_CHANGED {
         win.maximized = sdl_win.is_maximized()
+        win.minimized = sdl_win.is_minimized()
+        win.fullscreen = (sdl_win.flags() & sdl.WINDOW_FULLSCREEN) != 0
         return true
     }
     if t == sdl.EVENT_WINDOW_MAXIMIZED || t == sdl.EVENT_WINDOW_RESTORED {
         win.maximized = sdl_win.is_maximized()
+        win.minimized = sdl_win.is_minimized()
+        win.fullscreen = (sdl_win.flags() & sdl.WINDOW_FULLSCREEN) != 0
         return true
     }
     if t == sdl.EVENT_WINDOW_MOUSE_LEAVE {
@@ -208,8 +411,7 @@ fn handle_event(ev: sdl.Event, win: Window, sdl_win: sdl.Window, input: SdlInput
         let m = ev.motion()
         input.last_x = m.x
         input.last_y = m.y
-        win.mouse_move(m.x, m.y, sdl_modifiers(sdl.get_mod_state()))
-        return true
+        return win.mouse_move(m.x, m.y, sdl_modifiers(sdl.get_mod_state()))
     }
     if t == sdl.EVENT_MOUSE_BUTTON_DOWN {
         let b = ev.button()
@@ -237,7 +439,12 @@ fn handle_event(ev: sdl.Event, win: Window, sdl_win: sdl.Window, input: SdlInput
         let w = ev.wheel()
         let mods = sdl_modifiers(sdl.get_mod_state())
         let flip: f32 = w.direction == sdl.MOUSEWHEEL_FLIPPED ? -1.0 : 1.0
-        let dx = -w.x * flip * 40.0
+        if mods.ctrl && w.y != 0 {
+            let scale: f32 = w.y * flip > 0 ? 1.1 : 0.9
+            win.pinch(win.mouse_x, win.mouse_y, scale, mods)
+            return true
+        }
+        let dx = w.x * flip * 40.0
         let dy = -w.y * flip * 40.0
         if mods.shift && dx == 0 {
             dx = dy
@@ -259,11 +466,21 @@ fn handle_event(ev: sdl.Event, win: Window, sdl_win: sdl.Window, input: SdlInput
     if t == sdl.EVENT_KEY_UP {
         let k = ev.key()
         let mods = sdl_modifiers(k.mod)
+        let key = sdl_key_from_code(k.key)
+        if key != .unknown {
+            win.key_up(key, mods)
+            return true
+        }
         if mods.shift != input.last_mods.shift || mods.ctrl != input.last_mods.ctrl || mods.alt != input.last_mods.alt || mods.cmd != input.last_mods.cmd {
             input.last_mods = mods
             return true
         }
         return false
+    }
+    if t == sdl.EVENT_TEXT_EDITING {
+        let te = ev.text_editing()
+        win.ime_edit(te.text, te.start, te.length)
+        return true
     }
     if t == sdl.EVENT_TEXT_INPUT {
         let txt = ev.text().text
@@ -320,10 +537,38 @@ fn env_hidden() ?String {
     if value == "" : return null
     return value
 }
+fn env_debug() ?String {
+    let value = core.getenv("VALK_GUI_DEBUG") ! return null
+    if value == "" || value == "0" : return null
+    return value
+}
+fn env_inspector() ?String {
+    let value = core.getenv("VALK_GUI_INSPECTOR") ! return null
+    if value == "" || value == "0" : return null
+    return value
+}
+fn env_software() ?String {
+    let value = core.getenv("VALK_GUI_SOFTWARE") ! return null
+    if value == "" || value == "0" : return null
+    return value
+}
+fn env_gpu() ?String {
+    let value = core.getenv("VALK_GUI_GPU") ! return null
+    if value == "" || value == "0" : return null
+    return value
+}
+
+class CachedImage {
+    img: ?image.Image
+    used: uint (0)
+}
 
 class SdlPlatform is Platform {
     fonts: Fonts
-    images: Map[?image.Image] (.{})
+    images: Map[CachedImage] (.{})
+    use_tick: uint (0)
+    max_images: uint (128)
+    html_clip: String ("")
 
     fn text_width(text: String, font: ResolvedFont) f32 { return this.fonts.width(text, font) }
 
@@ -333,18 +578,154 @@ class SdlPlatform is Platform {
         return .{}
     }
 
+    fn image_bytes_size(bytes: String) Point {
+        let img = this.load_image_bytes(bytes)
+        if isset(img) : return .{ x: img.width.to(f32), y: img.height.to(f32) }
+        return .{}
+    }
+
     fn clipboard() String { return sdl.get_clipboard_text() }
     fn set_clipboard(text: String) { sdl.set_clipboard_text(text) }
 
+    fn primary_selection() String {
+        let p = SDL_GetPrimarySelectionText()
+        if !isset(p) : return ""
+        let s = p.to_string()
+        @unsafe
+        SDL_free(p.@cast(ptr))
+        return s
+    }
+
+    fn set_primary_selection(text: String) {
+        @unsafe
+        SDL_SetPrimarySelectionText(text.data_cstring)
+    }
+
+    fn clipboard_html() String {
+        let size: uint = 0
+        @unsafe
+        let data = SDL_GetClipboardData("text/html".data_cstring, &size)
+        if isset(data) && size > 0 {
+            let s = ptr_to_string(data, size)
+            @unsafe
+            SDL_free(data)
+            return s
+        }
+        return this.html_clip
+    }
+
+    fn set_clipboard_html(html: String, fallback_text: String) {
+        this.html_clip = html
+        let plain = fallback_text.length > 0 ? fallback_text : html
+        active_clipboard_payload = ClipboardPayload{ html: html, plain: plain }
+        let mimes = [?cstring x 3]{ null, null, null }
+        @unsafe
+        mimes[0] = "text/html".data_cstring
+        @unsafe
+        mimes[1] = "text/plain;charset=utf-8".data_cstring
+        @unsafe
+        mimes[2] = "text/plain".data_cstring
+        @unsafe
+        if !SDL_SetClipboardData(sdl_clipboard_data_cb, sdl_clipboard_cleanup_cb, null, (&mimes).@cast(*[?cstring]), 3) {
+            sdl.set_clipboard_text(plain)
+        }
+    }
+
+    fn clipboard_files() Array[String] {
+        let out = Array[String]{}
+        let size: uint = 0
+        @unsafe
+        let data = SDL_GetClipboardData("text/uri-list".data_cstring, &size)
+        if isset(data) && size > 0 {
+            let raw = ptr_to_string(data, size)
+            @unsafe
+            SDL_free(data)
+            each raw.split("\n") as line {
+                let t = line.trim()
+                if t.starts_with("file://") : out.append(t.range(7, t.length - 7))
+            }
+        }
+        return out
+    }
+
+    fn has_clipboard_image() bool {
+        each Array[String]{ "image/png", "image/bmp", "image/jpeg", "image/webp", "image/gif" } as mime {
+            @unsafe
+            if SDL_HasClipboardData(mime.data_cstring) : return true
+        }
+        return false
+    }
+
+    fn clipboard_image() ?image.Image {
+        each Array[String]{ "image/png", "image/bmp", "image/jpeg", "image/webp", "image/gif" } as mime {
+            let size: uint = 0
+            @unsafe
+            let data = SDL_GetClipboardData(mime.data_cstring, &size)
+            if isset(data) && size > 0 {
+                let raw = ptr_to_string(data, size)
+                @unsafe
+                SDL_free(data)
+                let decoded = image.decode(raw) !? null
+                if isset(decoded) : return decoded.to_rgba()
+            }
+        }
+        return null
+    }
+
+    fn set_clipboard_image(img: image.Image) bool {
+        if img.width == 0 || img.height == 0 : return false
+        let png = img.encode_png()
+        let bmp = img.encode_bmp()
+        active_clipboard_payload = ClipboardPayload{ png: png, bmp: bmp }
+        let mimes = [?cstring x 2]{ null, null }
+        @unsafe
+        mimes[0] = "image/png".data_cstring
+        @unsafe
+        mimes[1] = "image/bmp".data_cstring
+        @unsafe
+        return SDL_SetClipboardData(sdl_clipboard_data_cb, sdl_clipboard_cleanup_cb, null, (&mimes).@cast(*[?cstring]), 2)
+    }
+
+    fn evict_lru() {
+        if this.images.length < this.max_images : return
+        let oldest_key = ""
+        let oldest_tick: uint = this.use_tick + 1
+        each this.images as entry, k {
+            if entry.used < oldest_tick {
+                oldest_tick = entry.used
+                oldest_key = k
+            }
+        }
+        if oldest_key.length > 0 : this.images.remove(oldest_key)
+    }
+
     fn load_image(path: String) ?image.Image {
         if path.length == 0 : return null
+        this.use_tick++
         let cached = this.images.get(path) ! {
+            this.evict_lru()
             let decoded = image.read(path) !? null
             let rgba: ?image.Image = isset(decoded) ? decoded.to_rgba() : null
-            this.images.set(path, rgba)
+            this.images.set(path, CachedImage{ img: rgba, used: this.use_tick })
             return rgba
         }
-        return cached
+        cached.used = this.use_tick
+        return cached.img
+    }
+
+    fn load_image_bytes(bytes: String) ?image.Image {
+        if bytes.length == 0 : return null
+        this.use_tick++
+        let key = "bytes:%{bytes.hash()}:%{bytes.length}"
+        let cached = this.images.get(key) ! {
+            this.evict_lru()
+            let decoded = image.decode(bytes) !? null
+            let rgba: ?image.Image = isset(decoded) ? decoded.to_rgba() : null
+            this.images.set(key, CachedImage{ img: rgba, used: this.use_tick })
+            return rgba
+        }
+        cached.used = this.use_tick
+        return cached.img
     }
 
     fn unload() {
@@ -377,7 +758,13 @@ class SdlInput {
             .not_allowed => .not_allowed
             .resize_ew => .ew_resize
             .resize_ns => .ns_resize
-            .move => .move
+            .resize_nesw => .nesw_resize
+            .resize_nwse => .nwse_resize
+            .move, .grab, .grabbing => .move
+            .wait => .wait
+            .progress => .progress
+            .help => .default_
+            .zoom_in, .zoom_out => .crosshair
         }
         let c = sdl.Cursor.system(sys) ! return
         this.cursors.set(id, c)
@@ -388,6 +775,18 @@ class SdlInput {
         each this.cursors as c : c.destroy()
         this.cursors.clear()
     }
+}
+
+fn ptr_to_string(data: ptr, size: uint) String {
+    let buf = ByteBuffer.new(size)
+    @unsafe
+    let bytes = data.@cast(*[u8])
+    let i: uint = 0
+    while i < size {
+        buf.write_byte(bytes[i])
+        i++
+    }
+    return buf.to_string()
 }
 
 fn sdl_modifiers(mod: u16) Modifiers {
@@ -403,6 +802,8 @@ fn sdl_mouse_button(b: u8) ?MouseButton {
     if b == sdl.BUTTON_LEFT : return .left
     if b == sdl.BUTTON_RIGHT : return .right
     if b == sdl.BUTTON_MIDDLE : return .middle
+    if b == sdl.BUTTON_X1 : return .back
+    if b == sdl.BUTTON_X2 : return .forward
     return null
 }
 

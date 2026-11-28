@@ -1,0 +1,107 @@
+use image
+use sdl
+use valk.fs
+
+// Cross-platform system tray / status bar icon backed by SDL3's native Tray API.
+
+extern fn SDL_CreateTray(icon: ?ptr, tooltip: ?cstring) ?ptr;
+extern fn SDL_SetTrayIcon(tray: ?ptr, icon: ?ptr) void;
+extern fn SDL_SetTrayTooltip(tray: ?ptr, tooltip: ?cstring) void;
+extern fn SDL_CreateTrayMenu(tray: ?ptr) ?ptr;
+extern fn SDL_InsertTrayEntryAt(menu: ?ptr, pos: i32, label: ?cstring, flags: u32) ?ptr;
+extern fn SDL_SetTrayEntryCallback(entry: ?ptr, callback: ?fnptr(?ptr, ?ptr)(), userdata: ?ptr) void;
+extern fn SDL_DestroyTray(tray: ?ptr) void;
+extern fn SDL_CreateSurfaceFrom(width: i32, height: i32, format: u32, pixels: ?ptr, pitch: i32) ?ptr;
+extern fn SDL_DestroySurface(surface: ?ptr) void;
+
+value SDL_TRAYENTRY_BUTTON (0x00000001)
+value SDL_TRAYENTRY_CHECKBOX (0x00000002)
+value SDL_TRAYENTRY_DISABLED (0x80000000)
+
+global tray_callbacks: HashMap[uint, fn()()] (.{})
+global next_tray_cb_id: uint (0)
+
+fn sdl_tray_entry_cb(userdata: ?ptr, entry: ?ptr) {
+    if !isset(userdata) : return
+    let id = userdata.@cast(uint)
+    let cb = tray_callbacks.get(id) ! return
+    cb()
+}
+
+/// A native OS system tray / status bar icon with a popup menu.
++ class TrayIcon {
+    handle: ?ptr (null)
+    menu_handle: ?ptr (null)
+    cb_ids: Array[uint] (.{})
+    ~+ tooltip: String ("")
+
+    /// Creates a system tray icon with optional `tooltip` and optional icon file path or PNG bytes.
+    + static fn create(tooltip: String (""), icon_path: String (""), icon_png: String ("")) ?TrayIcon {
+        let surf: ?ptr = null
+        let decoded: ?image.Image = null
+        if icon_path.length > 0 && fs.is_file(icon_path) {
+            decoded = image.read(icon_path) !? null
+        } else if icon_png.length > 0 {
+            decoded = image.decode(icon_png) !? null
+        }
+        let rgba: ?image.Image = isset(decoded) ? decoded.to_rgba() : null
+        if isset(rgba) && rgba.width > 0 && rgba.height > 0 {
+            @unsafe
+            surf = SDL_CreateSurfaceFrom(rgba.width.to(i32), rgba.height.to(i32), sdl.PIXELFORMAT_RGBA32, rgba.pixels.data, (rgba.width * 4).to(i32))
+        }
+        let tip: ?cstring = null
+        @unsafe
+        if tooltip.length > 0 : tip = tooltip.data_cstring
+        @unsafe
+        let h = SDL_CreateTray(surf, tip)
+        @unsafe
+        if isset(surf) : SDL_DestroySurface(surf)
+        if !isset(h) : return null
+        @unsafe
+        let m = SDL_CreateTrayMenu(h)
+        return TrayIcon{ handle: h, menu_handle: m, tooltip: tooltip }
+    }
+
+    /// Updates the tray icon's hover tooltip.
+    + fn set_tooltip(text: String) {
+        this.tooltip = text
+        let h = this.handle ?! return
+        @unsafe
+        SDL_SetTrayTooltip(h, text.data_cstring)
+    }
+
+    /// Adds a clickable menu item to the tray popup menu.
+    + fn add_item(label: String, on_click: fn()(), disabled: bool (false)) {
+        let m = this.menu_handle ?! return
+        let flags: u32 = SDL_TRAYENTRY_BUTTON | (disabled ? SDL_TRAYENTRY_DISABLED : 0)
+        @unsafe
+        let entry = SDL_InsertTrayEntryAt(m, -1, label.data_cstring, flags)
+        if !isset(entry) : return
+        next_tray_cb_id++
+        let id = next_tray_cb_id
+        tray_callbacks.set(id, on_click)
+        this.cb_ids.append(id)
+        @unsafe
+        SDL_SetTrayEntryCallback(entry, sdl_tray_entry_cb, id.@cast(?ptr))
+    }
+
+    /// Adds a visual separator line to the tray popup menu.
+    + fn add_separator() {
+        let m = this.menu_handle ?! return
+        @unsafe
+        SDL_InsertTrayEntryAt(m, -1, null, 0)
+    }
+
+    /// Removes the tray icon from the system tray and frees its resources.
+    + fn destroy() {
+        let h = this.handle
+        if isset(h) {
+            @unsafe
+            SDL_DestroyTray(h)
+            this.handle = null
+            this.menu_handle = null
+        }
+        each this.cb_ids as id : tray_callbacks.remove(id)
+        this.cb_ids.clear()
+    }
+}

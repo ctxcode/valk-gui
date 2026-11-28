@@ -1,0 +1,162 @@
+use gui
+
+class WidgetShowcase is gui.Render {
+    theme_idx: uint (0)
+    page: uint (1)
+    seg: uint (0)
+    crumb_idx: uint (2)
+    split: gui.SplitPane (gui.SplitPane.horizontal(0.28))
+    toasts: gui.ToastStack (gui.ToastStack{})
+    palette: gui.CommandPalette (gui.CommandPalette{})
+    table: gui.Table (gui.Table{})
+    tree: gui.TreeView (gui.TreeView{})
+    combo: gui.Combobox (gui.Combobox.new(.{ "Valk", "Rust", "Zig", "Go", "TypeScript", "Python" }))
+    multi: gui.MultiSelect (gui.MultiSelect.new(.{ "Linux", "macOS", "Windows", "Wayland", "X11" }))
+    num: gui.NumberInput (gui.NumberInput.new(42, 0, 100, 1))
+    details: gui.Collapsible (gui.Collapsible.new("Advanced Options", true))
+    popover: gui.Popover (gui.Popover{})
+    picker: gui.ColorPicker (gui.ColorPicker{})
+    date: gui.DatePicker (gui.DatePicker.new(2026, 11, 28))
+    menubar: gui.MenuBar (gui.MenuBar{})
+    ready: bool (false)
+
+    fn init(win: gui.Window) {
+        if this.ready : return
+        this.ready = true
+        win.bind("secondary-shift-p", "palette") _
+
+        this.palette.items = .{
+            gui.CommandItem.new("Switch to Dark Theme", fn() { this.apply_theme(win, 0) }).with_category("Theme").with_icon(.moon),
+            gui.CommandItem.new("Switch to Light Theme", fn() { this.apply_theme(win, 1) }).with_category("Theme").with_icon(.sun),
+            gui.CommandItem.new("Switch to Nord Theme", fn() { this.apply_theme(win, 2) }).with_category("Theme").with_icon(.palette),
+            gui.CommandItem.new("Switch to Dracula Theme", fn() { this.apply_theme(win, 3) }).with_category("Theme").with_icon(.palette),
+            gui.CommandItem.new("Switch to Catppuccin Theme", fn() { this.apply_theme(win, 4) }).with_category("Theme").with_icon(.palette),
+            gui.CommandItem.new("Show Success Toast", fn() { this.toasts.push(win, "Build succeeded", .success, 3.0, "0 warnings, 84 tests passed.") }).with_category("Demo").with_icon(.check_circle),
+            gui.CommandItem.new("Toggle Debug Overlay", fn() { win.debug_overlay = !win.debug_overlay }).with_category("Dev").with_icon(.bug)
+        }
+
+        this.menubar = gui.MenuBar.new(.{
+            gui.AppMenu.new("File", .{
+                gui.MenuItem.new("Command Palette…", fn() { this.palette.show(win) }).with_icon(.search).with_shortcut(win.shortcut("palette")),
+                gui.MenuItem.line(),
+                gui.MenuItem.new("Quit", fn() { win.quit() }).with_icon(.log_out).as_danger()
+            }),
+            gui.AppMenu.new("Theme", .{
+                gui.MenuItem.new("Dark", fn() { this.apply_theme(win, 0) }),
+                gui.MenuItem.new("Light", fn() { this.apply_theme(win, 1) }),
+                gui.MenuItem.new("Nord", fn() { this.apply_theme(win, 2) }),
+                gui.MenuItem.new("Dracula", fn() { this.apply_theme(win, 3) }),
+                gui.MenuItem.new("Catppuccin", fn() { this.apply_theme(win, 4) }),
+                gui.MenuItem.new("High Contrast", fn() { this.apply_theme(win, 5) })
+            }),
+            gui.AppMenu.new("Help", .{
+                gui.MenuItem.new("Toggle Inspector", fn() { win.debug_overlay = !win.debug_overlay }).with_icon(.bug)
+            })
+        })
+
+        let src_dir = gui.TreeNode.new("src", "src", .folder)
+            .add(gui.TreeNode.new("window", "window.valk", .file_code))
+            .add(gui.TreeNode.new("widgets", "widgets_extra.valk", .file_code))
+            .add(gui.TreeNode.new("svg", "svg.valk", .file_image))
+        src_dir.expanded = true
+        let docs_dir = gui.TreeNode.new("docs", "docs", .folder)
+            .add(gui.TreeNode.new("theming", "theming.md", .file_text))
+        this.tree.roots = .{ src_dir, docs_dir }
+
+        this.table.columns = .{
+            gui.TableColumn.new("widget", "Widget", 150),
+            gui.TableColumn.new("category", "Category", 120),
+            gui.TableColumn.new("status", "Status", 90)
+        }
+        this.table.rows = .{
+            .{ "SplitPane", "Layout", "Ready" },
+            .{ "Table", "Data", "Ready" },
+            .{ "TreeView", "Navigation", "Ready" },
+            .{ "CommandPalette", "Overlay", "Ready" },
+            .{ "ToastStack", "Feedback", "Ready" },
+            .{ "Combobox", "Input", "Ready" },
+            .{ "MultiSelect", "Input", "Ready" },
+            .{ "ColorPicker", "Input", "Ready" },
+            .{ "DatePicker", "Input", "Ready" },
+            .{ "Markdown", "Rich Text", "Ready" }
+        }
+    }
+
+    fn apply_theme(win: gui.Window, idx: uint) {
+        this.theme_idx = idx
+        win.theme = match idx : gui.Theme {
+            1 => gui.Theme.light()
+            2 => gui.Theme.nord()
+            3 => gui.Theme.dracula()
+            4 => gui.Theme.catppuccin()
+            5 => gui.Theme.high_contrast()
+            default => gui.Theme.dark()
+        }
+    }
+
+    fn render(win: gui.Window) gui.Div {
+        this.init(win)
+        let t = win.theme
+        let sample_md = "## Markdown & Rich Text\n\nSupports **bold**, *italic*, `inline code`, ~~strike~~, and [links](https://valk-lang.dev).\n\n- Crisp pure-Valk SVG icons\n- Sortable virtualized data tables\n\n```valk\nfn greet(name: String) {\n    println(\"Hello, \" + name)\n}\n```"
+        let sample_svg = "<svg viewBox=\"0 0 24 24\"><circle cx=\"12\" cy=\"12\" r=\"9\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\"/><path d=\"M8 12 L11 15 L16 9\" fill=\"none\" stroke=\"#22c55e\" stroke-width=\"2\"/></svg>"
+
+        let sidebar = gui.div().size_full().p(10).gap(10).bg(t.surface)
+            .child(gui.div().text_xs().font_semibold().text_color(t.muted).child("EXPLORER"))
+            .child(this.tree.render(win).flex_1())
+            .child(gui.divider(win))
+            .child(gui.div().flex().gap(6).flex_wrap()
+                .child(gui.icon(.git_branch, 16).text_color(t.accent))
+                .child(gui.icon(.git_merge, 16).text_color(t.success))
+                .child(gui.icon(.git_pull_request, 16).text_color(t.info))
+                .child(gui.icon(.git_commit, 16).text_color(t.warning))
+                .child(gui.icon(.repo, 16).text_color(t.muted))
+                .child(gui.icon(.rocket, 16).text_color(t.danger))
+                .child(gui.svg_bytes(sample_svg, 18).text_color(t.text)))
+
+        let content = gui.div().size_full().p(16).gap(14).overflow_y_scroll().scrollbar_gutter()
+            .child(gui.div().flex().items_center().justify_between().gap(10)
+                .child(gui.breadcrumbs(win, .{ "Workspace", "valk-gui", "Widgets" }, fn(i) { this.crumb_idx = i }))
+                .child(gui.div().flex().items_center().gap(8)
+                    .child(gui.segmented(win, "mode", .{ "Overview", "Pickers", "Markdown" }, this.seg, fn(i) { this.seg = i }))
+                    .child(gui.button_primary(win, "Notify", .bell).on_click(fn(e) {
+                        this.toasts.push(win, "Hello from ToastStack", .info, 3.0, "Click to dismiss or wait 3 seconds.")
+                    }))
+                    .child(gui.button(win, "Palette", .search).on_click(fn(e) { this.palette.show(win) }))))
+            .when(this.seg == 0, fn(d) {
+                d.child(gui.div().flex().flex_wrap().gap(12).items_start()
+                    .child(this.combo.render(win))
+                    .child(this.multi.render(win))
+                    .child(this.num.render(win))
+                    .child(this.popover.render(win,
+                        gui.button(win, "Popover", .info),
+                        gui.div().w(200).gap(4)
+                            .child(gui.div().font_semibold().child("Anchored Popover"))
+                            .child(gui.div().text_xs().text_color(t.muted).child("Press Escape or click outside to close.")))))
+                .child(this.details.render(win, fn() gui.Div {
+                    return gui.div().flex().items_center().gap(12)
+                        .child(gui.pagination(win, this.page, 8, fn(p) { this.page = p }))
+                        .child(gui.skeleton(win, 100, 14))
+                }))
+                .child(this.table.render(win).h(260))
+            })
+            .when(this.seg == 1, fn(d) {
+                d.child(gui.div().flex().flex_wrap().gap(16).items_start()
+                    .child(this.picker.render(win))
+                    .child(this.date.render(win)))
+            })
+            .when(this.seg == 2, fn(d) {
+                d.child(gui.card(win).child(gui.markdown(win, sample_md)))
+            })
+
+        return gui.div().size_full().flex_col().bg(t.background)
+            .on_action("palette", fn() { this.palette.show(win) })
+            .child(this.menubar.render(win))
+            .child(this.split.render(win, sidebar, content).flex_1())
+            .child(this.toasts.render(win))
+            .child(this.palette.render(win))
+    }
+}
+
+fn main() {
+    gui.run(WidgetShowcase{}, .{ title: "valk-gui Widget Showcase", width: 1024, height: 680 }) ! print("Could not open window\n")
+}

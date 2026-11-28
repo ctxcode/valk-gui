@@ -1,0 +1,557 @@
+use image
+use sdl
+use valk.math
+
+// Hardware-accelerated SDL3 2D GPU renderer backend (Vulkan / Metal / D3D11 / D3D12 / OpenGL)
+// with a shelf-packed GPU glyph atlas, LRU GPU image texture cache, and tessellated SDF-quality
+// vector geometry. Automatically falls back to the pure-Valk software rasterizer on GPU-less VMs
+// or for pixel-readback effects like `backdrop_blur`.
+
+/// Selects which rendering backend `run()` uses.
++ enum RendererMode {
+    /// Uses the analytical SDF software rasterizer with dirty-rect partial redraws for crisp
+    /// subpixel anti-aliasing on all shapes, icons, shadows, gradients, and text.
+    auto
+    /// Uses the experimental SDL3 2D geometry GPU backend (faster full-frame fills, but lacks
+    /// SDF anti-aliasing on curved geometry and falls back to software on GPU-less VMs).
+    gpu
+    /// Always uses the pure-Valk CPU software rasterizer.
+    software
+}
+
+struct AtlasSlot {
+    x: i32 (0)
+    y: i32 (0)
+    w: i32 (0)
+    h: i32 (0)
+    u0: f32 (0)
+    v0: f32 (0)
+    u1: f32 (0)
+    v1: f32 (0)
+}
+
+/// Pure shelf-packer for a 2D GPU texture atlas (testable headlessly).
+class AtlasPacker {
+    width: i32 (1024)
+    height: i32 (1024)
+    cursor_x: i32 (1)
+    cursor_y: i32 (1)
+    row_h: i32 (0)
+
+    fn reset() {
+        this.cursor_x = 1
+        this.cursor_y = 1
+        this.row_h = 0
+    }
+
+    fn alloc(w: i32, h: i32) ?AtlasSlot {
+        if w <= 0 || h <= 0 || w + 2 > this.width || h + 2 > this.height : return null
+        if this.cursor_x + w + 1 > this.width {
+            this.cursor_x = 1
+            this.cursor_y += this.row_h + 1
+            this.row_h = 0
+        }
+        if this.cursor_y + h + 1 > this.height : return null
+        let x = this.cursor_x
+        let y = this.cursor_y
+        this.cursor_x += w + 1
+        if h > this.row_h : this.row_h = h
+        let fw = this.width.to(f32)
+        let fh = this.height.to(f32)
+        return AtlasSlot{
+            x: x, y: y, w: w, h: h,
+            u0: x.to(f32) / fw, v0: y.to(f32) / fh,
+            u1: (x + w).to(f32) / fw, v1: (y + h).to(f32) / fh
+        }
+    }
+}
+
+class GpuTexEntry {
+    tex: sdl.Texture
+    w: i32
+    h: i32
+    used: uint (0)
+}
+
+/// Hardware-accelerated SDL3 renderer with GPU glyph atlas and LRU image texture cache.
+class GpuRenderer {
+    ren: sdl.Renderer
+    scale: f32 (1.0)
+    atlas_tex: ?sdl.Texture (null)
+    packer: AtlasPacker (AtlasPacker{})
+    glyph_slots: HashMap[u64, AtlasSlot] (.{})
+    img_cache: Map[GpuTexEntry] (.{})
+    use_tick: uint (0)
+    max_textures: uint (128)
+    verts: Array[sdl.Vertex] (.{})
+    indices: Array[i32] (.{})
+
+    static fn create(ren: sdl.Renderer, scale: f32) GpuRenderer {
+        return GpuRenderer{ ren: ren, scale: scale.max(1.0) }
+    }
+
+    fn set_scale(scale: f32) {
+        let s = scale.max(1.0)
+        if (s - this.scale).abs() > 0.01 {
+            this.scale = s
+            this.clear_glyph_atlas()
+        }
+    }
+
+    fn clear_glyph_atlas() {
+        this.glyph_slots.clear()
+        this.packer.reset()
+    }
+
+    fn ensure_atlas() ?sdl.Texture {
+        if isset(this.atlas_tex) : return this.atlas_tex
+        let t = this.ren.create_texture(sdl.PIXELFORMAT_RGBA32, .static_, this.packer.width, this.packer.height) !? null
+        if isset(t) {
+            t.set_blend_mode(sdl.BLENDMODE_BLEND)
+            t.set_scale_mode(.nearest)
+            this.atlas_tex = t
+        }
+        return t
+    }
+
+    fn glyph_slot(face: Face, cp: u32, g: RasterGlyph) ?AtlasSlot {
+        let key = (face.key * 1099511628211) ^ cp.to(u64)
+        let cached = this.glyph_slots.get(key) !? null
+        if isset(cached) : return cached
+        let atlas = this.ensure_atlas() ?! return null
+        let slot = this.packer.alloc(g.width, g.height)
+        if !isset(slot) {
+            this.clear_glyph_atlas()
+            slot = this.packer.alloc(g.width, g.height)
+        }
+        let s = slot ?! return null
+        if g.is_color && g.rgba.length >= (g.width * g.height * 4).to(uint) {
+            atlas.update(g.rgba, g.width * 4, sdl.Rect{ x: s.x, y: s.y, w: g.width, h: g.height })
+            this.glyph_slots.set(key, s)
+            return s
+        }
+        // Upload white RGB + alpha coverage so vertex color modulation tints crisply on GPU
+        let count = (g.width * g.height).to(uint)
+        let rgba = [u8]{ 0 x (count * 4) }
+        let i: uint = 0
+        while i < count {
+            let a = g.bitmap[i]
+            let o = i * 4
+            rgba[o] = 255
+            rgba[o + 1] = 255
+            rgba[o + 2] = 255
+            rgba[o + 3] = a
+            i++
+        }
+        atlas.update(rgba, g.width * 4, sdl.Rect{ x: s.x, y: s.y, w: g.width, h: g.height })
+        this.glyph_slots.set(key, s)
+        return s
+    }
+
+    fn upload_image(key: String, img: image.Image) ?GpuTexEntry {
+        this.use_tick++
+        let cached = this.img_cache.get(key) !? null
+        if isset(cached) {
+            cached.used = this.use_tick
+            return cached
+        }
+        if this.img_cache.length >= this.max_textures {
+            let oldest_k = ""
+            let oldest_t: uint = this.use_tick + 1
+            each this.img_cache as entry, k {
+                if entry.used < oldest_t {
+                    oldest_t = entry.used
+                    oldest_k = k
+                }
+            }
+            if oldest_k.length > 0 {
+                let victim = this.img_cache.get(oldest_k) !? null
+                if isset(victim) : victim.tex.destroy()
+                this.img_cache.remove(oldest_k)
+            }
+        }
+        let rgba = img.to_rgba()
+        let w = rgba.width.to(i32)
+        let h = rgba.height.to(i32)
+        if w <= 0 || h <= 0 : return null
+        let t = this.ren.create_texture(sdl.PIXELFORMAT_RGBA32, .static_, w, h) !? null
+        if !isset(t) : return null
+        t.set_blend_mode(sdl.BLENDMODE_BLEND)
+        t.set_scale_mode(.linear)
+        t.update(rgba.pixels, w * 4)
+        let entry = GpuTexEntry{ tex: t, w: w, h: h, used: this.use_tick }
+        this.img_cache.set(key, entry)
+        return entry
+    }
+
+    /// Returns whether every primitive in `scene` can be rendered directly on the GPU.
+    /// Complex pixel-readback or shader-only effects (such as `backdrop_blur` or conic gradients)
+    /// transparently fall back to the software rasterizer for that frame.
+    fn supports_scene(scene: Scene) bool {
+        each scene.items as item {
+            if item.kind == .blur : return false
+            if item.kind == .quad {
+                if item.border_style != .solid : return false
+                if item.rotate_deg != 0 : return false
+                if item.gradient && (item.gradient_kind != .linear || isset(item.gradient_stops)) : return false
+            }
+            if item.kind == .image && !item.corners.is_zero() : return false
+        }
+        return true
+    }
+
+    fn draw_scene(win: Window, p: SdlPlatform) {
+        let bg = win.theme.background
+        this.ren.set_clip_rect(null)
+        this.ren.set_draw_blend_mode(sdl.BLENDMODE_BLEND)
+        this.ren.set_draw_color(bg.r, bg.g, bg.b, 255)
+        this.ren.clear()
+
+        let s = this.scale
+        each win.scene.items as item {
+            match item.kind {
+                .quad => this.draw_quad(item)
+                .shadow => this.draw_shadow(item)
+                .text => this.draw_text(item, p.fonts)
+                .image => this.draw_image_item(item, p)
+                .line => this.draw_line(item.points[0], item.points[1], item.width, item.color)
+                .arc => this.draw_arc(item.bounds.x, item.bounds.y, item.bounds.w, item.points[0].x, item.points[0].y, item.width, item.color)
+                .circle => this.draw_rounded_fill(item.bounds, Corners.all(item.radius), item.color)
+                .ring => this.draw_rounded_border(item.bounds, Corners.all(item.radius), item.width, item.color)
+                .triangle => this.draw_triangle(item.points[0], item.points[1], item.points[2], item.color)
+                .clip => {
+                    let x0 = floor32(item.bounds.x * s).to(i32).max(0)
+                    let y0 = floor32(item.bounds.y * s).to(i32).max(0)
+                    let x1 = ceil32((item.bounds.x + item.bounds.w) * s).to(i32).max(x0)
+                    let y1 = ceil32((item.bounds.y + item.bounds.h) * s).to(i32).max(y0)
+                    this.ren.set_clip_rect(sdl.Rect{ x: x0, y: y0, w: x1 - x0, h: y1 - y0 })
+                }
+                .unclip => this.ren.set_clip_rect(null)
+                default => {}
+            }
+        }
+        this.ren.set_clip_rect(null)
+        this.ren.present()
+    }
+
+    - fn draw_quad(item: Primitive) {
+        let b = item.bounds
+        if b.w <= 0 || b.h <= 0 : return
+        let s = this.scale
+        if item.gradient {
+            this.draw_linear_gradient(b, item.color, item.color2, item.angle)
+        } else if !item.color.is_transparent() {
+            if item.corners.is_zero() {
+                this.ren.set_draw_color(item.color.r, item.color.g, item.color.b, item.color.a)
+                this.ren.fill_rect(.{ x: b.x * s, y: b.y * s, w: b.w * s, h: b.h * s })
+            } else {
+                this.draw_rounded_fill(b, item.corners, item.color)
+            }
+        }
+        let border = item.border
+        let ct = item.border_color_top ?? item.border_color
+        let cr = item.border_color_right ?? item.border_color
+        let cb = item.border_color_bottom ?? item.border_color
+        let cl = item.border_color_left ?? item.border_color
+        let per_side = isset(item.border_color_top) || isset(item.border_color_right) || isset(item.border_color_bottom) || isset(item.border_color_left)
+        if !border.is_zero() {
+            if !item.corners.is_zero() && border.is_uniform() && !per_side && !item.border_color.is_transparent() {
+                this.draw_rounded_border(b, item.corners, border.top, item.border_color)
+            } else {
+                if border.top > 0 && !ct.is_transparent() {
+                    this.ren.set_draw_color(ct.r, ct.g, ct.b, ct.a)
+                    this.ren.fill_rect(.{ x: b.x * s, y: b.y * s, w: b.w * s, h: border.top * s })
+                }
+                if border.bottom > 0 && !cb.is_transparent() {
+                    this.ren.set_draw_color(cb.r, cb.g, cb.b, cb.a)
+                    this.ren.fill_rect(.{ x: b.x * s, y: (b.bottom - border.bottom) * s, w: b.w * s, h: border.bottom * s })
+                }
+                if border.left > 0 && !cl.is_transparent() {
+                    this.ren.set_draw_color(cl.r, cl.g, cl.b, cl.a)
+                    this.ren.fill_rect(.{ x: b.x * s, y: (b.y + border.top) * s, w: border.left * s, h: (b.h - border.top - border.bottom).max(0) * s })
+                }
+                if border.right > 0 && !cr.is_transparent() {
+                    this.ren.set_draw_color(cr.r, cr.g, cr.b, cr.a)
+                    this.ren.fill_rect(.{ x: (b.right - border.right) * s, y: (b.y + border.top) * s, w: border.right * s, h: (b.h - border.top - border.bottom).max(0) * s })
+                }
+            }
+        }
+    }
+
+    - fn draw_shadow(item: Primitive) {
+        if item.color.is_transparent() : return
+        let layers: uint = 4
+        let blur = item.width.max(1)
+        each 0 .. layers as i {
+            let t = (i + 1).to(f32) / layers.to(f32)
+            let grow = blur * t * 0.75
+            let a = (1.0 - t * 0.75) * 0.45
+            this.draw_rounded_fill(item.bounds.grow(grow), item.corners.grow(grow), item.color.fade(a))
+        }
+    }
+
+    - fn draw_linear_gradient(b: Bounds, from: Color, to: Color, angle: f32) {
+        let s = this.scale
+        let x0 = b.x * s; let y0 = b.y * s; let x1 = b.right * s; let y1 = b.bottom * s
+        let rad = angle * 0.017453292
+        let dx = sin32(rad); let dy = -cos32(rad)
+        let hw = (x1 - x0) * 0.5; let hh = (y1 - y0) * 0.5
+        let ext = ((hw * dx).abs() + (hh * dy).abs()).max(0.001)
+        let corner_col = fn(px: f32, py: f32) sdl.FColor {
+            let t = clamp32((px * dx + py * dy) / ext * 0.5 + 0.5, 0, 1)
+            return to_fcolor(from.mix(to, t))
+        }
+        let v = Array[sdl.Vertex]{
+            .{ position: .{ x: x0, y: y0 }, color: corner_col(-hw, -hh) },
+            .{ position: .{ x: x1, y: y0 }, color: corner_col(hw, -hh) },
+            .{ position: .{ x: x1, y: y1 }, color: corner_col(hw, hh) },
+            .{ position: .{ x: x0, y: y1 }, color: corner_col(-hw, hh) }
+        }
+        let idx = Array[i32]{ 0, 1, 2, 0, 2, 3 }
+        this.ren.geometry(v, idx, null)
+    }
+
+    - fn draw_rounded_fill(b: Bounds, corners: Corners, color: Color) {
+        if color.is_transparent() || b.w <= 0 || b.h <= 0 : return
+        let pts = rounded_rect_outline(b, corners, this.scale)
+        if pts.length < 3 : return
+        let fc = to_fcolor(color)
+        this.verts.clear()
+        this.indices.clear()
+        let cx = (b.x + b.w * 0.5) * this.scale
+        let cy = (b.y + b.h * 0.5) * this.scale
+        this.verts.append(.{ position: .{ x: cx, y: cy }, color: fc })
+        each pts as pt : this.verts.append(.{ position: .{ x: pt.x, y: pt.y }, color: fc })
+        let n = pts.length.to(i32)
+        let i: i32 = 0
+        while i < n {
+            this.indices.append(0)
+            this.indices.append(1 + i)
+            this.indices.append(1 + ((i + 1) % n))
+            i++
+        }
+        this.ren.geometry(this.verts, this.indices, null)
+    }
+
+    - fn draw_rounded_border(b: Bounds, corners: Corners, thickness: f32, color: Color) {
+        if color.is_transparent() || thickness <= 0 || b.w <= 0 || b.h <= 0 : return
+        let outer = rounded_rect_outline(b, corners, this.scale)
+        let inner_b = b.inset(Edges.all(thickness))
+        let ic = Corners{
+            top_left: (corners.top_left - thickness).max(0),
+            top_right: (corners.top_right - thickness).max(0),
+            bottom_right: (corners.bottom_right - thickness).max(0),
+            bottom_left: (corners.bottom_left - thickness).max(0)
+        }
+        let inner = rounded_rect_outline(inner_b, ic, this.scale)
+        if outer.length < 3 || outer.length != inner.length : return
+        let fc = to_fcolor(color)
+        this.verts.clear()
+        this.indices.clear()
+        let n = outer.length.to(i32)
+        each 0 .. outer.length as k {
+            let op = outer.get(k) !!
+            let ip = inner.get(k) !!
+            this.verts.append(.{ position: .{ x: op.x, y: op.y }, color: fc })
+            this.verts.append(.{ position: .{ x: ip.x, y: ip.y }, color: fc })
+        }
+        let i: i32 = 0
+        while i < n {
+            let next = (i + 1) % n
+            let o0 = i * 2; let i0 = o0 + 1
+            let o1 = next * 2; let i1 = o1 + 1
+            this.indices.append(o0); this.indices.append(o1); this.indices.append(i1)
+            this.indices.append(o0); this.indices.append(i1); this.indices.append(i0)
+            i++
+        }
+        this.ren.geometry(this.verts, this.indices, null)
+    }
+
+    - fn draw_line(a: Point, b: Point, width: f32, color: Color) {
+        if color.is_transparent() || width <= 0 : return
+        let s = this.scale
+        let ax = a.x * s; let ay = a.y * s; let bx = b.x * s; let by = b.y * s
+        let dx = bx - ax; let dy = by - ay
+        let len = math.sqrt((dx * dx + dy * dy).to(f64)).to(f32)
+        if len < 0.001 : return
+        let hw = width * s * 0.5
+        let nx = -dy / len * hw
+        let ny = dx / len * hw
+        let fc = to_fcolor(color)
+        let v = Array[sdl.Vertex]{
+            .{ position: .{ x: ax + nx, y: ay + ny }, color: fc },
+            .{ position: .{ x: bx + nx, y: by + ny }, color: fc },
+            .{ position: .{ x: bx - nx, y: by - ny }, color: fc },
+            .{ position: .{ x: ax - nx, y: ay - ny }, color: fc }
+        }
+        this.ren.geometry(v, Array[i32]{ 0, 1, 2, 0, 2, 3 }, null)
+    }
+
+    - fn draw_arc(cx: f32, cy: f32, radius: f32, start_deg: f32, end_deg: f32, width: f32, color: Color) {
+        if color.is_transparent() || width <= 0 || radius <= 0 : return
+        let span = (end_deg - start_deg).abs()
+        if span < 0.1 : return
+        let segs = (span / 8.0).to(uint).max(6).min(64)
+        let s = this.scale
+        let cxp = cx * s; let cyp = cy * s
+        let r_in = (radius - width * 0.5).max(0) * s
+        let r_out = (radius + width * 0.5) * s
+        let fc = to_fcolor(color)
+        this.verts.clear()
+        this.indices.clear()
+        each 0 .. segs + 1 as i {
+            let deg = start_deg + (end_deg - start_deg) * (i.to(f32) / segs.to(f32))
+            let rad = deg * 0.017453292
+            let cs = cos32(rad); let sn = sin32(rad)
+            this.verts.append(.{ position: .{ x: cxp + cs * r_out, y: cyp + sn * r_out }, color: fc })
+            this.verts.append(.{ position: .{ x: cxp + cs * r_in, y: cyp + sn * r_in }, color: fc })
+        }
+        each 0 .. segs as i {
+            let b0 = (i * 2).to(i32)
+            this.indices.append(b0); this.indices.append(b0 + 2); this.indices.append(b0 + 3)
+            this.indices.append(b0); this.indices.append(b0 + 3); this.indices.append(b0 + 1)
+        }
+        this.ren.geometry(this.verts, this.indices, null)
+    }
+
+    - fn draw_triangle(a: Point, b: Point, c: Point, color: Color) {
+        if color.is_transparent() : return
+        let s = this.scale
+        let fc = to_fcolor(color)
+        let v = Array[sdl.Vertex]{
+            .{ position: .{ x: a.x * s, y: a.y * s }, color: fc },
+            .{ position: .{ x: b.x * s, y: b.y * s }, color: fc },
+            .{ position: .{ x: c.x * s, y: c.y * s }, color: fc }
+        }
+        this.ren.geometry(v, Array[i32]{ 0, 1, 2 }, null)
+    }
+
+    - fn draw_image_item(item: Primitive, p: SdlPlatform) {
+        let img = item.image_obj
+        let key = item.text
+        if !isset(img) {
+            let bytes = item.image_bytes
+            if isset(bytes) {
+                img = p.load_image_bytes(bytes)
+                key = "bytes:%{bytes.hash()}:%{bytes.length}"
+            } else {
+                img = p.load_image(item.text)
+            }
+        }
+        if !isset(img) : return
+        if key.length == 0 : key = "img:%{img.width}x%{img.height}:%{img.pixels.length}"
+        let entry = this.upload_image(key, img) ?! return
+        let tw = entry.w.to(f32); let th = entry.h.to(f32)
+        let b = item.bounds
+        let sx: f32 = 0; let sy: f32 = 0; let sw = tw; let sh = th
+        let dest = b
+        if item.fit == .contain {
+            let sc = (b.w / tw).min(b.h / th)
+            dest = .{ x: b.x + (b.w - tw * sc) / 2, y: b.y + (b.h - th * sc) / 2, w: tw * sc, h: th * sc }
+        } else if item.fit == .cover {
+            let sc = (b.w / tw).max(b.h / th)
+            sw = b.w / sc; sh = b.h / sc
+            sx = (tw - sw) / 2; sy = (th - sh) / 2
+        }
+        let s = this.scale
+        this.ren.render_texture(entry.tex, sdl.FRect{ x: sx, y: sy, w: sw, h: sh }, sdl.FRect{ x: dest.x * s, y: dest.y * s, w: dest.w * s, h: dest.h * s })
+    }
+
+    - fn draw_text(item: Primitive, fonts: Fonts) {
+        if item.text.length == 0 || item.color.is_transparent() : return
+        let s = this.scale
+        let x = round32(item.bounds.x * s) / s
+        let middle = (item.center_symbols ? fonts.symbol_middle(item.font, item.text) : null) ?? fonts.cap_middle(item.font)
+        let y = floor32((item.bounds.y + item.font.line_height / 2 - middle) * s + 0.499) / s
+        let primary = fonts.face(item.font, 0)
+        let atlas = this.ensure_atlas() ?! return
+        let fc = to_fcolor(item.color)
+        this.verts.clear()
+        this.indices.clear()
+        let pos_px = round32(x * s)
+        each fonts.runs(item.text, item.font) as run {
+            let dy_px = round32((y + primary.baseline - run.face.baseline) * s)
+            let i: uint = 0
+            let prev_cp: u32 = 0
+            let last_adv: f32 = 0
+            while i < run.text.length {
+                let cp, len = decode_utf8(run.text, i)
+                i += len
+                if is_zero_width(cp) : continue
+                let combining = is_combining_mark(cp)
+                if !combining && prev_cp != 0 : pos_px += run.face.kern(prev_cp, cp)
+                let g = run.face.glyph(cp)
+                if g.width > 0 && g.height > 0 {
+                    let slot = this.glyph_slot(run.face, cp, g)
+                    if isset(slot) {
+                        let gx = combining ? round32(pos_px - last_adv * 0.5) - g.width.to(f32) * 0.5 : round32(pos_px) + g.offset_x.to(f32)
+                        let gy = dy_px + g.offset_y.to(f32)
+                        let gw = g.width.to(f32)
+                        let gh = g.height.to(f32)
+                        let vc = g.is_color ? sdl.FColor{ r: 1, g: 1, b: 1, a: fc.a } : fc
+                        let base = this.verts.length.to(i32)
+                        this.verts.append(.{ position: .{ x: gx, y: gy }, color: vc, tex_coord: .{ x: slot.u0, y: slot.v0 } })
+                        this.verts.append(.{ position: .{ x: gx + gw, y: gy }, color: vc, tex_coord: .{ x: slot.u1, y: slot.v0 } })
+                        this.verts.append(.{ position: .{ x: gx + gw, y: gy + gh }, color: vc, tex_coord: .{ x: slot.u1, y: slot.v1 } })
+                        this.verts.append(.{ position: .{ x: gx, y: gy + gh }, color: vc, tex_coord: .{ x: slot.u0, y: slot.v1 } })
+                        this.indices.append(base); this.indices.append(base + 1); this.indices.append(base + 2)
+                        this.indices.append(base); this.indices.append(base + 2); this.indices.append(base + 3)
+                    }
+                }
+                if !combining {
+                    prev_cp = cp
+                    last_adv = g.advance
+                    pos_px += g.advance
+                }
+            }
+        }
+        if this.verts.length > 0 {
+            this.ren.geometry(this.verts, this.indices, atlas)
+        }
+    }
+
+    fn destroy() {
+        let a = this.atlas_tex
+        if isset(a) {
+            a.destroy()
+            this.atlas_tex = null
+        }
+        each this.img_cache as entry : entry.tex.destroy()
+        this.img_cache.clear()
+        this.glyph_slots.clear()
+    }
+}
+
+fn to_fcolor(c: Color) sdl.FColor {
+    return .{ r: c.r.to(f32) / 255.0, g: c.g.to(f32) / 255.0, b: c.b.to(f32) / 255.0, a: c.a.to(f32) / 255.0 }
+}
+
+/// Tessellates a rounded rectangle perimeter in physical pixels (5 segments per corner).
+fn rounded_rect_outline(b: Bounds, corners: Corners, scale: f32) Array[Point] {
+    let pts = Array[Point]{}
+    let x0 = b.x * scale; let y0 = b.y * scale
+    let x1 = b.right * scale; let y1 = b.bottom * scale
+    let max_r = ((x1 - x0) * 0.5).min((y1 - y0) * 0.5).max(0)
+    let rtl = (corners.top_left * scale).min(max_r)
+    let rtr = (corners.top_right * scale).min(max_r)
+    let rbr = (corners.bottom_right * scale).min(max_r)
+    let rbl = (corners.bottom_left * scale).min(max_r)
+    let segs: uint = 5
+    // Top-right corner (-90..0 deg)
+    append_corner_arc(pts, x1 - rtr, y0 + rtr, rtr, -1.5707963, 0.0, segs)
+    // Bottom-right corner (0..90 deg)
+    append_corner_arc(pts, x1 - rbr, y1 - rbr, rbr, 0.0, 1.5707963, segs)
+    // Bottom-left corner (90..180 deg)
+    append_corner_arc(pts, x0 + rbl, y1 - rbl, rbl, 1.5707963, 3.14159265, segs)
+    // Top-left corner (180..270 deg)
+    append_corner_arc(pts, x0 + rtl, y0 + rtl, rtl, 3.14159265, 4.71238898, segs)
+    return pts
+}
+
+fn append_corner_arc(pts: Array[Point], cx: f32, cy: f32, r: f32, a0: f32, a1: f32, segs: uint) {
+    each 0 .. segs + 1 as i {
+        let t = i.to(f32) / segs.to(f32)
+        let a = a0 + (a1 - a0) * t
+        pts.append(.{ x: cx + cos32(a) * r, y: cy + sin32(a) * r })
+    }
+}

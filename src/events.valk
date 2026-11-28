@@ -1,5 +1,53 @@
 
-+ enum MouseButton { left, right, middle }
++ enum MouseButton { left, right, middle, back, forward }
+
+/// The OS color scheme preference.
++ enum SystemTheme { unknown, light, dark }
+
+/// Information about a connected monitor / display.
++ struct DisplayInfo {
+    + id: u32 (0)
+    + name: String ("")
+    + bounds: Bounds (.{})
+    + usable_bounds: Bounds (.{})
+    + scale: f32 (1)
+    + primary: bool (false)
+}
+
+/// A trackpad or touch pinch-to-zoom gesture.
++ class PinchEvent {
+    + x: f32
+    + y: f32
+    /// Cumulative or step scale factor (> 1 zooms in, < 1 zooms out).
+    + scale: f32 (1)
+    + modifiers: Modifiers (.{})
+    + bounds: Bounds (.{})
+    ~+ stopped: bool (false)
+
+    + fn stop_propagation() { this.stopped = true }
+}
+
+/// Semantic accessibility role for screen readers and testing.
++ enum Role {
+    none, button, checkbox, radio, switch_, slider, textbox
+    combobox, listbox, option, menu, menuitem, tab, tablist
+    dialog, alert, heading, link, list, listitem, tree, treeitem
+    table, row, cell, img, progressbar, region, navigation, main, status
+}
+
+/// A node in the window's accessibility tree.
++ struct AccessibleNode {
+    + id: String ("")
+    + role: Role (.none)
+    + label: String ("")
+    + bounds: Bounds (.{})
+    + disabled: bool (false)
+    + focused: bool (false)
+    + checked: ?bool (null)
+    + expanded: ?bool (null)
+    + selected: ?bool (null)
+    + value: ?f32 (null)
+}
 
 /// A key on the keyboard, independent of the layout's characters. Typed text arrives
 /// through `on_input` instead.
@@ -81,8 +129,8 @@
 + class FocusHandle {
     window: Window
 
-    + fn focus() { this.window.focused = this }
-    + fn blur() { if this.is_focused() : this.window.focused = null }
+    + fn focus() { this.window.set_focus(this, false) }
+    + fn blur() { if this.is_focused() : this.window.set_focus(null, false) }
     + fn is_focused() bool {
         let f = this.window.focused ?! return false
         return f == this

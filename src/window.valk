@@ -1,4 +1,6 @@
 
+use image
+
 /// A font file for a family used with `Styled.font`.
 + struct FontFile {
     + name: String
@@ -11,13 +13,29 @@
     + title: String ("Valk")
     + width: i32 (800)
     + height: i32 (600)
+    /// Initial window X position on screen, or null for the OS default.
+    + x: ?i32 (null)
+    /// Initial window Y position on screen, or null for the OS default.
+    + y: ?i32 (null)
     + min_width: i32 (200)
     + min_height: i32 (150)
+    /// Maximum window width (0 means unlimited).
+    + max_width: i32 (0)
+    /// Maximum window height (0 means unlimited).
+    + max_height: i32 (0)
     + resizable: bool (true)
+    /// Whether the OS window has standard titlebar and border decorations.
+    + decorated: bool (true)
+    /// Keeps the window above other windows.
+    + always_on_top: bool (false)
     /// Opens the window maximized.
     + maximized: bool (false)
+    /// Opens the window in fullscreen mode.
+    + fullscreen: bool (false)
     /// Smooths the edges of shapes.
     + antialias: bool (true)
+    /// Rendering backend selection (`auto`, `gpu`, or `software`).
+    + renderer: RendererMode (.auto)
     + theme: Theme (Theme.dark())
     + fonts: Array[FontFile] (.{})
     /// Font files tried, before the system's, for characters the fonts in use lack (such as
@@ -31,8 +49,36 @@
     + screenshot: String ("")
     /// Opens the window hidden.
     + hidden: bool (false)
+    /// Called when the user attempts to close the window; return `false` to cancel closing.
+    + on_close_request: ?fn(Window)(bool) (null)
     /// Called right before the window closes, while its size and `maximized` state are still valid.
     + on_close: ?fn(Window)() (null)
+    /// Called when the OS window gains (`true`) or loses (`false`) focus.
+    + on_window_focus: ?fn(bool)() (null)
+    /// Called when the OS color scheme switches between light and dark.
+    + on_system_theme_change: ?fn(SystemTheme)() (null)
+}
+
+enum WindowCmdKind {
+    set_fullscreen, maximize, unmaximize, minimize, restore, raise, focus
+    set_size, set_position, set_min_size, set_max_size, set_always_on_top
+}
+
+struct WindowCmd {
+    kind: WindowCmdKind
+    flag: bool (false)
+    a: i32 (0)
+    b: i32 (0)
+}
+
+/// Hit-test result for custom frameless windows.
++ enum HitTestRegion { normal, draggable, resize_top_left, resize_top, resize_top_right, resize_right, resize_bottom_right, resize_bottom, resize_bottom_left, resize_left }
+
+struct ColorTransition {
+    from: Color
+    to: Color
+    start: f64
+    seconds: f64
 }
 
 /// A window and everything that lives across frames: focus, hover, scroll positions and
@@ -48,6 +94,8 @@
     ~+ time: f64 (0)
     ~+ mouse_x: f32 (-1)
     ~+ mouse_y: f32 (-1)
+    ~+ x: i32 (0)
+    ~+ y: i32 (0)
     ~+ title: String ("Valk")
     ~+ focused: ?FocusHandle (null)
     ~+ cursor: Cursor (.default)
@@ -60,9 +108,44 @@
     ~+ frames: uint (0)
     /// Whether the OS window is currently maximized.
     ~+ maximized: bool (false)
+    /// Whether the OS window is currently minimized.
+    ~+ minimized: bool (false)
+    /// Whether the OS window is currently in fullscreen mode.
+    ~+ fullscreen: bool (false)
+    /// Whether the OS window is pinned always on top.
+    ~+ always_on_top: bool (false)
+    /// Whether the OS window currently has focus.
+    ~+ window_focused: bool (true)
     /// The last non-maximized window size, useful for saving window state on close.
     ~+ normal_width: f32 (0)
     ~+ normal_height: f32 (0)
+    /// Enables smooth animated wheel scrolling.
+    + smooth_scroll: bool (false)
+    /// Displays FPS, frame time, primitive count and layout bounds overlay.
+    + debug_overlay: bool (false)
+    /// Opens the interactive layout & style inspector overlay (toggle with F12).
+    + inspector_open: bool (false)
+    inspected_key: u64 (0)
+    /// Active rendering backend name (e.g. `"gpu (vulkan)"`, `"gpu (metal)"`, `"software"`).
+    ~+ renderer_name: String ("headless")
+    ~+ last_frame_ms: f64 (0)
+    /// Active IME composition pre-edit text.
+    ~+ ime_text: String ("")
+    ~+ ime_start: i32 (0)
+    ~+ ime_length: i32 (0)
+    ime_area: ?Bounds (null)
+    ime_area_changed: bool (false)
+    /// Screen-reader announcements recorded via `announce()`.
+    ~+ announcements: Array[String] (.{})
+    /// Automatically announces newly focused semantic elements via `announce()`.
+    + a11y_announce_focus: bool (false)
+    /// Called whenever the accessibility tree changes.
+    + on_a11y_update: ?fn(Array[AccessibleNode])() (null)
+    last_a11y_sig: String ("")
+    last_a11y_focus: String ("")
+    + on_close_request: ?fn(Window)(bool) (null)
+    + on_window_focus: ?fn(bool)() (null)
+    + on_system_theme_change: ?fn(SystemTheme)() (null)
 
     root: Render
     tree: ?Div (null)
@@ -71,6 +154,7 @@
     pressed_key: u64 (0)
     pressed_button: ?MouseButton (null)
     scroll_state: HashMap[u64, Point] (.{})
+    scroll_targets: HashMap[u64, Point] (.{})
     clip_stack: Array[Bounds] (.{})
     deferred_nodes: Array[Div] (.{})
     paint_later: Array[(Div, f32)] (.{})
@@ -83,6 +167,7 @@
     timers: Array[Timer] (.{})
     tasks: Array[Pending] (.{})
     transitions: Map[Transition] (.{})
+    color_transitions: Map[ColorTransition] (.{})
     // A wake-up for something time-based, such as a tooltip appearing
     wake_at: f64 (INF)
     drag_state: ?DragState (null)
@@ -90,8 +175,20 @@
     bindings: Array[Binding] (.{})
     tooltip_key: u64 (0)
     tooltip_since: f64 (0)
+    tooltip_shown_at: f64 (-10)
     tooltip: String ("")
+    tooltip_builder: ?fn()(Div) (null)
+    tooltip_placement: Placement (.auto)
+    tooltip_anchor: Bounds (.{})
     text_sel: TextSelection (.{})
+    focus_from_keyboard: bool (false)
+    pending_cmds: Array[WindowCmd] (.{})
+    decorated: bool (true)
+    min_width: i32 (200)
+    min_height: i32 (150)
+    max_width: i32 (0)
+    max_height: i32 (0)
+    display_id: u32 (0)
 
     + static fn new(root: Render, width: f32, height: f32, platform: Platform, theme: Theme (Theme.dark())) Window {
         return Window{ root: root, width: width, height: height, platform: platform, theme: theme }
@@ -107,9 +204,132 @@
     /// Closes the window after this frame.
     + fn quit() { this.quit_requested = true }
 
+    /// Asks to close the window, running `on_close_request` first. Returns true if closing proceeds.
+    + fn request_close() bool {
+        let cb = this.on_close_request
+        if isset(cb) {
+            if !cb(this) : return false
+        }
+        this.quit_requested = true
+        return true
+    }
+
     + fn set_title(title: String) {
         this.title = title
         this.title_changed = true
+    }
+
+    // ---- Runtime window control ----
+
+    + fn set_fullscreen(on: bool) {
+        this.fullscreen = on
+        this.pending_cmds.append(.{ kind: .set_fullscreen, flag: on })
+    }
+
+    + fn maximize() {
+        this.maximized = true
+        this.minimized = false
+        this.pending_cmds.append(.{ kind: .maximize })
+    }
+
+    + fn unmaximize() {
+        this.maximized = false
+        this.pending_cmds.append(.{ kind: .unmaximize })
+    }
+
+    + fn minimize() {
+        this.minimized = true
+        this.pending_cmds.append(.{ kind: .minimize })
+    }
+
+    + fn restore() {
+        this.minimized = false
+        this.maximized = false
+        this.pending_cmds.append(.{ kind: .restore })
+    }
+
+    + fn raise() {
+        this.pending_cmds.append(.{ kind: .raise })
+    }
+
+    + fn focus() {
+        this.window_focused = true
+        this.pending_cmds.append(.{ kind: .focus })
+    }
+
+    + fn set_size(w: i32, h: i32) {
+        let nw = w.max(1)
+        let nh = h.max(1)
+        this.width = nw.to(f32)
+        this.height = nh.to(f32)
+        if !this.maximized && !this.fullscreen {
+            this.normal_width = this.width
+            this.normal_height = this.height
+        }
+        this.pending_cmds.append(.{ kind: .set_size, a: nw, b: nh })
+    }
+
+    + fn set_position(x: i32, y: i32) {
+        this.x = x
+        this.y = y
+        this.pending_cmds.append(.{ kind: .set_position, a: x, b: y })
+    }
+
+    + fn set_min_size(w: i32, h: i32) {
+        this.min_width = w.max(0)
+        this.min_height = h.max(0)
+        this.pending_cmds.append(.{ kind: .set_min_size, a: this.min_width, b: this.min_height })
+    }
+
+    + fn set_max_size(w: i32, h: i32) {
+        this.max_width = w.max(0)
+        this.max_height = h.max(0)
+        this.pending_cmds.append(.{ kind: .set_max_size, a: this.max_width, b: this.max_height })
+    }
+
+    + fn set_always_on_top(on: bool) {
+        this.always_on_top = on
+        this.pending_cmds.append(.{ kind: .set_always_on_top, flag: on })
+    }
+
+    /// The display currently containing this window, or the primary display.
+    + fn display() ?DisplayInfo {
+        let list = displays()
+        if this.display_id != 0 {
+            each list as d {
+                if d.id == this.display_id : return d
+            }
+        }
+        each list as d {
+            if d.primary : return d
+        }
+        return list.get(0) !? null
+    }
+
+    /// Hit-tests window chrome regions for frameless/custom-titlebar windows.
+    + fn hit_test_region(x: f32, y: f32) HitTestRegion {
+        if !this.decorated && !this.maximized && !this.fullscreen {
+            let edge: f32 = 6
+            let left = x < edge
+            let right = x >= this.width - edge
+            let top = y < edge
+            let bottom = y >= this.height - edge
+            if top && left : return .resize_top_left
+            if top && right : return .resize_top_right
+            if bottom && left : return .resize_bottom_left
+            if bottom && right : return .resize_bottom_right
+            if top : return .resize_top
+            if bottom : return .resize_bottom
+            if left : return .resize_left
+            if right : return .resize_right
+        }
+        let n = this.hit_test(x, y)
+        while isset(n) {
+            if n.style.is_window_drag : return .draggable
+            if n.has_mouse_handlers() || n.is_focusable() || n.aria_role == .button : return .normal
+            n = n.parent
+        }
+        return .normal
     }
 
     /// Adds a font family for `Styled.font`. Add one file per weight that is used; others fall
@@ -120,6 +340,108 @@
 
     + fn clipboard() String { return this.platform.clipboard() }
     + fn set_clipboard(text: String) { this.platform.set_clipboard(text) }
+    /// Linux X11/Wayland primary selection (middle-click paste).
+    + fn primary_selection() String { return this.platform.primary_selection() }
+    + fn set_primary_selection(text: String) { this.platform.set_primary_selection(text) }
+    /// Rich clipboard HTML content, or "".
+    + fn clipboard_html() String { return this.platform.clipboard_html() }
+    + fn set_clipboard_html(html: String, fallback_text: String ("")) { this.platform.set_clipboard_html(html, fallback_text) }
+    /// File paths currently on the clipboard (e.g. copied from a file manager).
+    + fn clipboard_files() Array[String] { return this.platform.clipboard_files() }
+    /// Image currently on the clipboard (PNG/BMP/JPEG/WebP/GIF), or null.
+    + fn clipboard_image() ?image.Image { return this.platform.clipboard_image() }
+    /// Copies an `image.Image` to the system clipboard (as PNG & BMP).
+    + fn set_clipboard_image(img: image.Image) bool { return this.platform.set_clipboard_image(img) }
+    /// Whether an image is currently available on the clipboard.
+    + fn has_clipboard_image() bool { return this.platform.has_clipboard_image() }
+
+    /// Sets the IME candidate window area (usually the active text caret bounds).
+    + fn set_ime_area(b: Bounds) {
+        this.ime_area = b
+        this.ime_area_changed = true
+    }
+
+    /// Updates active IME composition pre-edit text (called by SDL or tests).
+    + fn ime_edit(text: String, start: i32 (0), length: i32 (0)) {
+        this.ime_text = text
+        this.ime_start = start
+        this.ime_length = length
+        this.dirty = true
+    }
+
+    /// Records a screen-reader / accessibility announcement and forwards it to the OS bridge.
+    + fn announce(text: String) {
+        if text.length == 0 : return
+        this.announcements.append(text)
+        a11y_announce_os(text)
+    }
+
+    /// Updates window focus state and notifies `on_window_focus`.
+    + fn set_window_focused(focused: bool) {
+        if this.window_focused == focused : return
+        this.window_focused = focused
+        let cb = this.on_window_focus
+        if isset(cb) : cb(focused)
+    }
+
+    /// Programmatically scrolls the scroll container with `id` to (`x`, `y`).
+    + fn scroll_to(id: String, x: f32, y: f32) bool {
+        let node = this.find(id) ?! return false
+        let s = node.style
+        let inner = node.bounds.inset(scroll_inner_edges(s))
+        let max_x = (node.content_w - inner.w).max(0)
+        let max_y = (node.content_h - inner.h).max(0)
+        let nx = s.overflow_x == .scroll ? clamp32(x, 0, max_x) : 0
+        let ny = s.overflow_y == .scroll ? clamp32(y, 0, max_y) : 0
+        node.scroll_x = nx
+        node.scroll_y = ny
+        this.scroll_state.set(node.key, .{ x: nx, y: ny })
+        this.scroll_targets.remove(node.key)
+        return true
+    }
+
+    /// Programmatically scrolls the scroll container with `id` by (`dx`, `dy`).
+    + fn scroll_by(id: String, dx: f32, dy: f32) bool {
+        let node = this.find(id) ?! return false
+        let moved = scroll_by(node, dx, dy)
+        if moved {
+            this.scroll_state.set(node.key, .{ x: node.scroll_x, y: node.scroll_y })
+            this.scroll_targets.remove(node.key)
+        }
+        return moved
+    }
+
+    /// Scrolls ancestor scroll containers so the element with `id` is visible in view.
+    + fn scroll_into_view(id: String) bool {
+        let target = this.find(id) ?! return false
+        let tb = target.bounds
+        let moved = false
+        let p = target.parent
+        while isset(p) {
+            let s = p.style
+            if s.overflow_y == .scroll || s.overflow_x == .scroll {
+                let inner = p.bounds.inset(scroll_inner_edges(s))
+                let dx: f32 = 0
+                let dy: f32 = 0
+                if s.overflow_y == .scroll {
+                    if tb.y < inner.y : dy = tb.y - inner.y
+                    else if tb.bottom > inner.bottom : dy = tb.bottom - inner.bottom
+                }
+                if s.overflow_x == .scroll {
+                    if tb.x < inner.x : dx = tb.x - inner.x
+                    else if tb.right > inner.right : dx = tb.right - inner.right
+                }
+                if dx != 0 || dy != 0 {
+                    if scroll_by(p, dx, dy) {
+                        this.scroll_state.set(p.key, .{ x: p.scroll_x, y: p.scroll_y })
+                        moved = true
+                    }
+                }
+            }
+            p = p.parent
+        }
+        return moved
+    }
 
     /// The width of `content` in the given font.
     + fn text_width(content: String, size: f32 (16), weight: FontWeight (.normal), font: String ("")) f32 {
@@ -137,6 +459,7 @@
     + fn draw() {
         this.frames++
         this.dirty = false
+        this.step_smooth_scroll()
         let root = this.root.render(this)
         this.deferred_nodes = Array[Div]{}
         this.prepare(root, null, 0, 1)
@@ -154,10 +477,15 @@
         while isset(node) {
             hovered.add(node.key)
             if !found_cursor {
-                let c = node.style.cursor_style
-                if isset(c) {
-                    cursor = c
+                if node.effective_disabled {
+                    cursor = .not_allowed
                     found_cursor = true
+                } else {
+                    let c = node.style.cursor_style
+                    if isset(c) {
+                        cursor = c
+                        found_cursor = true
+                    }
                 }
             }
             node = node.parent
@@ -180,6 +508,45 @@
             i++
         }
         this.paint_overlays()
+        if isset(this.on_a11y_update) || this.a11y_announce_focus : this.sync_a11y()
+    }
+
+    fn step_smooth_scroll() {
+        if this.scroll_targets.length == 0 : return
+        let done = Array[u64]{}
+        each this.scroll_targets as target, key {
+            let cur = this.scroll_state.get(key) !? Point{}
+            let dx = target.x - cur.x
+            let dy = target.y - cur.y
+            if dx.abs() < 0.5 && dy.abs() < 0.5 {
+                this.scroll_state.set(key, target)
+                done.append(key)
+            } else {
+                this.scroll_state.set(key, .{ x: cur.x + dx * 0.35, y: cur.y + dy * 0.35 })
+                this.request_frame()
+            }
+        }
+        each done as k : this.scroll_targets.remove(k)
+    }
+
+    fn paint_debug_overlay() {
+        let root = this.tree
+        if isset(root) : this.paint_debug_bounds(root)
+        let fps = this.last_frame_ms > 0.001 ? round32((1000.0 / this.last_frame_ms).to(f32)).to(int) : 0
+        let ms = round32((this.last_frame_ms * 10.0).to(f32)) / 10.0
+        let info = "FPS: %{fps} | %{ms}ms | %{this.renderer_name} | Prims: %{this.scene.items.length} | %{this.width.to(int)}x%{this.height.to(int)}"
+        let badge = div().px(8).py(4).rounded(4).bg(rgba(0x000000cc)).border(1).border_color(rgb(0x22c55e))
+            .text_xs().text_color(rgb(0x22c55e)).child(info)
+        this.paint_overlay(badge, 8, 8, 0xdeb6)
+    }
+
+    fn paint_debug_bounds(n: Div) {
+        if n.style.display_none : return
+        let b = n.bounds
+        if b.w > 0 && b.h > 0 {
+            this.scene.add(.{ kind: .quad, bounds: b, color: transparent(), border: Edges.all(1), border_color: rgba(0x38bdf844) })
+        }
+        each n.child_nodes as child : this.paint_debug_bounds(child)
     }
 
     /// Lays out and paints an element that is not part of the tree, such as a tooltip or a drag
@@ -205,27 +572,42 @@
             n.text_align = parent.text_align
             n.nowrap = parent.nowrap
             n.ellipsis = parent.ellipsis
+            n.line_clamp_val = parent.line_clamp_val
             n.decor_underline = parent.decor_underline
             n.decor_strike = parent.decor_strike
             n.text_selectable = parent.text_selectable
+            n.effective_disabled = parent.effective_disabled || n.is_disabled
         } else {
             n.key = root_key
-            n.resolved_font = .{ size: this.theme.font_size, line_height: round32(this.theme.font_size * 1.4) }
+            let base_fs = round32(this.theme.font_size * this.theme.font_scale)
+            n.resolved_font = .{ size: base_fs, line_height: round32(base_fs * 1.4) }
             n.resolved_color = this.theme.text
+            n.effective_disabled = n.is_disabled
         }
-        if has_state_styles(n) {
+        if !n.effective_disabled && has_state_styles(n) {
             let focused = false
             let fh = n.focus_handle
             if isset(fh) : focused = fh.is_focused()
+            let focus_vis = focused && this.focus_from_keyboard
             let active = isset(this.pressed_button) && this.pressed_keys.has(n.key)
             let drag_over = this.drop_key != 0 && this.drop_key == n.key
-            apply_state_styles(n, this.hover_keys.has(n.key), active, focused, drag_over)
+            apply_state_styles(n, this.hover_keys.has(n.key), active, focused, focus_vis, drag_over)
         }
         let s = n.style
+        if s.transition_seconds > 0 {
+            let dur = s.transition_seconds
+            let kstr = "%{n.key}"
+            let bg = s.background
+            if isset(bg) : s.background = this.transition_color(kstr + ":bg", bg, dur)
+            if !s.border_tint.is_transparent() : s.border_tint = this.transition_color(kstr + ":bc", s.border_tint, dur)
+            let col = s.color
+            if isset(col) : s.color = this.transition_color(kstr + ":fg", col, dur)
+            s.alpha = this.transition(kstr + ":op", s.alpha, dur)
+        }
         let size = s.font_size
         let leading = s.leading
         if isset(size) || isset(leading) {
-            let fs = size ?? n.resolved_font.size
+            let fs = isset(size) ? round32(size * this.theme.font_scale) : n.resolved_font.size
             n.resolved_font.size = fs
             n.resolved_font.line_height = round32(fs * (leading ?? 1.4))
         }
@@ -241,6 +623,7 @@
         if isset(nowrap) : n.nowrap = nowrap
         let ellipsis = s.ellipsis
         if isset(ellipsis) : n.ellipsis = ellipsis
+        if s.max_lines > 0 : n.line_clamp_val = s.max_lines
         let italic = s.font_italic
         if isset(italic) : n.resolved_font.italic = italic
         let underline = s.text_underline
@@ -257,6 +640,21 @@
         if s.display_none : return
         if s.on_top : this.deferred_nodes.append(n)
         each n.child_nodes as child, i : this.prepare(child, n, i, 0)
+    }
+
+    fn transition_color(key: String, target: Color, seconds: f64) Color {
+        let tr = this.color_transitions.get(key) ! {
+            this.color_transitions.set(key, .{ from: target, to: target, start: this.time, seconds: seconds })
+            return target
+        }
+        let cur = color_transition_value(tr, this.time)
+        if tr.to.r != target.r || tr.to.g != target.g || tr.to.b != target.b || tr.to.a != target.a {
+            tr = .{ from: cur, to: target, start: this.time, seconds: seconds }
+            this.color_transitions.set(key, tr)
+            cur = tr.from
+        }
+        if this.time < tr.start + tr.seconds : this.request_frame()
+        return cur
     }
 
     fn save_scroll(n: Div) {
@@ -281,6 +679,7 @@
             this.scene.add(.{ kind: .unclip })
         }
         let a = alpha * s.alpha
+        if n.is_disabled : a *= 0.5
         let b = n.bounds
         // Outside the clip: nothing of it shows, unless children overflow it
         if this.clip_stack.length > 0 {
@@ -288,6 +687,9 @@
             if b.x >= clip.right || b.y >= clip.bottom || b.right <= clip.x || b.bottom <= clip.y : return
         }
         let corners = s.corners().clamp(b.w, b.h)
+        if s.blur_radius > 0 {
+            this.scene.add(.{ kind: .blur, bounds: b, width: s.blur_radius, corners: corners })
+        }
         let shadow = s.box_shadow
         if isset(shadow) {
             let sb = Bounds{ x: b.x + shadow.x - shadow.spread, y: b.y + shadow.y - shadow.spread, w: b.w + shadow.spread * 2, h: b.h + shadow.spread * 2 }
@@ -295,12 +697,28 @@
         }
         let bg = s.background ?? transparent()
         let gradient = s.gradient
+        let bct = fade_opt(s.border_color_top, a)
+        let bcr = fade_opt(s.border_color_right, a)
+        let bcb = fade_opt(s.border_color_bottom, a)
+        let bcl = fade_opt(s.border_color_left, a)
+        let has_side_bc = isset(bct) || isset(bcr) || isset(bcb) || isset(bcl)
         if isset(gradient) {
-            this.scene.add(.{ kind: .quad, bounds: b, color: gradient.from.fade(a), color2: gradient.to.fade(a), gradient: true, angle: gradient.angle, border: s.border_widths, border_color: s.border_tint.fade(a), corners: corners })
-        } else if !bg.is_transparent() || (!s.border_widths.is_zero() && !s.border_tint.is_transparent()) {
-            this.scene.add(.{ kind: .quad, bounds: b, color: bg.fade(a), border: s.border_widths, border_color: s.border_tint.fade(a), corners: corners })
+            this.scene.add(.{
+                kind: .quad, bounds: b, color: gradient.from.fade(a), color2: gradient.to.fade(a),
+                gradient: true, gradient_kind: gradient.kind, gradient_stops: gradient.stops, angle: gradient.angle,
+                border: s.border_widths, border_color: s.border_tint.fade(a),
+                border_color_top: bct, border_color_right: bcr, border_color_bottom: bcb, border_color_left: bcl,
+                border_style: s.border_style, corners: corners, rotate_deg: s.rotate_deg
+            })
+        } else if !bg.is_transparent() || (!s.border_widths.is_zero() && (!s.border_tint.is_transparent() || has_side_bc)) {
+            this.scene.add(.{
+                kind: .quad, bounds: b, color: bg.fade(a),
+                border: s.border_widths, border_color: s.border_tint.fade(a),
+                border_color_top: bct, border_color_right: bcr, border_color_bottom: bcb, border_color_left: bcl,
+                border_style: s.border_style, corners: corners, rotate_deg: s.rotate_deg
+            })
         }
-        let inner = b.inset(s.padding.add(s.border_widths))
+        let inner = b.inset(scroll_inner_edges(s))
         if n.kind == .text {
             let y = inner.y
             let font = n.resolved_font
@@ -323,7 +741,7 @@
             return
         }
         if n.kind == .image {
-            this.scene.add(.{ kind: .image, bounds: inner, color: white().fade(a), text: n.content, corners: corners, fit: s.image_fit })
+            this.scene.add(.{ kind: .image, bounds: inner, color: white().fade(a), text: n.content, image_obj: n.image_obj, image_bytes: n.image_bytes, corners: corners, fit: s.image_fit, rotate_deg: s.rotate_deg })
             return
         }
         if n.kind == .canvas {
@@ -337,11 +755,23 @@
         }
         let clips = s.overflow_x != .visible || s.overflow_y != .visible
         if clips : this.push_clip(b.inset(s.border_widths))
+        let has_z = false
         each n.child_nodes as child {
-            if child.style.position != .absolute : this.paint(child, a, false)
+            if child.style.z_order != 0 { has_z = true; break }
         }
-        each n.child_nodes as child {
-            if child.style.position == .absolute : this.paint(child, a, false)
+        if has_z {
+            let sorted = sorted_by_z(n.child_nodes)
+            each sorted as child : this.paint(child, a, false)
+        } else {
+            each n.child_nodes as child {
+                if child.style.position != .absolute && child.style.position != .sticky : this.paint(child, a, false)
+            }
+            each n.child_nodes as child {
+                if child.style.position == .sticky : this.paint(child, a, false)
+            }
+            each n.child_nodes as child {
+                if child.style.position == .absolute : this.paint(child, a, false)
+            }
         }
         if s.overflow_y == .scroll : this.paint_scrollbar(n, true, a)
         if s.overflow_x == .scroll : this.paint_scrollbar(n, false, a)
@@ -349,9 +779,13 @@
     }
 
     fn paint_scrollbar(n: Div, vertical: bool, alpha: f32) {
+        if n.style.scrollbar_mode == .hidden : return
         let thumb = scroll_thumb(n, vertical) ?! return
-        let color = this.theme.text.fade(this.hover_keys.has(n.key) || this.bar_drag_key == n.key ? 0.35 : 0.18)
-        this.scene.add(.{ kind: .quad, bounds: thumb, color: color.fade(alpha), corners: Corners.all(3) })
+        let hovered = this.hover_keys.has(n.key) || this.bar_drag_key == n.key
+        let op: f32 = hovered ? 0.42 : (n.style.scrollbar_mode == .always || n.style.scrollbar_mode == .gutter ? 0.25 : 0.18)
+        let color = this.theme.text.fade(op)
+        let r: f32 = n.style.thin_scrollbar ? 2 : 3
+        this.scene.add(.{ kind: .quad, bounds: thumb, color: color.fade(alpha), corners: Corners.all(r) })
     }
 
     fn push_clip(b: Bounds) {
@@ -398,14 +832,64 @@
     }
 
     /// Hover state from the last frame's layout, so the next frame styles what is under the mouse.
-    fn update_hover() {
+    fn update_hover() bool {
+        let prev = this.hover_keys
         let hovered = HashSet[u64]{}
         let node = this.hit_test(this.mouse_x, this.mouse_y)
         while isset(node) {
             hovered.add(node.key)
             node = node.parent
         }
+        let changed = !hovered.equals(prev)
         this.hover_keys = hovered
+        if changed {
+            each prev as k {
+                if !hovered.has(k) {
+                    let old_n = this.node_by_key(k)
+                    if isset(old_n) && !old_n.effective_disabled {
+                        let f = old_n.on_hover_fn
+                        if isset(f) : f(false)
+                        let lf = old_n.on_hover_leave_fn
+                        if isset(lf) : lf()
+                    }
+                }
+            }
+            each hovered as k {
+                if !prev.has(k) {
+                    let new_n = this.node_by_key(k)
+                    if isset(new_n) && !new_n.effective_disabled {
+                        let f = new_n.on_hover_fn
+                        if isset(f) : f(true)
+                        let ef = new_n.on_hover_enter_fn
+                        if isset(ef) : ef()
+                    }
+                }
+            }
+        }
+        return changed
+    }
+
+    fn set_focus(next: ?FocusHandle, from_keyboard: bool (false)) {
+        let prev = this.focused
+        let same = (!isset(prev) && !isset(next)) || (isset(prev) && isset(next) && prev == next)
+        this.focus_from_keyboard = from_keyboard
+        if same : return
+        let root = this.tree
+        if isset(prev) && isset(root) {
+            let old_n = find_focus(root, prev)
+            if isset(old_n) {
+                let bf = old_n.on_blur_fn
+                if isset(bf) : bf()
+            }
+        }
+        this.focused = next
+        if isset(next) && isset(root) {
+            let new_n = find_focus(root, next)
+            if isset(new_n) {
+                let ff = new_n.on_focus_fn
+                if isset(ff) : ff()
+            }
+        }
     }
 
     fn node_by_key(key: u64) ?Div {
@@ -415,16 +899,16 @@
 
     // ---- Input ----
 
-    + fn mouse_move(x: f32, y: f32, modifiers: Modifiers (.{})) {
+    + fn mouse_move(x: f32, y: f32, modifiers: Modifiers (.{})) bool {
         this.mouse_x = x
         this.mouse_y = y
-        this.update_hover()
-        if this.move_drag(x, y) : return
-        if this.move_text_selection(x, y) : return
+        let changed = this.update_hover()
+        if this.move_drag(x, y) : return true
+        if this.move_text_selection(x, y) : return true
         if this.bar_drag_key != 0 {
             let node = this.node_by_key(this.bar_drag_key)
             if isset(node) : this.drag_scrollbar(node, x, y)
-            return
+            return true
         }
         let button = this.pressed_button
         if isset(button) {
@@ -434,6 +918,7 @@
                 let handler = n.on_drag_fn
                 if isset(handler) {
                     handler(MouseEvent{ x: x, y: y, button: button, modifiers: modifiers, bounds: n.bounds })
+                    changed = true
                     break
                 }
                 n = n.parent
@@ -446,16 +931,26 @@
             if isset(handler) {
                 e.bounds = n.bounds
                 handler(e)
+                changed = true
                 if e.stopped : break
             }
             n = n.parent
         }
+        return changed
     }
 
     + fn mouse_down(x: f32, y: f32, button: MouseButton (.left), modifiers: Modifiers (.{})) {
         this.mouse_x = x
         this.mouse_y = y
         let hit = this.hit_test(x, y)
+        if this.inspector_open && button == .left && modifiers.alt {
+            if isset(hit) {
+                this.inspected_key = hit.key
+                this.dirty = true
+            }
+            return
+        }
+        if isset(hit) && hit.effective_disabled : return
         if button == .left && this.start_scrollbar_drag(hit, x, y) : return
         if this.time - this.last_click_time < 0.4 && (x - this.last_click.x).abs() < 4 && (y - this.last_click.y).abs() < 4 {
             this.click_count++
@@ -470,6 +965,7 @@
         this.pressed_key = 0
         let n = hit
         while isset(n) {
+            if n.effective_disabled : break
             this.pressed_keys.add(n.key)
             if this.pressed_key == 0 && n.has_mouse_handlers() : this.pressed_key = n.key
             n = n.parent
@@ -482,6 +978,7 @@
             let target: ?FocusHandle = null
             n = hit
             while isset(n) {
+                if n.effective_disabled : break
                 let fh = n.focus_handle
                 if isset(fh) {
                     target = fh
@@ -489,7 +986,7 @@
                 }
                 n = n.parent
             }
-            this.focused = target
+            this.set_focus(target, false)
             if !isset(target) {
                 this.start_text_selection(hit, x, y, modifiers)
             } else {
@@ -500,6 +997,7 @@
         let e = MouseEvent{ x: x, y: y, button: button, modifiers: modifiers, click_count: this.click_count }
         n = hit
         while isset(n) {
+            if n.effective_disabled : break
             let handler = n.on_mouse_down_fn
             if isset(handler) {
                 e.bounds = n.bounds
@@ -528,6 +1026,7 @@
         let e = MouseEvent{ x: x, y: y, button: button, modifiers: modifiers, click_count: this.click_count }
         let n = hit
         while isset(n) {
+            if n.effective_disabled : break
             let handler = n.on_mouse_up_fn
             if isset(handler) {
                 e.bounds = n.bounds
@@ -541,11 +1040,42 @@
         if button == .left && !dragged_text && !selected_on_click {
             n = hit
             while isset(n) {
+                if n.effective_disabled : break
                 let handler = n.on_click_fn
                 if isset(handler) {
                     if this.pressed_keys.has(n.key) {
                         e.bounds = n.bounds
                         handler(e)
+                    }
+                    break
+                }
+                n = n.parent
+            }
+            if this.click_count == 2 {
+                n = hit
+                while isset(n) {
+                    if n.effective_disabled : break
+                    let dbl = n.on_double_click_fn
+                    if isset(dbl) {
+                        if this.pressed_keys.has(n.key) {
+                            e.bounds = n.bounds
+                            dbl(e)
+                        }
+                        break
+                    }
+                    n = n.parent
+                }
+            }
+        }
+        if button == .right {
+            n = hit
+            while isset(n) {
+                if n.effective_disabled : break
+                let ctx = n.on_context_menu_fn
+                if isset(ctx) {
+                    if this.pressed_keys.has(n.key) {
+                        e.bounds = n.bounds
+                        ctx(e)
                     }
                     break
                 }
@@ -568,9 +1098,39 @@
                 handler(e)
                 if e.stopped : return
             }
+            if this.smooth_scroll {
+                let s = n.style
+                if s.overflow_y == .scroll || s.overflow_x == .scroll {
+                    let inner = n.bounds.inset(scroll_inner_edges(s))
+                    let base = this.scroll_targets.get(n.key) !? Point{ x: n.scroll_x, y: n.scroll_y }
+                    let nx = s.overflow_x == .scroll ? clamp32(base.x + e.dx, 0, (n.content_w - inner.w).max(0)) : base.x
+                    let ny = s.overflow_y == .scroll ? clamp32(base.y + e.dy, 0, (n.content_h - inner.h).max(0)) : base.y
+                    if nx != base.x || ny != base.y {
+                        this.scroll_targets.set(n.key, .{ x: nx, y: ny })
+                        this.request_frame()
+                        return
+                    }
+                }
+            }
             if scroll_by(n, e.dx, e.dy) {
                 this.scroll_state.set(n.key, .{ x: n.scroll_x, y: n.scroll_y })
                 return
+            }
+            n = n.parent
+        }
+    }
+
+    /// Delivers a pinch-to-zoom gesture at (`x`, `y`).
+    + fn pinch(x: f32, y: f32, scale: f32, modifiers: Modifiers (.{})) {
+        let e = PinchEvent{ x: x, y: y, scale: scale, modifiers: modifiers }
+        let n = this.hit_test(x, y)
+        while isset(n) {
+            if n.effective_disabled : break
+            let handler = n.on_pinch_fn
+            if isset(handler) {
+                e.bounds = n.bounds
+                handler(e)
+                if e.stopped : return
             }
             n = n.parent
         }
@@ -587,21 +1147,43 @@
         let e = KeyEvent{ key: key, modifiers: modifiers, repeat: repeat }
         let n = this.focused_node()
         while isset(n) {
-            let handler = n.on_key_down_fn
-            if isset(handler) {
-                handler(e)
-                if e.stopped : return
+            if !n.effective_disabled {
+                let handler = n.on_key_down_fn
+                if isset(handler) {
+                    handler(e)
+                    if e.stopped : return
+                }
             }
             n = n.parent
         }
         if key == .tab : this.focus_next(!modifiers.shift)
         if key == .escape : this.dismiss()
+        if key == .f12 : this.toggle_inspector()
+    }
+
+    + fn key_up(key: Key, modifiers: Modifiers (.{})) {
+        let e = KeyEvent{ key: key, modifiers: modifiers }
+        let n = this.focused_node()
+        while isset(n) {
+            if !n.effective_disabled {
+                let handler = n.on_key_up_fn
+                if isset(handler) {
+                    handler(e)
+                    if e.stopped : return
+                }
+            }
+            n = n.parent
+        }
     }
 
     /// Typed text, delivered to the innermost focused element with an `on_input` handler.
     + fn input(text: String) {
+        this.ime_text = ""
+        this.ime_start = 0
+        this.ime_length = 0
         let n = this.focused_node()
         while isset(n) {
+            if n.effective_disabled : return
             let handler = n.on_input_fn
             if isset(handler) {
                 handler(text)
@@ -618,11 +1200,13 @@
         return find_focus(root, fh) ?? root
     }
 
-    /// Moves the focus to the next (or previous) focusable element in tree order.
+    /// Moves the focus to the next (or previous) focusable element in tree order, respecting
+    /// any active `focus_trap` container (such as a modal dialog).
     + fn focus_next(forward: bool (true)) {
         let root = this.tree ?! return
+        let scope = last_focus_trap(root) ?? root
         let handles = Array[FocusHandle]{}
-        collect_focusable(root, handles)
+        collect_focusable(scope, handles)
         if handles.length == 0 : return
         let current = handles.length
         let fh = this.focused
@@ -639,7 +1223,7 @@
         } else {
             next = current == 0 ? handles.length - 1 : current - 1
         }
-        this.focused = handles.get(next) !!
+        this.set_focus(handles.get(next) !!, true)
     }
 
     fn start_scrollbar_drag(hit: ?Div, x: f32, y: f32) bool {
@@ -705,9 +1289,52 @@
         return true
     }
 
+    /// Moves the mouse to the center of the element with `id`, then draws a frame.
+    + fn hover_on(id: String) bool {
+        let b = this.bounds_of(id) ?! return false
+        this.move_to(b.x + b.w / 2, b.y + b.h / 2)
+        return true
+    }
+
+    /// Presses and releases the right button at a point, then draws a frame.
+    + fn right_click(x: f32, y: f32, modifiers: Modifiers (.{})) {
+        this.mouse_move(x, y)
+        this.draw()
+        this.mouse_down(x, y, .right, modifiers)
+        this.draw()
+        this.mouse_up(x, y, .right, modifiers)
+        this.draw()
+    }
+
+    /// Right-clicks the center of the element with `id`; false when there is none.
+    + fn right_click_on(id: String) bool {
+        let b = this.bounds_of(id) ?! return false
+        this.right_click(b.x + b.w / 2, b.y + b.h / 2)
+        return true
+    }
+
+    /// Double-clicks at a point, then draws a frame.
+    + fn double_click(x: f32, y: f32, modifiers: Modifiers (.{})) {
+        this.click(x, y, modifiers)
+        this.click(x, y, modifiers)
+    }
+
+    /// Double-clicks the center of the element with `id`; false when there is none.
+    + fn double_click_on(id: String) bool {
+        let b = this.bounds_of(id) ?! return false
+        this.double_click(b.x + b.w / 2, b.y + b.h / 2)
+        return true
+    }
+
     /// Presses a key, then draws a frame.
     + fn press(key: Key, modifiers: Modifiers (.{})) {
         this.key_down(key, modifiers)
+        this.draw()
+    }
+
+    /// Releases a key, then draws a frame.
+    + fn release(key: Key, modifiers: Modifiers (.{})) {
+        this.key_up(key, modifiers)
         this.draw()
     }
 
@@ -724,6 +1351,13 @@
         this.draw()
     }
 
+    /// Scrolls at the center of the element with `id`, then draws a frame.
+    + fn scroll_on(id: String, dx: f32, dy: f32) bool {
+        let b = this.bounds_of(id) ?! return false
+        this.scroll_at(b.x + b.w / 2, b.y + b.h / 2, dx, dy)
+        return true
+    }
+
     /// Drags with the left button from one point to another, then draws a frame.
     + fn drag(x1: f32, y1: f32, x2: f32, y2: f32) {
         this.mouse_move(x1, y1)
@@ -734,6 +1368,48 @@
         this.draw()
         this.mouse_up(x2, y2)
         this.draw()
+    }
+
+    /// Drags from the center of `from_id` to the center of `to_id`, then draws a frame.
+    + fn drag_between(from_id: String, to_id: String) bool {
+        let a = this.bounds_of(from_id) ?! return false
+        let b = this.bounds_of(to_id) ?! return false
+        this.drag(a.x + a.w / 2, a.y + a.h / 2, b.x + b.w / 2, b.y + b.h / 2)
+        return true
+    }
+
+    // ---- Accessibility & focus testing helpers ----
+
+    /// Whether the element with `id` (or its focus handle) currently has keyboard focus.
+    + fn is_focused(id: String) bool {
+        let node = this.find(id) ?! return false
+        let fh = node.focus_handle ?! return false
+        return fh.is_focused()
+    }
+
+    /// Collects all semantic accessibility nodes from the current tree.
+    + fn accessibility_tree() Array[AccessibleNode] {
+        let out = Array[AccessibleNode]{}
+        let root = this.tree ?! return out
+        collect_accessible(root, out)
+        return out
+    }
+
+    /// Finds accessibility nodes with the given `role`.
+    + fn find_by_role(role: Role) Array[AccessibleNode] {
+        let out = Array[AccessibleNode]{}
+        each this.accessibility_tree() as n {
+            if n.role == role : out.append(n)
+        }
+        return out
+    }
+
+    /// Finds the first accessibility node matching `label`.
+    + fn find_by_label(label: String) ?AccessibleNode {
+        each this.accessibility_tree() as n {
+            if n.label == label : return n
+        }
+        return null
     }
 }
 
@@ -758,6 +1434,20 @@ fn hit_node(n: Div, x: f32, y: f32, clip: Bounds, top: bool) ?Div {
     if n.kind != .div : return inside && !s.pass_through ? n : null
     let child_clip = clip
     if s.overflow_x != .visible || s.overflow_y != .visible : child_clip = clip.intersect(b.inset(s.border_widths))
+    let has_z = false
+    each n.child_nodes as c {
+        if c.style.z_order != 0 { has_z = true; break }
+    }
+    if has_z {
+        let sorted = sorted_by_z(n.child_nodes)
+        let i = sorted.length
+        while i > 0 {
+            i--
+            let found = hit_node(sorted.get(i) !!, x, y, child_clip, false)
+            if isset(found) : return found
+        }
+        return inside && !s.pass_through ? n : null
+    }
     let i = n.child_nodes.length
     while i > 0 {
         i--
@@ -770,11 +1460,93 @@ fn hit_node(n: Div, x: f32, y: f32, clip: Bounds, top: bool) ?Div {
     while i > 0 {
         i--
         let child = n.child_nodes.get(i) !!
-        if child.style.position == .absolute : continue
+        if child.style.position != .sticky : continue
+        let found = hit_node(child, x, y, child_clip, false)
+        if isset(found) : return found
+    }
+    i = n.child_nodes.length
+    while i > 0 {
+        i--
+        let child = n.child_nodes.get(i) !!
+        if child.style.position == .absolute || child.style.position == .sticky : continue
         let found = hit_node(child, x, y, child_clip, false)
         if isset(found) : return found
     }
     return inside && !s.pass_through ? n : null
+}
+
+fn sorted_by_z(children: Array[Div]) Array[Div] {
+    let out = Array[Div]{}
+    each children as c : out.append(c)
+    // Stable insertion sort by z_index
+    let i: uint = 1
+    while i < out.length {
+        let cur = out.get(i) !!
+        let j = i
+        while j > 0 {
+            let prev = out.get(j - 1) !!
+            if prev.style.z_order <= cur.style.z_order : break
+            out.set(j, prev) _
+            j--
+        }
+        out.set(j, cur) _
+        i++
+    }
+    return out
+}
+
+fn last_focus_trap(n: Div) ?Div {
+    if n.style.display_none : return null
+    let i = n.child_nodes.length
+    while i > 0 {
+        i--
+        let found = last_focus_trap(n.child_nodes.get(i) !!)
+        if isset(found) : return found
+    }
+    return n.style.is_focus_trap ? n : null
+}
+
+fn collect_accessible(n: Div, out: Array[AccessibleNode]) {
+    if n.style.display_none : return
+    if n.aria_role != .none || n.aria_label_text.length > 0 {
+        let label = n.aria_label_text.length > 0 ? n.aria_label_text : collect_node_text(n)
+        let fh = n.focus_handle
+        let focused = isset(fh) && fh.is_focused()
+        out.append(.{
+            id: n.name ?? ""
+            role: n.aria_role
+            label: label
+            bounds: n.bounds
+            disabled: n.effective_disabled
+            focused: focused
+            checked: n.aria_checked_val
+            expanded: n.aria_expanded_val
+            selected: n.aria_selected_val
+            value: n.aria_value_val
+        })
+    }
+    each n.child_nodes as child : collect_accessible(child, out)
+}
+
+fn collect_node_text(n: Div) String {
+    if n.kind == .text : return n.content
+    let parts = Array[String]{}
+    each n.child_nodes as c {
+        let t = collect_node_text(c)
+        if t.length > 0 : parts.append(t)
+    }
+    return parts.join(" ")
+}
+
+fn fade_opt(c: ?Color, a: f32) ?Color {
+    return isset(c) ? c.fade(a) : null
+}
+
+fn color_transition_value(tr: ColorTransition, now: f64) Color {
+    if tr.seconds <= 0 || now >= tr.start + tr.seconds : return tr.to
+    let t = ((now - tr.start) / tr.seconds).to(f32)
+    let eased = 1 - (1 - t) * (1 - t) * (1 - t)
+    return tr.from.mix(tr.to, eased)
 }
 
 fn find_node(n: Div, id: String) ?Div {
@@ -807,7 +1579,7 @@ fn find_focus(n: Div, fh: FocusHandle) ?Div {
 }
 
 fn collect_focusable(n: Div, handles: Array[FocusHandle]) {
-    if n.style.display_none : return
+    if n.style.display_none || n.effective_disabled : return
     let fh = n.focus_handle
     if isset(fh) : handles.append(fh)
     each n.child_nodes as child : collect_focusable(child, handles)
@@ -816,26 +1588,28 @@ fn collect_focusable(n: Div, handles: Array[FocusHandle]) {
 /// The scrollbar thumb of a scroll container, when its content overflows on that axis.
 fn scroll_thumb(n: Div, vertical: bool) ?Bounds {
     let s = n.style
-    let inner = n.bounds.inset(s.padding.add(s.border_widths))
+    let inner = n.bounds.inset(scroll_inner_edges(s))
     let track = n.bounds.inset(s.border_widths)
+    let thick: f32 = s.thin_scrollbar ? 4 : 6
+    let pad: f32 = 2
     if vertical {
         if s.overflow_y != .scroll || n.content_h <= inner.h + 0.5 : return null
         let h = (track.h * inner.h / n.content_h).max(24).min(track.h)
         let max = n.content_h - inner.h
         let y = track.y + (track.h - h) * n.scroll_y / max
-        return .{ x: track.right - 8, y: y, w: 6, h: h }
+        return .{ x: track.right - thick - pad, y: y, w: thick, h: h }
     }
     if s.overflow_x != .scroll || n.content_w <= inner.w + 0.5 : return null
     let w = (track.w * inner.w / n.content_w).max(24).min(track.w)
     let max = n.content_w - inner.w
     let x = track.x + (track.w - w) * n.scroll_x / max
-    return .{ x: x, y: track.bottom - 8, w: w, h: 6 }
+    return .{ x: x, y: track.bottom - thick - pad, w: w, h: thick }
 }
 
 /// Scrolls a scroll container when it can still move in that direction.
 fn scroll_by(n: Div, dx: f32, dy: f32) bool {
     let s = n.style
-    let inner = n.bounds.inset(s.padding.add(s.border_widths))
+    let inner = n.bounds.inset(scroll_inner_edges(s))
     let moved = false
     if s.overflow_y == .scroll && dy != 0 {
         let max = (n.content_h - inner.h).max(0)

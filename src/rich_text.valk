@@ -1,0 +1,391 @@
+// Inline rich text spans and built-in Markdown renderer widget.
+
+/// One styled span inside `rich_text`.
++ class TextSpan {
+    + text: String ("")
+    + color: ?Color (null)
+    + bg: ?Color (null)
+    + bold: bool (false)
+    + italic: bool (false)
+    + underline: bool (false)
+    + strike: bool (false)
+    + code: bool (false)
+    + font: ?String (null)
+    + on_click: ?fn()() (null)
+
+    + static fn plain(text: String) TextSpan { return TextSpan{ text: text } }
+    + static fn link(text: String, on_click: fn()()) TextSpan {
+        return TextSpan{ text: text, underline: true, on_click: on_click }
+    }
+    + static fn code_span(text: String) TextSpan { return TextSpan{ text: text, code: true } }
+
+    + fn with_color(c: Color) TextSpan { this.color = c; return this }
+    + fn with_bg(c: Color) TextSpan { this.bg = c; return this }
+    + fn as_bold() TextSpan { this.bold = true; return this }
+    + fn as_italic() TextSpan { this.italic = true; return this }
+    + fn as_underline() TextSpan { this.underline = true; return this }
+    + fn as_strike() TextSpan { this.strike = true; return this }
+    + fn with_font(name: String) TextSpan { this.font = name; return this }
+}
+
+/// Renders an array of styled inline `TextSpan`s as a wrapping paragraph supporting mixed colors,
+/// bold/italic/underline/strikethrough, inline code badges, and clickable links.
++ fn rich_text(win: Window, spans: Array[TextSpan]) Div {
+    let t = win.theme
+    let wrap = div().flex().flex_wrap().items_center().gap_y(2)
+    each spans as span {
+        let click = span.on_click
+        if span.code {
+            let chip = div().px(5).py(1).mx(1).rounded(4).bg(t.elevated).border(1).border_color(t.border)
+                .text_color(span.color ?? t.accent).whitespace_nowrap()
+            let fn_name = span.font
+            if isset(fn_name) : chip.font(fn_name)
+            chip.child(span.text)
+            if isset(click) {
+                chip.cursor_pointer().role(.link).on_click(fn(e) { click() })
+            }
+            wrap.child(chip)
+            continue
+        }
+        // Split on spaces so individual words wrap smoothly across lines
+        let parts = split_keeping_spaces(span.text)
+        each parts as part {
+            let el = div().whitespace_nowrap()
+            let c = span.color
+            if isset(c) : el.text_color(c)
+            else if isset(click) : el.text_color(t.accent)
+            let b = span.bg
+            if isset(b) : el.bg(b).rounded(3).px(2)
+            if span.bold : el.font_bold()
+            if span.italic : el.italic()
+            if span.underline : el.underline()
+            if span.strike : el.line_through()
+            let fn_name = span.font
+            if isset(fn_name) : el.font(fn_name)
+            if isset(click) {
+                el.cursor_pointer().role(.link).on_click(fn(e) { click() })
+            }
+            el.child(part)
+            wrap.child(el)
+        }
+    }
+    return wrap
+}
+
+fn split_keeping_spaces(text: String) Array[String] {
+    let out = Array[String]{}
+    let i: uint = 0
+    while i < text.length {
+        let start = i
+        while i < text.length && text[i] != ' ' : i++
+        while i < text.length && text[i] == ' ' : i++
+        out.append(text.range(start, i - start))
+    }
+    return out
+}
+
+/// Renders Markdown into a styled element tree: headings, paragraphs with inline formatting
+/// (`**bold**`, `*italic*`, `` `code` ``, `~~strike~~`, `[link](url)`), lists, blockquotes,
+/// horizontal rules, tables, and syntax-highlighted fenced code blocks.
++ fn markdown(win: Window, source: String, on_link: ?fn(String)() (null)) Div {
+    let t = win.theme
+    let doc = div().gap(10).selectable()
+    let lines = source.replace("\r\n", "\n").split("\n")
+    let i: uint = 0
+    while i < lines.length {
+        let raw = lines.get(i) !? ""
+        let trimmed = raw.trim()
+        if trimmed.length == 0 { i++; continue }
+
+        // Fenced code block
+        if trimmed.starts_with("```") {
+            let lang = trimmed.range(3, trimmed.length - 3).trim()
+            i++
+            let code_lines = Array[String]{}
+            while i < lines.length {
+                let cl = lines.get(i) !? ""
+                if cl.trim().starts_with("```") { i++; break }
+                code_lines.append(cl)
+                i++
+            }
+            doc.child(md_code_block(win, code_lines, lang))
+            continue
+        }
+
+        // Horizontal rule
+        if trimmed == "---" || trimmed == "***" || trimmed == "___" {
+            doc.child(divider(win).my(4))
+            i++
+            continue
+        }
+
+        // Headings (# to ######)
+        if trimmed.starts_with("#") {
+            let level: uint = 0
+            while level < trimmed.length && level < 6 && trimmed[level] == '#' : level++
+            if level < trimmed.length && trimmed[level] == ' ' {
+                let heading_text = trimmed.range(level + 1, trimmed.length - level - 1).trim()
+                let h = div().role(.heading).font_bold().text_color(t.text)
+                if level == 1 : h.text_2xl().pb(4).border_b(1).border_color(t.border)
+                else if level == 2 : h.text_xl().pt(4)
+                else if level == 3 : h.text_lg().pt(2)
+                else : h.text_base()
+                h.child(rich_text(win, parse_md_inline(heading_text, on_link)))
+                doc.child(h)
+                i++
+                continue
+            }
+        }
+
+        // Blockquote
+        if trimmed.starts_with(">") {
+            let q_lines = Array[String]{}
+            while i < lines.length {
+                let ql = (lines.get(i) !? "").trim()
+                if !ql.starts_with(">") : break
+                let body = ql.length > 1 ? ql.range(1, ql.length - 1).trim() : ""
+                q_lines.append(body)
+                i++
+            }
+            doc.child(div().pl(12).py(4).border_l(3).border_color(t.accent).bg(t.surface.opacity(0.6)).rounded_r(4)
+                .text_color(t.muted).child(rich_text(win, parse_md_inline(q_lines.join(" "), on_link))))
+            continue
+        }
+
+        // Table (header | row followed by | --- |)
+        if trimmed.contains("|") && i + 1 < lines.length && is_md_table_sep((lines.get(i + 1) !? "").trim()) {
+            let headers = split_md_table_row(trimmed)
+            i += 2
+            let rows = Array[Array[String]]{}
+            while i < lines.length {
+                let rl = (lines.get(i) !? "").trim()
+                if rl.length == 0 || !rl.contains("|") : break
+                rows.append(split_md_table_row(rl))
+                i++
+            }
+            let tbl = div().role(.table).border(1).border_color(t.border).rounded(t.radius).overflow_hidden()
+            let hrow = div().role(.row).flex().bg(t.elevated).border_b(1).border_color(t.border)
+            each headers as cell : hrow.child(div().role(.cell).flex_1().px(10).py(6).font_semibold().text_sm().child(cell))
+            tbl.child(hrow)
+            each rows as row, ri {
+                let rdiv = div().role(.row).flex().bg(ri % 2 == 0 ? t.surface : t.background)
+                if ri + 1 < rows.length : rdiv.border_b(1).border_color(t.border)
+                each 0 .. headers.length as ci {
+                    let val = row.get(ci) !? ""
+                    rdiv.child(div().role(.cell).flex_1().px(10).py(6).text_sm().child(rich_text(win, parse_md_inline(val, on_link))))
+                }
+                tbl.child(rdiv)
+            }
+            doc.child(tbl)
+            continue
+        }
+
+        // Unordered or ordered list
+        if is_md_bullet(trimmed) || is_md_ordered(trimmed) {
+            let list = div().role(.list).gap(4).pl(6)
+            while i < lines.length {
+                let ll = (lines.get(i) !? "").trim()
+                if is_md_bullet(ll) {
+                    let body = ll.range(2, ll.length - 2).trim()
+                    list.child(div().role(.listitem).flex().gap(8).items_start()
+                        .child(div().text_color(t.muted).child("•"))
+                        .child(div().flex_1().child(rich_text(win, parse_md_inline(body, on_link)))))
+                    i++
+                } else if is_md_ordered(ll) {
+                    let dot = find_byte(ll, '.', 0)
+                    let num = ll.range(0, dot + 1)
+                    let body = ll.range(dot + 1, ll.length - dot - 1).trim()
+                    list.child(div().role(.listitem).flex().gap(8).items_start()
+                        .child(div().text_color(t.muted).child(num))
+                        .child(div().flex_1().child(rich_text(win, parse_md_inline(body, on_link)))))
+                    i++
+                } else {
+                    break
+                }
+            }
+            doc.child(list)
+            continue
+        }
+
+        // Paragraph
+        let para = Array[String]{}
+        while i < lines.length {
+            let pl = (lines.get(i) !? "").trim()
+            if pl.length == 0 || pl.starts_with("#") || pl.starts_with("```") || pl.starts_with(">") || is_md_bullet(pl) || is_md_ordered(pl) : break
+            para.append(pl)
+            i++
+        }
+        doc.child(rich_text(win, parse_md_inline(para.join(" "), on_link)))
+    }
+    return doc
+}
+
+fn is_md_bullet(s: String) bool {
+    return (s.starts_with("- ") || s.starts_with("* ") || s.starts_with("+ ")) && s.length > 2
+}
+
+fn is_md_ordered(s: String) bool {
+    let i: uint = 0
+    while i < s.length && s[i] >= '0' && s[i] <= '9' : i++
+    return i > 0 && i + 1 < s.length && s[i] == '.' && s[i + 1] == ' '
+}
+
+fn is_md_table_sep(s: String) bool {
+    return s.contains("-") && s.contains("|")
+}
+
+fn split_md_table_row(s: String) Array[String] {
+    let inner = s
+    if inner.starts_with("|") : inner = inner.range(1, inner.length - 1)
+    if inner.ends_with("|") : inner = inner.range(0, inner.length - 1)
+    let out = Array[String]{}
+    each inner.split("|") as part : out.append(part.trim())
+    return out
+}
+
+fn find_byte(s: String, b: u8, start: uint) uint {
+    let i = start
+    while i < s.length {
+        if s[i] == b : return i
+        i++
+    }
+    return s.length
+}
+
+fn parse_md_inline(text: String, on_link: ?fn(String)()) Array[TextSpan] {
+    let spans = Array[TextSpan]{}
+    let buf = ""
+    let i: uint = 0
+    while i < text.length {
+        // Inline code: `...`
+        if text[i] == '`' {
+            let close = find_byte(text, '`', i + 1)
+            if close < text.length {
+                if buf.length > 0 { spans.append(TextSpan.plain(buf)); buf = "" }
+                spans.append(TextSpan.code_span(text.range(i + 1, close - i - 1)))
+                i = close + 1
+                continue
+            }
+        }
+        // Link: [label](url)
+        if text[i] == '[' {
+            let rb = find_byte(text, ']', i + 1)
+            if rb + 1 < text.length && text[rb + 1] == '(' {
+                let rp = find_byte(text, ')', rb + 2)
+                if rp < text.length {
+                    if buf.length > 0 { spans.append(TextSpan.plain(buf)); buf = "" }
+                    let label = text.range(i + 1, rb - i - 1)
+                    let url = text.range(rb + 2, rp - rb - 2)
+                    spans.append(TextSpan.link(label, fn() {
+                        if isset(on_link) : on_link(url)
+                        else : open_url(url)
+                    }))
+                    i = rp + 1
+                    continue
+                }
+            }
+        }
+        // Bold: **...**
+        if i + 1 < text.length && text[i] == '*' && text[i + 1] == '*' {
+            let close = find_double(text, '*', i + 2)
+            if close < text.length {
+                if buf.length > 0 { spans.append(TextSpan.plain(buf)); buf = "" }
+                spans.append(TextSpan.plain(text.range(i + 2, close - i - 2)).as_bold())
+                i = close + 2
+                continue
+            }
+        }
+        // Strikethrough: ~~...~~
+        if i + 1 < text.length && text[i] == '~' && text[i + 1] == '~' {
+            let close = find_double(text, '~', i + 2)
+            if close < text.length {
+                if buf.length > 0 { spans.append(TextSpan.plain(buf)); buf = "" }
+                spans.append(TextSpan.plain(text.range(i + 2, close - i - 2)).as_strike())
+                i = close + 2
+                continue
+            }
+        }
+        // Italic: *...*
+        if text[i] == '*' {
+            let close = find_byte(text, '*', i + 1)
+            if close < text.length {
+                if buf.length > 0 { spans.append(TextSpan.plain(buf)); buf = "" }
+                spans.append(TextSpan.plain(text.range(i + 1, close - i - 1)).as_italic())
+                i = close + 1
+                continue
+            }
+        }
+        buf += text.range(i, 1)
+        i++
+    }
+    if buf.length > 0 : spans.append(TextSpan.plain(buf))
+    return spans
+}
+
+fn find_double(s: String, ch: u8, start: uint) uint {
+    let i = start
+    while i + 1 < s.length {
+        if s[i] == ch && s[i + 1] == ch : return i
+        i++
+    }
+    return s.length
+}
+
+fn md_code_block(win: Window, code_lines: Array[String], lang: String) Div {
+    let t = win.theme
+    let box = div().p(12).gap(2).rounded(t.radius).bg(t.surface).border(1).border_color(t.border).overflow_x_scroll()
+    if lang.length > 0 {
+        box.child(div().text_xs().text_color(t.muted).pb(4).child(lang))
+    }
+    each code_lines as line {
+        box.child(highlight_code_line(win, line))
+    }
+    return box
+}
+
+fn highlight_code_line(win: Window, line: String) Div {
+    let t = win.theme
+    let row = div().flex().whitespace_nowrap().text_sm()
+    if line.length == 0 : return row.child(" ")
+    let i: uint = 0
+    while i < line.length {
+        let ch = line[i]
+        // Line comment
+        if (ch == '/' && i + 1 < line.length && line[i + 1] == '/') || ch == '#' {
+            row.child(div().text_color(t.muted).italic().child(line.range(i, line.length - i)))
+            break
+        }
+        // String literal
+        if ch == '"' || ch == '\'' {
+            let start = i
+            i++
+            while i < line.length && line[i] != ch {
+                if line[i] == '\\' && i + 1 < line.length : i++
+                i++
+            }
+            if i < line.length : i++
+            row.child(div().text_color(t.success).child(line.range(start, i - start)))
+            continue
+        }
+        // Number
+        if ch >= '0' && ch <= '9' {
+            let start = i
+            while i < line.length && ((line[i] >= '0' && line[i] <= '9') || line[i] == '.' || line[i] == 'x' || (line[i] >= 'a' && line[i] <= 'f')) : i++
+            row.child(div().text_color(t.warning).child(line.range(start, i - start)))
+            continue
+        }
+        // Identifier / keyword
+        if (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || ch == '_' {
+            let start = i
+            while i < line.length && ((line[i] >= 'a' && line[i] <= 'z') || (line[i] >= 'A' && line[i] <= 'Z') || (line[i] >= '0' && line[i] <= '9') || line[i] == '_') : i++
+            let word = line.range(start, i - start)
+            let is_kw = word == "fn" || word == "let" || word == "return" || word == "if" || word == "else" || word == "while" || word == "for" || word == "each" || word == "class" || word == "struct" || word == "enum" || word == "use" || word == "pub" || word == "const" || word == "import" || word == "def" || word == "function" || word == "true" || word == "false" || word == "null"
+            row.child(div().text_color(is_kw ? t.accent : t.text).when(is_kw, fn(d) { d.font_semibold() }).child(word))
+            continue
+        }
+        let start = i
+        i++
+        row.child(div().text_color(t.text).child(line.range(start, 1)))
+    }
+    return row
+}

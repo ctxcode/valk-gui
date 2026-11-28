@@ -183,19 +183,29 @@ extend Window {
         let n = hit
         while isset(n) {
             let text = n.tooltip_text
-            if isset(text) {
+            let builder = n.tooltip_builder
+            if isset(text) || isset(builder) {
                 if n.key != this.tooltip_key {
+                    // Instant group transition if another tooltip was shown recently
+                    let recently_open = this.tooltip_shown_at > 0 && (this.time - this.tooltip_shown_at) < 0.35
                     this.tooltip_key = n.key
-                    this.tooltip_since = this.time
+                    this.tooltip_since = recently_open ? this.time - TOOLTIP_DELAY : this.time
                 }
-                this.tooltip = text
+                this.tooltip = text ?? ""
+                this.tooltip_builder = builder
+                this.tooltip_placement = n.tooltip_placement
+                this.tooltip_anchor = n.bounds
                 if this.time < this.tooltip_since + TOOLTIP_DELAY : this.wake_at = this.wake_at.min(this.tooltip_since + TOOLTIP_DELAY)
                 return
             }
             n = n.parent
         }
+        if this.tooltip_key != 0 && this.time >= this.tooltip_since + TOOLTIP_DELAY {
+            this.tooltip_shown_at = this.time
+        }
         this.tooltip_key = 0
         this.tooltip = ""
+        this.tooltip_builder = null
     }
 
     fn paint_overlays() {
@@ -208,10 +218,34 @@ extend Window {
             return
         }
         if this.tooltip_key != 0 && !isset(this.pressed_button) && this.time >= this.tooltip_since + TOOLTIP_DELAY {
+            this.tooltip_shown_at = this.time
             let t = this.theme
-            let tip = div().px(8).py(4).rounded(t.radius).bg(t.elevated).border(1).border_color(t.border)
+            let builder = this.tooltip_builder
+            let tip = isset(builder) ? builder() : div().px(8).py(4).rounded(t.radius).bg(t.elevated).border(1).border_color(t.border)
                 .shadow_md().text_xs().text_color(t.text).max_w(320).child(this.tooltip)
-            this.paint_overlay(tip, this.mouse_x + 12, this.mouse_y + 20, 0x7007)
+            let tx = this.mouse_x + 12
+            let ty = this.mouse_y + 20
+            let ab = this.tooltip_anchor
+            if this.tooltip_placement == .top {
+                tx = ab.x
+                ty = (ab.y - 32).max(4)
+            } else if this.tooltip_placement == .bottom {
+                tx = ab.x
+                ty = ab.bottom + 6
+            } else if this.tooltip_placement == .right {
+                tx = ab.right + 6
+                ty = ab.y
+            } else if this.tooltip_placement == .left {
+                tx = (ab.x - 160).max(4)
+                ty = ab.y
+            }
+            this.paint_overlay(tip, tx, ty, 0x7007)
+        }
+        if this.debug_overlay {
+            this.paint_debug_overlay()
+        }
+        if this.inspector_open {
+            this.paint_inspector()
         }
     }
 }

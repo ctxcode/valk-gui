@@ -1,0 +1,151 @@
+use valk.fs
+
+// Interactive layout inspector and file-watching live-reload dev helpers.
+
+class FileStamp {
+    mtime: uint (0)
+    size: uint (0)
+    exists: bool (false)
+}
+
+fn read_stamp(path: String) FileStamp {
+    let info = fs.stat(path) ! return FileStamp{}
+    return FileStamp{ mtime: info.modified_time, size: info.size, exists: true }
+}
+
+fn stamp_changed(a: FileStamp, b: FileStamp) bool {
+    return a.exists != b.exists || a.mtime != b.mtime || a.size != b.size
+}
+
+extend Window {
+    /// Toggles the interactive layout inspector overlay (also bound to F12).
+    + fn toggle_inspector() {
+        this.inspector_open = !this.inspector_open
+        this.dirty = true
+    }
+
+    /// Selects the topmost element at (`x`, `y`) in the layout inspector.
+    + fn inspect_at(x: f32, y: f32) ?Div {
+        let hit = this.hit_test(x, y)
+        if isset(hit) {
+            this.inspected_key = hit.key
+            this.dirty = true
+        }
+        return hit
+    }
+
+    /// Returns a formatted multi-line layout & style summary for the element with `id`.
+    + fn inspect(id: String) ?String {
+        let node = this.find(id) ?! return null
+        return this.inspect_node(node)
+    }
+
+    /// Formats a node's bounds, box model, style, role, and ancestor path for debugging.
+    + fn inspect_node(n: Div) String {
+        let s = n.style
+        let nm = n.name
+        let id_str = isset(nm) ? "#" + nm : "<anonymous>"
+        let kind_str = n.kind.name()
+        let b = n.bounds
+        let dir = s.direction == .row ? "row" : "col"
+        let lines = Array[String]{
+            "%{kind_str} %{id_str} (children: %{n.child_nodes.length})"
+            "bounds: %{round32(b.x).to(int)},%{round32(b.y).to(int)}  %{round32(b.w).to(int)}x%{round32(b.h).to(int)}"
+            "layout: flex-%{dir} z=%{s.z_order} pos=%{s.position.name()}"
+            "pad: %{round32(s.padding.top).to(int)}/%{round32(s.padding.right).to(int)}/%{round32(s.padding.bottom).to(int)}/%{round32(s.padding.left).to(int)}  margin: %{round32(s.margin.top).to(int)}/%{round32(s.margin.right).to(int)}/%{round32(s.margin.bottom).to(int)}/%{round32(s.margin.left).to(int)}"
+            "font: %{round32(n.resolved_font.size).to(int)}px %{n.resolved_font.weight.name()}  opacity: %{round32(s.alpha * 100).to(int)}%"
+        }
+        if n.aria_role != .none || n.effective_disabled {
+            lines.append("a11y: role=%{n.aria_role.name()} disabled=%{n.effective_disabled}")
+        }
+        if s.overflow_x == .scroll || s.overflow_y == .scroll {
+            lines.append("scroll: %{round32(n.scroll_x).to(int)},%{round32(n.scroll_y).to(int)} content=%{round32(n.content_w).to(int)}x%{round32(n.content_h).to(int)}")
+        }
+        let path = inspector_breadcrumb(n)
+        if path.length > 0 : lines.append("path: " + path)
+        return lines.join("\n")
+    }
+
+    /// Watches `path` on the window timer and runs `on_change` (clearing SVG caches and redrawing)
+    /// whenever the file's modification time or size changes. Cancel the returned `Timer` to stop.
+    + fn watch(path: String, on_change: fn()(), interval: f64 (0.3)) Timer {
+        let stamps = Array[FileStamp]{ read_stamp(path) }
+        return this.every(interval.max(0.05), fn() {
+            let cur = read_stamp(path)
+            if stamp_changed(stamps[0], cur) {
+                stamps[0] = cur
+                svg_cache.clear()
+                this.dirty = true
+                this.request_frame()
+                on_change()
+            }
+        })
+    }
+
+    /// Watches multiple file paths and calls `on_change(changed_path)` whenever any file changes.
+    + fn watch_files(paths: Array[String], on_change: fn(String)(), interval: f64 (0.3)) Timer {
+        let stamps = Map[FileStamp]{}
+        each paths as p : stamps.set(p, read_stamp(p))
+        return this.every(interval.max(0.05), fn() {
+            each paths as p {
+                let prev = stamps.get(p) !? FileStamp{}
+                let cur = read_stamp(p)
+                if stamp_changed(prev, cur) {
+                    stamps.set(p, cur)
+                    svg_cache.clear()
+                    this.dirty = true
+                    this.request_frame()
+                    on_change(p)
+                }
+            }
+        })
+    }
+
+    fn paint_inspector() {
+        let target: ?Div = null
+        if this.inspected_key != 0 : target = this.node_by_key(this.inspected_key)
+        if !isset(target) : target = this.hit_test(this.mouse_x, this.mouse_y)
+        let n = target
+        if isset(n) {
+            let s = n.style
+            let b = n.bounds
+            // Margin box (amber)
+            if !s.margin.is_zero() {
+                let mb = Bounds{
+                    x: b.x - s.margin.left, y: b.y - s.margin.top,
+                    w: b.w + s.margin.horizontal, h: b.h + s.margin.vertical
+                }
+                this.scene.add(.{ kind: .quad, bounds: mb, color: rgba(0xf59e0b33), border: Edges.all(1), border_color: rgb(0xf59e0b) })
+            }
+            // Border/padding box (green)
+            this.scene.add(.{ kind: .quad, bounds: b, color: rgba(0x22c55e28), border: Edges.all(1), border_color: rgb(0x22c55e) })
+            // Content box (blue)
+            let inner = b.inset(s.padding.add(s.border_widths))
+            if inner.w > 0 && inner.h > 0 {
+                this.scene.add(.{ kind: .quad, bounds: inner, color: rgba(0x3b82f630), border: Edges.all(1), border_color: rgb(0x3b82f6) })
+            }
+            let summary = this.inspect_node(n)
+            let panel = div().p(10).gap(4).w(320).rounded(6).bg(rgba(0x111216ee)).border(1).border_color(rgb(0x3b82f6))
+                .shadow_lg().text_xs().text_color(rgb(0xe6e6e8))
+                .child(div().font_semibold().text_color(rgb(0x60a5fa)).child("Layout Inspector (F12 to close, Alt+Click to pick)"))
+            each summary.split("\n") as line {
+                panel.child(div().text_color(rgb(0xd4d4d8)).child(line))
+            }
+            this.paint_overlay(panel, (this.width - 332).max(8), (this.height - 170).max(8), 0x1059)
+        }
+    }
+}
+
+fn inspector_breadcrumb(n: Div) String {
+    let parts = Array[String]{}
+    let cur: ?Div = n
+    let depth = 0
+    while isset(cur) && depth < 6 {
+        let nm = cur.name
+        let label = isset(nm) ? "#" + nm : cur.kind.name()
+        parts.prepend(label)
+        cur = cur.parent
+        depth++
+    }
+    return parts.join(" > ")
+}

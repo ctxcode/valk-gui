@@ -1,0 +1,579 @@
+use gui
+use valk.fs
+
+test "Window controls, position, and close interception" {
+    let blocked = Array[bool]{ true }
+    let win = gui.headless(view(fn(win) { return gui.div().size_full() }), 600, 400)
+    win.on_close_request = fn(w: gui.Window) bool { return !blocked[0] }
+
+    win.set_fullscreen(true)
+    assert(win.fullscreen)
+    win.set_fullscreen(false)
+    assert(!win.fullscreen)
+    win.maximize()
+    assert(win.maximized && !win.minimized)
+    win.unmaximize()
+    assert(!win.maximized)
+    win.minimize()
+    assert(win.minimized)
+    win.restore()
+    assert(!win.minimized && !win.maximized)
+    win.set_size(900, 500)
+    assert(same(win.width, 900) && same(win.height, 500))
+    win.set_position(120, 80)
+    assert(win.x == 120 && win.y == 80)
+    win.set_min_size(300, 200)
+    win.set_max_size(1200, 800)
+    win.set_always_on_top(true)
+    assert(win.always_on_top)
+    win.raise()
+    win.focus()
+
+    // Close interception cancels when returning false
+    assert(!win.request_close())
+    assert(!win.quit_requested)
+    blocked[0] = false
+    assert(win.request_close())
+    assert(win.quit_requested)
+}
+
+test "Window frameless hit-testing and drag regions" {
+    let win = gui.headless(view(fn(win) {
+        return gui.div().size_full()
+            .child(gui.div().id("titlebar").h(32).flex().window_drag()
+                .child(gui.div().flex_1().child("App"))
+                .child(gui.button(win, "X").id("close")))
+    }), 400, 300)
+    assert(win.hit_test_region(50, 16) == .draggable)
+    let cb = bounds(win, "close")
+    // Interactive button inside titlebar should NOT be draggable
+    assert(win.hit_test_region(cb.x + 5, cb.y + 5) == .normal)
+    assert(win.hit_test_region(50, 100) == .normal)
+}
+
+test "Rich clipboard: images, HTML, and primary selection" {
+    let win = gui.headless(view(fn(win) {
+        return gui.div().size(20).bg(gui.rgb(0x22c55e))
+    }), 40, 40)
+    win.set_primary_selection("middle paste")
+    assert(win.primary_selection() == "middle paste")
+    win.set_clipboard_html("<b>Hello</b>", "Hello")
+    assert(win.clipboard_html() == "<b>Hello</b>")
+    assert(win.clipboard() == "Hello")
+    assert(!win.has_clipboard_image())
+    let snap = gui.render_scene_image(win) ?! { assert(false); return }
+    assert(win.set_clipboard_image(snap))
+    assert(win.has_clipboard_image())
+    let got = win.clipboard_image() ?! { assert(false); return }
+    assert(got.width == snap.width && got.height == snap.height)
+    assert(gui.diff_images(snap, got) == 0.0)
+}
+
+test "Input events: hover, focus/blur, key_up, double_click, context_menu, pinch, window_focus" {
+    let log = Array[String]{}
+    let f1: Array[?gui.FocusHandle] = .{ null }
+    let f2: Array[?gui.FocusHandle] = .{ null }
+    let win = gui.headless(view(fn(win) {
+        let h1 = f1[0] ?? win.focus_handle()
+        let h2 = f2[0] ?? win.focus_handle()
+        f1[0] = h1
+        f2[0] = h2
+        return gui.div().size_full().p(10).gap(10)
+            .child(gui.div().id("box1").size(80).track_focus(h1)
+                .focus_visible(fn(s) { s.bg(gui.rgb(0x112233)) })
+                .on_hover_enter(fn() { log.append("enter") })
+                .on_hover_leave(fn() { log.append("leave") })
+                .on_focus(fn() { log.append("focus1") })
+                .on_blur(fn() { log.append("blur1") })
+                .on_double_click(fn(e) { log.append("dbl") })
+                .on_context_menu(fn(e) { log.append("ctx") })
+                .on_key_up(fn(e) { log.append("up:" + e.key.name()) })
+                .on_pinch(fn(e) { log.append("pinch") }))
+            .child(gui.div().id("box2").size(80).track_focus(h2)
+                .on_focus(fn() { log.append("focus2") }))
+    }), 300, 300)
+
+    let wf = Array[bool]{ true }
+    win.on_window_focus = fn(v: bool) { wf[0] = v }
+    win.set_window_focused(false)
+    assert(!wf[0] && !win.window_focused)
+    win.set_window_focused(true)
+    assert(wf[0] && win.window_focused)
+
+    win.hover_on("box1")
+    assert(log.contains("enter"))
+    win.move_to(250, 250)
+    assert(log.contains("leave"))
+
+    win.double_click_on("box1")
+    assert(log.contains("focus1") && log.contains("dbl"))
+    win.right_click_on("box1")
+    assert(log.contains("ctx"))
+
+    win.release(.a)
+    assert(log.contains("up:a"))
+
+    let b1 = bounds(win, "box1")
+    win.pinch(b1.center.x, b1.center.y, 1.25)
+    assert(log.contains("pinch"))
+
+    // Extra mouse buttons
+    let extra = Array[gui.MouseButton]{}
+    let w2 = gui.headless(view(fn(win) {
+        return gui.div().size_full().on_mouse_down(fn(e) { extra.append(e.button) })
+    }), 100, 100)
+    w2.mouse_down(10, 10, .back)
+    w2.mouse_down(10, 10, .forward)
+    assert(extra.length == 2 && extra[0] == .back && extra[1] == .forward)
+
+    // Tab moves focus and fires blur1 + focus2
+    win.press(.tab)
+    assert(log.contains("blur1") && log.contains("focus2"))
+    assert(win.is_focused("box2"))
+}
+
+test "Disabled state blocks clicks, focus, and shows not_allowed cursor" {
+    let clicks = Array[int]{ 0 }
+    let fh_box: Array[?gui.FocusHandle] = .{ null }
+    let win = gui.headless(view(fn(win) {
+        let fh = fh_box[0] ?? win.focus_handle()
+        fh_box[0] = fh
+        return gui.div().p(10)
+            .child(gui.button(win, "Nope").id("btn").disabled().track_focus(fh)
+                .on_click(fn(e) { clicks[0] += 1 }))
+    }), 300, 200)
+    win.hover_on("btn")
+    assert(win.cursor == .not_allowed)
+    win.click_on("btn")
+    assert(clicks[0] == 0)
+    assert(!win.is_focused("btn"))
+}
+
+test "Focus trap keeps Tab inside modal and focus_visible only triggers on keyboard" {
+    let handles = Array[gui.FocusHandle]{}
+    let win = gui.headless(view(fn(win) {
+        if handles.length == 0 {
+            handles.append(win.focus_handle())
+            handles.append(win.focus_handle())
+            handles.append(win.focus_handle())
+        }
+        return gui.div().size_full()
+            .child(gui.div().id("outside").size(40).track_focus(handles[0]))
+            .child(gui.modal(win, gui.div().p(10).gap(6)
+                .child(gui.div().id("m1").size(40).track_focus(handles[1])
+                    .focus_visible(fn(s) { s.bg(gui.rgb(0xff0000)) }))
+                .child(gui.div().id("m2").size(40).track_focus(handles[2])), fn() {}))
+    }), 400, 300)
+    win.press(.tab)
+    assert(win.is_focused("m1"))
+    win.press(.tab)
+    assert(win.is_focused("m2"))
+    // Wraps back to m1, never escapes to outside
+    win.press(.tab)
+    assert(win.is_focused("m1"))
+}
+
+test "Layout: aspect_ratio, box_content, line_clamp, scrollbar_gutter, sticky, z_index, transforms" {
+    let win = gui.headless(view(fn(win) {
+        return gui.div().size_full().p(10).gap(10)
+            .child(gui.div().id("ar").w(100).aspect_ratio(2.0))
+            .child(gui.div().id("cb").box_content().w(100).h(40).p(10).border(2))
+            .child(gui.div().id("clamp").w(60).line_clamp(2).child("one two three four five six seven eight nine ten"))
+            .child(gui.div().id("zbox").relative().w(100).h(40)
+                .child(gui.div().id("z_top").absolute().inset(0).z_index(10))
+                .child(gui.div().id("z_bot").absolute().inset(0).z_index(1)))
+            .child(gui.div().id("moved").w(40).h(20).translate(15, 5))
+    }), 400, 400)
+    assert(same(bounds(win, "ar").w, 100) && same(bounds(win, "ar").h, 50))
+    // content_box: 100 + 20 padding + 4 border = 124; 40 + 20 + 4 = 64
+    assert(same(bounds(win, "cb").w, 124) && same(bounds(win, "cb").h, 64))
+    let texts = win.scene.texts()
+    assert(texts.length == 2 && (texts[1]).ends_with("…"))
+    // z_index hit test picks z_top even though z_bot came later in tree
+    let zb = bounds(win, "zbox")
+    let hit = win.hit_test(zb.center.x, zb.center.y) ?! { assert(false); return }
+    assert((hit.name ?? "") == "z_top")
+    assert(same(bounds(win, "moved").x, 25))
+}
+
+test "Programmatic scrolling, scroll_into_view, sticky headers, scrollbar_gutter" {
+    let win = gui.headless(view(fn(win) {
+        let sc = gui.div().id("scroller").h(100).w(200).overflow_y_scroll().scrollbar_gutter()
+            .child(gui.div().id("hdr").sticky().top(0).h(20).bg(gui.rgb(0x222222)).child("Sticky"))
+        each 0 .. 15 as i : sc.child(gui.div().id("item-%i").h(30).flex_shrink_0().child("Item %i"))
+        return gui.div().size_full().child(sc)
+    }), 300, 300)
+
+    assert(win.scroll_to("scroller", 0, 120))
+    win.draw()
+    let sc = win.find("scroller") ?! { assert(false); return }
+    assert(same(sc.scroll_y, 120))
+    // Sticky header remains pinned at top of scroll viewport (y == 0)
+    assert(same(bounds(win, "hdr").y, 0))
+    // Gutter reserves 10px on right so child width is 190
+    assert(same(bounds(win, "item-0").w, 190))
+
+    assert(win.scroll_by("scroller", 0, 30))
+    win.draw()
+    let sc2 = win.find("scroller") ?! { assert(false); return }
+    assert(same(sc2.scroll_y, 150))
+
+    assert(win.scroll_into_view("item-0"))
+    win.draw()
+    let sc3 = win.find("scroller") ?! { assert(false); return }
+    assert(sc3.scroll_y < 150)
+}
+
+test "Virtualized uniform_grid and virtual_list" {
+    let built_grid = Array[uint]{}
+    let built_vlist = Array[uint]{}
+    let win = gui.headless(view(fn(win) {
+        built_grid.clear()
+        built_vlist.clear()
+        return gui.div().size_full().flex().gap(10)
+            .child(gui.uniform_grid(win, "ugrid", 100, 4, 40, fn(i) {
+                built_grid.append(i)
+                return gui.div().child("G%i")
+            }).flex_1().h(120))
+            .child(gui.virtual_list(win, "vlist", 200, 30, fn(i) {
+                built_vlist.append(i)
+                return gui.div().h(i % 2 == 0 ? 24 : 44).child("V%i")
+            }).flex_1().h(120))
+    }), 500, 200)
+    assert(built_grid.length > 0 && built_grid.length < 30)
+    assert(built_vlist.length > 0 && built_vlist.length < 15)
+    win.scroll_on("vlist", 0, 300)
+    assert(built_vlist[0] > 3)
+}
+
+test "Paint: backdrop_blur, radial/conic/multi-stop gradients, dashed/per-side borders, SVG, visual diff" {
+    let svg_src = "<svg viewBox=\"0 0 24 24\"><rect x=\"2\" y=\"2\" width=\"20\" height=\"20\" rx=\"3\" stroke=\"currentColor\" fill=\"none\" stroke-width=\"2\"/><circle cx=\"12\" cy=\"12\" r=\"4\" fill=\"#3b82f6\"/><path d=\"M4 20 L20 4 Z\" stroke=\"red\"/></svg>"
+    let win = gui.headless(view(fn(win) {
+        return gui.div().size_full().p(10).gap(8)
+            .child(gui.div().w(80).h(40).bg_radial_gradient(gui.rgb(0xff0000), gui.rgb(0x0000ff)))
+            .child(gui.div().w(80).h(40).bg_conic_gradient(gui.rgb(0x00ff00), gui.rgb(0x0000ff), 45))
+            .child(gui.div().w(80).h(40).bg_gradient_stops(.{
+                .{ color: gui.rgb(0xff0000), position: 0 },
+                .{ color: gui.rgb(0x00ff00), position: 0.5 },
+                .{ color: gui.rgb(0x0000ff), position: 1 }
+            }, 90))
+            .child(gui.div().w(80).h(30).border(2).border_dashed().border_color_t(gui.rgb(0xff0000)).border_color_b(gui.rgb(0x00ff00)))
+            .child(gui.div().w(80).h(30).backdrop_blur(4).bg(gui.rgba(0xffffff44)))
+            .child(gui.svg_bytes(svg_src, 32))
+    }), 200, 300)
+
+    let has_blur = false
+    each win.scene.items as item {
+        if item.kind == .blur : has_blur = true
+    }
+    assert(has_blur)
+    let img1 = gui.render_scene_image(win) ?! { assert(false); return }
+    let img2 = gui.render_scene_image(win) ?! { assert(false); return }
+    assert(gui.diff_images(img1, img2) == 0.0)
+    // In-memory image element via img_from
+    let win_img = gui.headless(view(fn(win) {
+        return gui.div().items_start().child(gui.img_from(img1).id("memimg"))
+    }), 300, 400)
+    assert(same(bounds(win_img, "memimg").w, 200) && same(bounds(win_img, "memimg").h, 300))
+}
+
+test "Rich text and Markdown renderer" {
+    let clicked = Array[String]{}
+    let md = "# Heading\n\nHello **bold** and *italic* and `code` and [Valk](https://valk-lang.dev).\n\n- Item A\n- Item B\n\n> Quoted line\n\n| Name | Role |\n| --- | --- |\n| Ada | Dev |\n\n```valk\nfn main() { let x = 42 }\n```"
+    let win = gui.headless(view(fn(win) {
+        return gui.div().size_full().p(10).child(gui.markdown(win, md, fn(url) { clicked.append(url) }))
+    }), 500, 600)
+    assert(win.scene.has_text("Heading"))
+    assert(win.scene.has_text("bold"))
+    assert(win.scene.has_text("code"))
+    assert(win.scene.has_text("Ada"))
+    assert(win.scene.has_text("main"))
+    let links = win.find_by_role(.link)
+    assert(links.length == 1)
+    let lb = links[0].bounds
+    win.click(lb.center.x, lb.center.y)
+    assert(clicked.length == 1 && clicked[0] == "https://valk-lang.dev")
+}
+
+test "TextInput IME composition and TextArea find & replace" {
+    let ti = gui.TextInput.new("Type")
+    let ta = gui.TextArea.new("hello world\nHello valk\nhello again")
+    let win = gui.headless(view(fn(win) {
+        return gui.div().size_full().p(10).gap(10)
+            .child(ti.render(win).id("ti"))
+            .child(ta.render(win).id("ta").flex_1())
+    }), 500, 400)
+    ti.focus_handle(win).focus()
+    win.ime_edit("nihao", 0, 5)
+    win.draw()
+    assert(win.scene.has_text("nihao"))
+    win.type_text("你好")
+    assert(ti.text == "你好" && win.ime_text == "")
+
+    // Find & replace in TextArea
+    ta.open_replace("hello")
+    assert(ta.find_matches().length == 3)
+    assert(ta.find_next())
+    assert(ta.selected_text().lower() == "hello")
+    ta.replace_input.set_text("hi")
+    assert(ta.replace_current())
+    assert(ta.lines[0] == "hi world")
+    let count = ta.replace_all()
+    assert(count == 2)
+    assert(ta.text == "hi world\nhi valk\nhi again")
+    ta.close_find()
+    assert(!ta.find_open)
+}
+
+test "Theme presets, 150+ icons, breadcrumbs, pagination, segmented, skeleton" {
+    let themes = Array[gui.Theme]{ gui.Theme.dark(), gui.Theme.light(), gui.Theme.nord(), gui.Theme.dracula(), gui.Theme.catppuccin(), gui.Theme.high_contrast() }
+    assert(themes.length == 6)
+    let page = Array[uint]{ 1 }
+    let seg = Array[uint]{ 0 }
+    let crumb = Array[uint]{ 99 }
+    let win = gui.headless(view(fn(win) {
+        return gui.div().size_full().p(10).gap(8)
+            .child(gui.breadcrumbs(win, .{ "Home", "Repo", "src" }, fn(i) { crumb[0] = i }))
+            .child(gui.pagination(win, page[0], 5, fn(p) { page[0] = p }))
+            .child(gui.segmented(win, "seg", .{ "Day", "Week", "Month" }, seg[0], fn(i) { seg[0] = i }))
+            .child(gui.skeleton(win, 120, 16))
+            .child(gui.div().flex().gap(4)
+                .child(gui.icon(.git_branch))
+                .child(gui.icon(.git_merge))
+                .child(gui.icon(.git_pull_request))
+                .child(gui.icon(.git_commit))
+                .child(gui.icon(.git_fork))
+                .child(gui.icon(.repo))
+                .child(gui.icon(.issue))
+                .child(gui.icon(.rocket)))
+    }), 500, 300, gui.Theme.nord())
+    assert(gui.Icon.items().length >= 150)
+    assert(win.scene.has_text("Home") && win.scene.has_text("Week"))
+    win.click_on("seg/2")
+    assert(seg[0] == 2)
+}
+
+test "Desktop widgets: SplitPane, ToastStack, CommandPalette, Table, TreeView, Combobox, MultiSelect, NumberInput, Collapsible, Popover, ColorPicker, DatePicker, MenuBar" {
+    let split = gui.SplitPane.horizontal(0.5)
+    let toasts = gui.ToastStack{}
+    let ran_cmd = Array[String]{}
+    let palette = gui.CommandPalette{
+        items: .{
+            gui.CommandItem.new("Open File", fn() { ran_cmd.append("open") }).with_category("File").with_shortcut("Ctrl+O"),
+            gui.CommandItem.new("Toggle Theme", fn() { ran_cmd.append("theme") }).with_category("View")
+        }
+    }
+    let tbl = gui.Table{
+        columns: .{ gui.TableColumn.new("name", "Name", 120), gui.TableColumn.new("score", "Score", 80) },
+        rows: .{ .{ "Charlie", "30" }, .{ "Alice", "90" }, .{ "Bob", "60" } }
+    }
+    let root_node = gui.TreeNode.new("src", "src", .folder).add(gui.TreeNode.new("main", "main.valk", .file_code))
+    let tree = gui.TreeView{ roots: .{ root_node } }
+    let combo = gui.Combobox.new(.{ "Apple", "Banana", "Cherry" })
+    let multi = gui.MultiSelect.new(.{ "Red", "Green", "Blue" })
+    let num = gui.NumberInput.new(5, 0, 10, 2)
+    let coll = gui.Collapsible.new("Details", false)
+    let pop = gui.Popover{}
+    let picker = gui.ColorPicker{}
+    let date = gui.DatePicker.new(2026, 2, 15)
+    let mbar = gui.MenuBar.new(.{
+        gui.AppMenu.new("File", .{ gui.MenuItem.new("New", fn() { ran_cmd.append("new") }) })
+    })
+
+    let win = gui.headless(view(fn(win) {
+        return gui.div().size_full().flex_col()
+            .child(mbar.render(win))
+            .child(split.render(win,
+                gui.div().p(8).gap(6)
+                    .child(tree.render(win).h(80))
+                    .child(combo.render(win))
+                    .child(multi.render(win))
+                    .child(num.render(win))
+                    .child(coll.render(win, fn() gui.Div { return gui.div().child("Hidden body") }))
+                    .child(pop.render(win, gui.button(win, "Info").id("popbtn"), gui.div().child("Pop body"))),
+                gui.div().p(8).gap(6)
+                    .child(tbl.render(win).h(120))
+                    .child(picker.render(win))
+                    .child(date.render(win))
+            ).flex_1())
+            .child(toasts.render(win))
+            .child(palette.render(win))
+    }), 800, 700)
+
+    // ToastStack push + auto-dismiss
+    toasts.push(win, "Saved!", .success, 2.0)
+    win.draw()
+    assert(win.scene.has_text("Saved!"))
+    win.advance(2.5)
+    assert(toasts.items.length == 0)
+
+    // CommandPalette fuzzy search & run
+    palette.show(win)
+    palette.query.set_text("tth")
+    assert(palette.filtered().length == 1)
+    assert(palette.run_selected())
+    assert(ran_cmd.contains("theme"))
+
+    // Table sorting
+    tbl.sort_by(0)
+    win.draw()
+    assert(tbl.rows[0][0] == "Charlie") // original unchanged; sorted view puts Alice first
+
+    // TreeView expand + select
+    win.click_on(tree.id + "/src")
+    assert(root_node.expanded && tree.selected_id == "src")
+    assert(win.scene.has_text("main.valk"))
+
+    // Combobox & MultiSelect
+    combo.select(1)
+    assert(combo.value == "Banana")
+    multi.toggle(0)
+    multi.toggle(2)
+    assert(multi.selected_indices().length == 2)
+
+    // NumberInput clamping
+    num.increment()
+    assert(num.value == 7)
+    num.set(100)
+    assert(num.value == 10)
+    num.decrement()
+    assert(num.value == 8)
+
+    // Collapsible
+    assert(!win.scene.has_text("Hidden body"))
+    coll.toggle()
+    win.draw()
+    assert(win.scene.has_text("Hidden body"))
+
+    // Popover
+    win.click_on("popbtn")
+    assert(pop.open && win.scene.has_text("Pop body"))
+    win.press(.escape)
+    assert(!pop.open)
+
+    // ColorPicker & DatePicker
+    picker.set_color(gui.rgb(0x00ff00))
+    assert(picker.color.g > 240)
+    date.next_month()
+    assert(date.month == 3 && date.formatted() == "2026-03-15")
+    date.select_day(31)
+    assert(date.formatted() == "2026-03-31")
+
+    // Accessibility announcements & tree queries
+    win.announce("All widgets loaded")
+    assert(win.announcements.length == 1)
+    assert(win.find_by_role(.table).length >= 1)
+    assert(win.find_by_role(.tree).length >= 1)
+    assert(win.find_by_role(.combobox).length >= 2)
+}
+
+test "Rich tooltips and debug overlay" {
+    let win = gui.headless(view(fn(win) {
+        return gui.div().size_full().p(20).gap(20)
+            .child(gui.div().id("t1").size(40).tooltip_content(fn() gui.Div {
+                return gui.div().child("Rich tip 1")
+            }, .bottom))
+            .child(gui.div().id("t2").size(40).tooltip("Plain tip 2", .right))
+    }), 300, 200)
+    win.hover_on("t1")
+    win.advance(0.6)
+    assert(win.scene.has_text("Rich tip 1"))
+    // Instant group transition to t2 without waiting another 0.5s
+    win.hover_on("t2")
+    assert(win.scene.has_text("Plain tip 2"))
+
+    win.debug_overlay = true
+    win.draw()
+    assert(win.scene.has_text("FPS:"))
+
+    // Interactive layout inspector (F12 + Alt+Click pick + inspect summary)
+    win.press(.f12)
+    assert(win.inspector_open)
+    let b1 = bounds(win, "t1")
+    win.mouse_down(b1.center.x, b1.center.y, .left, .{ alt: true })
+    win.draw()
+    assert(win.scene.has_text("Layout Inspector"))
+    assert(win.scene.has_text("#t1"))
+    let summary = win.inspect("t1") ?! { assert(false); return }
+    assert(summary.contains("#t1") && summary.contains("40x40"))
+    win.press(.f12)
+    assert(!win.inspector_open)
+}
+
+test "Live reload file watcher detects changes" {
+    let path = "./debug/watch_test.tmp"
+    fs.write(path, "v1") ! { assert(false); return }
+    defer { fs.delete_file(path) _ }
+    let hits = Array[int]{ 0 }
+    let win = gui.headless(view(fn(win) { return gui.div() }), 100, 100)
+    let timer = win.watch(path, fn() { hits[0] += 1 }, 0.1)
+    win.advance(0.15)
+    assert(hits[0] == 0)
+    fs.write(path, "version 2 longer") ! { assert(false); return }
+    win.advance(0.15)
+    assert(hits[0] == 1)
+    timer.cancel()
+    fs.write(path, "version 3") ! { assert(false); return }
+    win.advance(0.2)
+    assert(hits[0] == 1)
+}
+
+test "MenuBar renders in-window and handles dropdown click" {
+    let clicked = Array[String]{}
+    let mbar = gui.MenuBar.new(.{
+        gui.AppMenu.new("File", .{
+            gui.MenuItem.new("Save", fn() { clicked.append("save") }).with_shortcut("Cmd+Shift+S")
+        }),
+        gui.AppMenu.new("Edit", .{
+            gui.MenuItem.new("Copy", fn() { clicked.append("copy") }).with_shortcut("Ctrl+C")
+        })
+    })
+    let win = gui.headless(view(fn(win) {
+        return gui.div().size_full().child(mbar.render(win))
+    }), 400, 200)
+    assert(win.scene.has_text("File") && win.scene.has_text("Edit"))
+    win.click_on(mbar.id + "/0")
+    assert(win.scene.has_text("Save"))
+    win.press(.escape)
+    assert(!win.scene.has_text("Save"))
+}
+
+test "Unicode shaping: ligatures, Persian/Arabic forms, and BiDi visual cursor map" {
+    assert(gui.shape_ligatures("office waffle fine") == "oﬃce waﬄe ﬁne")
+    // BiDi logical <-> visual mapping and visual Left/Right cursor movement on mixed LTR + Hebrew
+    let mixed = "ab של"
+    let bm = gui.bidi_map(mixed)
+    assert(!bm.rtl_base)
+    assert(bm.visual_to_byte.length == 5)
+    // First two visual chars are 'a' (0) and 'b' (1), then space (2), then RTL reversed ('ל' before 'ש')
+    assert(bm.visual_to_logical(0) == 0)
+    assert(bm.visual_to_logical(1) == 1)
+    let next_right = bm.move_visual(0, true)
+    assert(next_right == 1)
+    let back_left = bm.move_visual(1, false)
+    assert(back_left == 0)
+    // Pure RTL paragraph detects rtl_base == true
+    let rtl_bm = gui.bidi_map("שלום")
+    assert(rtl_bm.rtl_base)
+    assert(rtl_bm.visual_to_byte.length == 4)
+}
+
+test "Accessibility bridge: JSON tree export, diff callbacks, and focus announcements" {
+    let updates = Array[uint]{}
+    let f1: Array[?gui.FocusHandle] = .{ null }
+    let win = gui.headless(view(fn(win) {
+        let fh = f1[0] ?? win.focus_handle()
+        f1[0] = fh
+        return gui.div().size_full().p(10).gap(8)
+            .child(gui.button(win, "Submit").id("sub").track_focus(fh))
+            .child(gui.checkbox(win, true, "Agree").id("chk"))
+    }), 300, 200)
+    win.a11y_announce_focus = true
+    win.on_a11y_update = fn(nodes: Array[gui.AccessibleNode]) { updates.append(nodes.length) }
+    win.draw()
+    assert(updates.length == 1 && updates[0] == 2)
+    let json = win.accessibility_json()
+    assert(json.contains("\"role\":\"button\"") && json.contains("\"label\":\"Submit\"") && json.contains("\"checked\":true"))
+    win.press(.tab)
+    assert(win.announcements.length == 1 && win.announcements[0].contains("Submit"))
+}

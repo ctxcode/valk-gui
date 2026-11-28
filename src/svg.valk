@@ -1,0 +1,465 @@
+use valk.fs
+
+// Lightweight pure-Valk SVG parser and vector renderer.
+// Supports viewBox, rect, circle, ellipse, line, polyline, polygon, and path
+// (M/m, L/l, H/h, V/v, C/c, Q/q, Z/z) with currentColor tinting, fill, stroke, and stroke-width.
+
+enum SvgShapeKind { rect, circle, ellipse, line, polyline, polygon, path }
+
+struct SvgShape {
+    kind: SvgShapeKind
+    x: f32 (0)
+    y: f32 (0)
+    w: f32 (0)
+    h: f32 (0)
+    rx: f32 (0)
+    ry: f32 (0)
+    x2: f32 (0)
+    y2: f32 (0)
+    points: Array[Point] (.{})
+    d: String ("")
+    fill: ?Color (null)
+    fill_current: bool (false)
+    fill_none: bool (false)
+    stroke: ?Color (null)
+    stroke_current: bool (false)
+    stroke_width: f32 (0)
+}
+
+class SvgDoc {
+    vb_x: f32 (0)
+    vb_y: f32 (0)
+    vb_w: f32 (24)
+    vb_h: f32 (24)
+    shapes: Array[SvgShape] (.{})
+}
+
+global svg_cache: Map[SvgDoc] (.{})
+
+/// Renders an SVG file as a crisp, tintable vector element. Uses `currentColor` (the inherited
+/// text color) whenever a shape uses `currentColor` or leaves fill/stroke unset.
++ fn svg(path: String, size: f32 (0)) Div {
+    let data = fs.read(path) !? ""
+    return svg_bytes(data, size)
+}
+
+/// Renders SVG XML bytes (for example from `#embed`) as a crisp, tintable vector element.
++ fn svg_bytes(data: String, size: f32 (0)) Div {
+    let key = "svg:%{data.hash()}:%{data.length}"
+    let cached = svg_cache.get(key) !? null
+    let doc = isset(cached) ? cached : parse_svg(data)
+    if !isset(cached) {
+        if svg_cache.length > 256 : svg_cache.clear()
+        svg_cache.set(key, doc)
+    }
+    let d = canvas(fn(p, b) { draw_svg(p, doc, b, p.color) }).flex_shrink_0()
+    if size > 0 {
+        d.size(size)
+    } else {
+        d.w(doc.vb_w).h(doc.vb_h)
+    }
+    return d
+}
+
+fn draw_svg(p: Painter, doc: SvgDoc, b: Bounds, current: Color) {
+    if doc.vb_w <= 0 || doc.vb_h <= 0 || b.w <= 0 || b.h <= 0 : return
+    let s = (b.w / doc.vb_w).min(b.h / doc.vb_h)
+    let ox = b.x + (b.w - doc.vb_w * s) / 2 - doc.vb_x * s
+    let oy = b.y + (b.h - doc.vb_h * s) / 2 - doc.vb_y * s
+    each doc.shapes as sh {
+        let fill: ?Color = sh.fill_none ? null : (sh.fill_current ? current : sh.fill)
+        let stroke: ?Color = sh.stroke_current ? current : sh.stroke
+        let sw = (sh.stroke_width > 0 ? sh.stroke_width : (isset(stroke) ? 1.5 : 0)) * s
+        match sh.kind {
+            .rect => {
+                let rb = Bounds{ x: ox + sh.x * s, y: oy + sh.y * s, w: sh.w * s, h: sh.h * s }
+                let r = sh.rx * s
+                if isset(fill) : p.fill(rb, fill, r)
+                if isset(stroke) && sw > 0 : p.stroke(rb, stroke, sw, r)
+            }
+            .circle => {
+                let cx = ox + sh.x * s
+                let cy = oy + sh.y * s
+                let r = sh.rx * s
+                if isset(fill) : p.circle(cx, cy, r, fill)
+                if isset(stroke) && sw > 0 : p.ring(cx, cy, r, stroke, sw)
+            }
+            .ellipse => {
+                let cx = ox + sh.x * s
+                let cy = oy + sh.y * s
+                let rx = sh.rx * s
+                let ry = sh.ry * s
+                let pts = Array[Point]{}
+                each 0 .. 25 as i {
+                    let a = i.to(f32) * 6.2831853 / 24.0
+                    pts.append(.{ x: cx + cos32(a) * rx, y: cy + sin32(a) * ry })
+                }
+                if isset(fill) : fill_polygon(p, pts, fill)
+                if isset(stroke) && sw > 0 : p.polyline(pts, stroke, sw)
+            }
+            .line => {
+                if isset(stroke) && sw > 0 {
+                    p.line(ox + sh.x * s, oy + sh.y * s, ox + sh.x2 * s, oy + sh.y2 * s, stroke, sw)
+                }
+            }
+            .polyline, .polygon => {
+                let pts = Array[Point]{}
+                each sh.points as pt : pts.append(.{ x: ox + pt.x * s, y: oy + pt.y * s })
+                if sh.kind == .polygon && pts.length > 2 {
+                    let first = pts.get(0) !!
+                    pts.append(first)
+                    if isset(fill) : fill_polygon(p, pts, fill)
+                }
+                if isset(stroke) && sw > 0 && pts.length >= 2 : p.polyline(pts, stroke, sw)
+            }
+            .path => {
+                let subpaths = flatten_svg_path(sh.d, ox, oy, s)
+                each subpaths as pts {
+                    if pts.length < 2 : continue
+                    if isset(fill) && pts.length >= 3 : fill_polygon(p, pts, fill)
+                    if isset(stroke) && sw > 0 : p.polyline(pts, stroke, sw)
+                }
+            }
+        }
+    }
+}
+
+fn fill_polygon(p: Painter, pts: Array[Point], color: Color) {
+    if pts.length < 3 : return
+    let a = pts.get(0) !!
+    let i: uint = 1
+    while i + 1 < pts.length {
+        let b = pts.get(i) !!
+        let c = pts.get(i + 1) !!
+        p.triangle(a, b, c, color)
+        i++
+    }
+}
+
+fn parse_svg(data: String) SvgDoc {
+    let doc = SvgDoc{}
+    let root_fill: ?Color = null
+    let root_fill_cur = false
+    let root_fill_none = false
+    let root_stroke: ?Color = null
+    let root_stroke_cur = false
+    let root_sw: f32 = 0
+
+    let i: uint = 0
+    while i < data.length {
+        if data[i] != '<' { i++; continue }
+        let end = i + 1
+        while end < data.length && data[end] != '>' : end++
+        if end >= data.length : break
+        let tag = data.range(i + 1, end - i - 1).trim()
+        i = end + 1
+        if tag.length == 0 || tag.starts_with("/") || tag.starts_with("!") || tag.starts_with("?") : continue
+        if tag.ends_with("/") : tag = tag.range(0, tag.length - 1).trim()
+
+        let sp: uint = 0
+        while sp < tag.length && tag[sp] != ' ' && tag[sp] != '\t' && tag[sp] != '\n' && tag[sp] != '\r' : sp++
+        let name = tag.range(0, sp).lower()
+        let attrs = parse_xml_attrs(tag.range(sp, tag.length - sp))
+
+        if name == "svg" {
+            let vb = attrs.get("viewbox") !? ""
+            if vb.length > 0 {
+                let nums = parse_svg_numbers(vb)
+                if nums.length >= 4 {
+                    doc.vb_x = nums.get(0) !? 0
+                    doc.vb_y = nums.get(1) !? 0
+                    doc.vb_w = (nums.get(2) !? 24).max(1)
+                    doc.vb_h = (nums.get(3) !? 24).max(1)
+                }
+            } else {
+                let w = parse_svg_len(attrs.get("width") !? "")
+                let h = parse_svg_len(attrs.get("height") !? "")
+                if w > 0 : doc.vb_w = w
+                if h > 0 : doc.vb_h = h
+            }
+            let rf = attrs.get("fill") !? ""
+            if rf == "none" : root_fill_none = true
+            else if rf == "currentColor" || rf == "currentcolor" : root_fill_cur = true
+            else if rf.length > 0 : root_fill = parse_svg_color(rf)
+            let rs = attrs.get("stroke") !? ""
+            if rs == "currentColor" || rs == "currentcolor" : root_stroke_cur = true
+            else if rs.length > 0 && rs != "none" : root_stroke = parse_svg_color(rs)
+            let rsw = parse_svg_len(attrs.get("stroke-width") !? "")
+            if rsw > 0 : root_sw = rsw
+            continue
+        }
+
+        let sh = SvgShape{ kind: .rect, fill: root_fill, fill_current: root_fill_cur, fill_none: root_fill_none, stroke: root_stroke, stroke_current: root_stroke_cur, stroke_width: root_sw }
+        apply_svg_paint_attrs(sh, attrs)
+
+        if name == "rect" {
+            sh.kind = .rect
+            sh.x = parse_svg_len(attrs.get("x") !? "")
+            sh.y = parse_svg_len(attrs.get("y") !? "")
+            sh.w = parse_svg_len(attrs.get("width") !? "")
+            sh.h = parse_svg_len(attrs.get("height") !? "")
+            sh.rx = parse_svg_len(attrs.get("rx") !? (attrs.get("ry") !? ""))
+            doc.shapes.append(sh)
+        } else if name == "circle" {
+            sh.kind = .circle
+            sh.x = parse_svg_len(attrs.get("cx") !? "")
+            sh.y = parse_svg_len(attrs.get("cy") !? "")
+            sh.rx = parse_svg_len(attrs.get("r") !? "")
+            doc.shapes.append(sh)
+        } else if name == "ellipse" {
+            sh.kind = .ellipse
+            sh.x = parse_svg_len(attrs.get("cx") !? "")
+            sh.y = parse_svg_len(attrs.get("cy") !? "")
+            sh.rx = parse_svg_len(attrs.get("rx") !? "")
+            sh.ry = parse_svg_len(attrs.get("ry") !? "")
+            doc.shapes.append(sh)
+        } else if name == "line" {
+            sh.kind = .line
+            sh.x = parse_svg_len(attrs.get("x1") !? "")
+            sh.y = parse_svg_len(attrs.get("y1") !? "")
+            sh.x2 = parse_svg_len(attrs.get("x2") !? "")
+            sh.y2 = parse_svg_len(attrs.get("y2") !? "")
+            if !isset(sh.stroke) && !sh.stroke_current : sh.stroke_current = true
+            doc.shapes.append(sh)
+        } else if name == "polyline" || name == "polygon" {
+            sh.kind = name == "polygon" ? .polygon : .polyline
+            let nums = parse_svg_numbers(attrs.get("points") !? "")
+            let k: uint = 0
+            while k + 1 < nums.length {
+                sh.points.append(.{ x: nums.get(k) !? 0, y: nums.get(k + 1) !? 0 })
+                k += 2
+            }
+            doc.shapes.append(sh)
+        } else if name == "path" {
+            sh.kind = .path
+            sh.d = attrs.get("d") !? ""
+            if sh.d.length > 0 : doc.shapes.append(sh)
+        }
+    }
+    return doc
+}
+
+fn apply_svg_paint_attrs(sh: SvgShape, attrs: Map[String]) {
+    let f = attrs.get("fill") !? ""
+    if f.length > 0 {
+        if f == "none" {
+            sh.fill_none = true; sh.fill = null; sh.fill_current = false
+        } else if f == "currentColor" || f == "currentcolor" {
+            sh.fill_none = false; sh.fill_current = true
+        } else {
+            sh.fill_none = false; sh.fill_current = false; sh.fill = parse_svg_color(f)
+        }
+    }
+    let st = attrs.get("stroke") !? ""
+    if st.length > 0 {
+        if st == "none" {
+            sh.stroke = null; sh.stroke_current = false
+        } else if st == "currentColor" || st == "currentcolor" {
+            sh.stroke_current = true
+        } else {
+            sh.stroke_current = false; sh.stroke = parse_svg_color(st)
+        }
+    }
+    let sw = parse_svg_len(attrs.get("stroke-width") !? "")
+    if sw > 0 : sh.stroke_width = sw
+    if !sh.fill_none && !isset(sh.fill) && !sh.fill_current && !isset(sh.stroke) && !sh.stroke_current {
+        sh.fill_current = true
+    }
+}
+
+fn parse_xml_attrs(s: String) Map[String] {
+    let out = Map[String]{}
+    let i: uint = 0
+    while i < s.length {
+        while i < s.length && (s[i] == ' ' || s[i] == '\t' || s[i] == '\n' || s[i] == '\r') : i++
+        let ks = i
+        while i < s.length && s[i] != '=' && s[i] != ' ' && s[i] != '\t' : i++
+        let key = s.range(ks, i - ks).lower()
+        while i < s.length && s[i] != '=' : i++
+        if i >= s.length : break
+        i++
+        while i < s.length && (s[i] == ' ' || s[i] == '\t') : i++
+        if i >= s.length : break
+        let q = s[i]
+        if q == '"' || q == '\'' {
+            i++
+            let vs = i
+            while i < s.length && s[i] != q : i++
+            out.set(key, s.range(vs, i - vs))
+            if i < s.length : i++
+        }
+    }
+    return out
+}
+
+fn parse_svg_len(s: String) f32 {
+    let clean = s.trim().replace("px", "")
+    if clean.length == 0 : return 0
+    return clean.to(f32) !? 0
+}
+
+fn parse_svg_color(s: String) ?Color {
+    let c = s.trim().lower()
+    if c == "white" : return white()
+    if c == "black" : return black()
+    if c == "red" : return rgb(0xef4444)
+    if c == "green" : return rgb(0x22c55e)
+    if c == "blue" : return rgb(0x3b82f6)
+    if c == "yellow" : return rgb(0xfacc15)
+    if c == "orange" : return rgb(0xf97316)
+    if c == "gray" || c == "grey" : return rgb(0x9ca3af)
+    if c.starts_with("#") {
+        let hex = c.range(1, c.length - 1)
+        if hex.length == 3 {
+            let r = parse_hex_digit(hex[0]) * 17
+            let g = parse_hex_digit(hex[1]) * 17
+            let b = parse_hex_digit(hex[2]) * 17
+            return .{ r: r.to(u8), g: g.to(u8), b: b.to(u8), a: 255 }
+        }
+        if hex.length == 6 {
+            let r = parse_hex_digit(hex[0]) * 16 + parse_hex_digit(hex[1])
+            let g = parse_hex_digit(hex[2]) * 16 + parse_hex_digit(hex[3])
+            let b = parse_hex_digit(hex[4]) * 16 + parse_hex_digit(hex[5])
+            return .{ r: r.to(u8), g: g.to(u8), b: b.to(u8), a: 255 }
+        }
+    }
+    return null
+}
+
+fn parse_hex_digit(ch: u8) u32 {
+    if ch >= '0' && ch <= '9' : return (ch - '0').to(u32)
+    if ch >= 'a' && ch <= 'f' : return (ch - 'a' + 10).to(u32)
+    if ch >= 'A' && ch <= 'F' : return (ch - 'A' + 10).to(u32)
+    return 0
+}
+
+fn parse_svg_numbers(s: String) Array[f32] {
+    let out = Array[f32]{}
+    let i: uint = 0
+    while i < s.length {
+        while i < s.length && !is_num_start(s[i]) : i++
+        if i >= s.length : break
+        let start = i
+        if s[i] == '-' || s[i] == '+' : i++
+        let has_dot = false
+        while i < s.length {
+            let ch = s[i]
+            if ch >= '0' && ch <= '9' { i++; continue }
+            if ch == '.' && !has_dot { has_dot = true; i++; continue }
+            break
+        }
+        let val = s.range(start, i - start).to(f32) !? 0
+        out.append(val)
+    }
+    return out
+}
+
+fn is_num_start(ch: u8) bool {
+    return (ch >= '0' && ch <= '9') || ch == '-' || ch == '+' || ch == '.'
+}
+
+class SvgPathReader {
+    d: String
+    i: uint (0)
+
+    fn skip_sep() {
+        while this.i < this.d.length {
+            let c = this.d[this.i]
+            if c == ' ' || c == ',' || c == '\t' || c == '\n' || c == '\r' : this.i++
+            else : break
+        }
+    }
+
+    fn read_num() ?f32 {
+        this.skip_sep()
+        if this.i >= this.d.length || !is_num_start(this.d[this.i]) : return null
+        let start = this.i
+        if this.d[this.i] == '-' || this.d[this.i] == '+' : this.i++
+        let dot = false
+        while this.i < this.d.length {
+            let ch = this.d[this.i]
+            if ch >= '0' && ch <= '9' { this.i++; continue }
+            if ch == '.' && !dot { dot = true; this.i++; continue }
+            break
+        }
+        return this.d.range(start, this.i - start).to(f32) !? 0
+    }
+}
+
+fn flatten_svg_path(d: String, ox: f32, oy: f32, s: f32) Array[Array[Point]] {
+    let paths = Array[Array[Point]]{}
+    let cur = Array[Point]{}
+    let cx: f32 = 0; let cy: f32 = 0
+    let sx: f32 = 0; let sy: f32 = 0
+    let cmd: u8 = 'M'
+    let r = SvgPathReader{ d: d }
+    while r.i < d.length {
+        r.skip_sep()
+        if r.i >= d.length : break
+        let ch = d[r.i]
+        if (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') {
+            cmd = ch
+            r.i++
+        }
+        if cmd == 'Z' || cmd == 'z' {
+            if cur.length > 0 {
+                cur.append(.{ x: ox + sx * s, y: oy + sy * s })
+                paths.append(cur)
+                cur = Array[Point]{}
+            }
+            cx = sx; cy = sy
+            continue
+        }
+        if cmd == 'M' || cmd == 'm' {
+            let nx = r.read_num() ?! break
+            let ny = r.read_num() ?! break
+            if cur.length > 0 { paths.append(cur); cur = Array[Point]{} }
+            if cmd == 'm' { cx += nx; cy += ny } else { cx = nx; cy = ny }
+            sx = cx; sy = cy
+            cur.append(.{ x: ox + cx * s, y: oy + cy * s })
+            cmd = cmd == 'm' ? 'l' : 'L'
+        } else if cmd == 'L' || cmd == 'l' {
+            let nx = r.read_num() ?! break
+            let ny = r.read_num() ?! break
+            if cmd == 'l' { cx += nx; cy += ny } else { cx = nx; cy = ny }
+            cur.append(.{ x: ox + cx * s, y: oy + cy * s })
+        } else if cmd == 'H' || cmd == 'h' {
+            let nx = r.read_num() ?! break
+            if cmd == 'h' : cx += nx else : cx = nx
+            cur.append(.{ x: ox + cx * s, y: oy + cy * s })
+        } else if cmd == 'V' || cmd == 'v' {
+            let ny = r.read_num() ?! break
+            if cmd == 'v' : cy += ny else : cy = ny
+            cur.append(.{ x: ox + cx * s, y: oy + cy * s })
+        } else if cmd == 'Q' || cmd == 'q' {
+            let x1 = r.read_num() ?! break; let y1 = r.read_num() ?! break
+            let x2 = r.read_num() ?! break; let y2 = r.read_num() ?! break
+            if cmd == 'q' { x1 += cx; y1 += cy; x2 += cx; y2 += cy }
+            each 1 .. 9 as step {
+                let t = step.to(f32) / 8.0
+                let mt = 1.0 - t
+                let px = mt * mt * cx + 2 * mt * t * x1 + t * t * x2
+                let py = mt * mt * cy + 2 * mt * t * y1 + t * t * y2
+                cur.append(.{ x: ox + px * s, y: oy + py * s })
+            }
+            cx = x2; cy = y2
+        } else if cmd == 'C' || cmd == 'c' {
+            let x1 = r.read_num() ?! break; let y1 = r.read_num() ?! break
+            let x2 = r.read_num() ?! break; let y2 = r.read_num() ?! break
+            let x3 = r.read_num() ?! break; let y3 = r.read_num() ?! break
+            if cmd == 'c' { x1 += cx; y1 += cy; x2 += cx; y2 += cy; x3 += cx; y3 += cy }
+            each 1 .. 11 as step {
+                let t = step.to(f32) / 10.0
+                let mt = 1.0 - t
+                let px = mt * mt * mt * cx + 3 * mt * mt * t * x1 + 3 * mt * t * t * x2 + t * t * t * x3
+                let py = mt * mt * mt * cy + 3 * mt * mt * t * y1 + 3 * mt * t * t * y2 + t * t * t * y3
+                cur.append(.{ x: ox + px * s, y: oy + py * s })
+            }
+            cx = x3; cy = y3
+        } else {
+            let _ = r.read_num() ?! break
+        }
+    }
+    if cur.length > 0 : paths.append(cur)
+    return paths
+}

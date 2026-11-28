@@ -12,8 +12,14 @@ struct Snapshot {
     col: uint
 }
 
+struct TextMatch {
+    + row: uint
+    + col: uint
+    + len: uint
+}
+
 /// A multi-line text editor: selection with the mouse and Shift, word jumps, copy, cut and paste,
-/// undo and redo, auto-indent, Tab and Shift+Tab, and scrolling. Lines do not wrap. Keep it with
+/// undo and redo, auto-indent, Tab and Shift+Tab, find & replace, and scrolling. Keep it with
 /// your state and put `area.render(win)` in the tree; give it a height or `flex_1`.
 + class TextArea is Render {
     + placeholder: String ("")
@@ -21,6 +27,8 @@ struct Snapshot {
     + on_change: ?fn(String)() (null)
     /// Allows selecting and copying, but not editing.
     + read_only: bool (false)
+    /// Disables all interaction.
+    + disabled: bool (false)
     + line_numbers: bool (false)
     /// A font family added with `Window.add_font`, such as a monospaced one for code.
     + font: String ("")
@@ -32,6 +40,13 @@ struct Snapshot {
     /// Colors per line, for syntax highlighting: called for each visible line with its text, it
     /// returns `(byte length, color)` runs.
     + highlight: ?fn(String)(Array[(uint, Color)]) (null)
+    /// Find & replace state.
+    + find_open: bool (false)
+    + replace_open: bool (false)
+    + case_sensitive: bool (false)
+    + find_input: TextInput (TextInput.new("Find…"))
+    + replace_input: TextInput (TextInput.new("Replace…"))
+    ~+ current_match: uint (0)
     /// The caret: a line and a byte offset in it.
     ~+ row: uint (0)
     ~+ col: uint (0)
@@ -147,47 +162,191 @@ struct Snapshot {
         this.restore(snap)
     }
 
+    /// Opens the inline find bar.
+    + fn open_find(query: String ("")) {
+        this.find_open = true
+        if query.length > 0 : this.find_input.set_text(query)
+        else if this.has_selection() && this.row == this.anchor_row : this.find_input.set_text(this.selected_text())
+    }
+
+    /// Opens the inline find & replace bar.
+    + fn open_replace(query: String ("")) {
+        this.open_find(query)
+        this.replace_open = true
+    }
+
+    /// Closes the inline find & replace bar.
+    + fn close_find() {
+        this.find_open = false
+        this.replace_open = false
+    }
+
+    /// Returns all matches of `find_input.text` in the document.
+    + fn find_matches() Array[TextMatch] {
+        let out = Array[TextMatch]{}
+        let q = this.find_input.text
+        if q.length == 0 : return out
+        let needle = this.case_sensitive ? q : q.lower()
+        each this.lines as line, r {
+            let hay = this.case_sensitive ? line : line.lower()
+            let pos: uint = 0
+            while pos + needle.length <= hay.length {
+                if hay.range(pos, needle.length) == needle {
+                    out.append(.{ row: r, col: pos, len: needle.length })
+                    pos += needle.length.max(1)
+                } else {
+                    pos++
+                }
+            }
+        }
+        return out
+    }
+
+    /// Selects and reveals the next search match.
+    + fn find_next() bool {
+        let m = this.find_matches()
+        if m.length == 0 : return false
+        let idx: uint = 0
+        let found = false
+        each m as hit, i {
+            if hit.row > this.row || (hit.row == this.row && hit.col >= this.col) {
+                idx = i
+                found = true
+                break
+            }
+        }
+        if !found : idx = 0
+        this.select_match(m, idx)
+        return true
+    }
+
+    /// Selects and reveals the previous search match.
+    + fn find_prev() bool {
+        let m = this.find_matches()
+        if m.length == 0 : return false
+        let idx = m.length - 1
+        let i = m.length
+        while i > 0 {
+            i--
+            let hit = m.get(i) !!
+            if hit.row < this.row || (hit.row == this.row && hit.col < this.anchor_col.min(this.col)) {
+                idx = i
+                break
+            }
+        }
+        this.select_match(m, idx)
+        return true
+    }
+
+    - fn select_match(m: Array[TextMatch], idx: uint) {
+        let hit = m.get(idx) ! return
+        this.current_match = idx
+        this.anchor_row = hit.row
+        this.anchor_col = hit.col
+        this.row = hit.row
+        this.col = hit.col + hit.len
+        this.reveal = true
+    }
+
+    /// Replaces the current match (if selected) and advances to the next match.
+    + fn replace_current() bool {
+        if this.read_only || this.find_input.text.length == 0 : return false
+        let q = this.find_input.text
+        let sel = this.selected_text()
+        let matches_sel = this.case_sensitive ? sel == q : sel.lower() == q.lower()
+        if !matches_sel {
+            if !this.find_next() : return false
+        }
+        this.insert(this.replace_input.text)
+        this.find_next()
+        return true
+    }
+
+    /// Replaces all occurrences of `find_input.text` with `replace_input.text`. Returns count replaced.
+    + fn replace_all() uint {
+        if this.read_only : return 0
+        let hits = this.find_matches()
+        if hits.length == 0 : return 0
+        this.remember("replace_all")
+        let rep = this.replace_input.text
+        let i = hits.length
+        while i > 0 {
+            i--
+            let h = hits.get(i) !!
+            let line = this.line(h.row)
+            let updated = line.range(0, h.col) + rep + line.range(h.col + h.len, line.length - h.col - h.len)
+            this.lines.set(h.row, updated) _
+        }
+        this.col = this.col.min(this.line(this.row).length)
+        this.collapse()
+        this.changed()
+        return hits.length
+    }
+
     + fn render(win: Window) Div {
         let theme = win.theme
         let fh = this.focus_handle(win)
         this.size = this.font_size ?? theme.font_size
         let focused = fh.is_focused()
-        return div().p(1).flex().bg(theme.surface).border(1).border_color(focused ? theme.accent : theme.border)
-            .rounded(theme.radius).overflow_hidden().cursor_text()
+        let editor = canvas(fn(p, b) { this.paint(win, p, b) }).flex_1().min_h(this.line_height())
+            .on_mouse_down(fn(e) {
+                let r, c = this.position_at(win, e.x, e.y)
+                if e.click_count == 2 {
+                    let text = this.line(r)
+                    this.row = r
+                    this.anchor_row = r
+                    this.anchor_col = word_start(text, c)
+                    this.col = word_end(text, c)
+                } else if e.click_count >= 3 {
+                    this.row = r
+                    this.anchor_row = r
+                    this.anchor_col = 0
+                    this.col = this.line(r).length
+                } else {
+                    this.row = r
+                    this.col = c
+                    if !e.modifiers.shift : this.collapse()
+                }
+                this.goal_x = -1
+                this.reveal = true
+            })
+            .on_drag(fn(e) {
+                let r, c = this.position_at(win, e.x, e.y)
+                this.row = r
+                this.col = c
+                this.reveal = true
+            })
+        let box = div().p(1).flex_col().bg(theme.surface).border(1).border_color(focused ? theme.accent : theme.border)
+            .rounded(theme.radius).overflow_hidden().role(.textbox).aria_label(this.placeholder).disabled(this.disabled)
+        if this.find_open {
+            let matches = this.find_matches()
+            this.find_input.on_submit = fn(q) { this.find_next() }
+            let bar = div().p(6).gap(6).bg(theme.elevated).border_b(1).border_color(theme.border)
+                .on_dismiss(fn() { this.close_find() })
+            let row1 = div().flex().items_center().gap(6)
+                .child(this.find_input.render(win).flex_1())
+                .child(div().text_xs().text_color(theme.muted).whitespace_nowrap().child("%{matches.length} found"))
+                .child(icon_button(win, .chevron_up, 26).tooltip("Previous match").on_click(fn(e) { this.find_prev() }))
+                .child(icon_button(win, .chevron_down, 26).tooltip("Next match").on_click(fn(e) { this.find_next() }))
+                .child(icon_button(win, .x, 26).tooltip("Close").on_click(fn(e) { this.close_find() }))
+            bar.child(row1)
+            if this.replace_open && !this.read_only {
+                let row2 = div().flex().items_center().gap(6)
+                    .child(this.replace_input.render(win).flex_1())
+                    .child(button(win, "Replace").h(26).px(8).text_xs().on_click(fn(e) { this.replace_current() }))
+                    .child(button(win, "All").h(26).px(8).text_xs().on_click(fn(e) { this.replace_all() }))
+                bar.child(row2)
+            }
+            box.child(bar)
+        }
+        return box.child(div().flex().flex_1().min_h(0).cursor_text()
             .track_focus(fh)
             .on_key_down(fn(e) { this.key(win, e) })
             .on_input(fn(t) { this.insert(t) })
             .on_scroll(fn(e) {
                 if this.scroll_by(win, e.dx, e.dy) : e.stop_propagation()
             })
-            .child(canvas(fn(p, b) { this.paint(win, p, b) }).flex_1().min_h(this.line_height())
-                .on_mouse_down(fn(e) {
-                    let r, c = this.position_at(win, e.x, e.y)
-                    if e.click_count == 2 {
-                        let text = this.line(r)
-                        this.row = r
-                        this.anchor_row = r
-                        this.anchor_col = word_start(text, c)
-                        this.col = word_end(text, c)
-                    } else if e.click_count >= 3 {
-                        this.row = r
-                        this.anchor_row = r
-                        this.anchor_col = 0
-                        this.col = this.line(r).length
-                    } else {
-                        this.row = r
-                        this.col = c
-                        if !e.modifiers.shift : this.collapse()
-                    }
-                    this.goal_x = -1
-                    this.reveal = true
-                })
-                .on_drag(fn(e) {
-                    let r, c = this.position_at(win, e.x, e.y)
-                    this.row = r
-                    this.col = c
-                    this.reveal = true
-                }))
+            .child(editor))
     }
 
     // ---- Geometry ----
@@ -356,6 +515,19 @@ struct Snapshot {
                 p.text(b.x + gutter - 14 - lw, y + (lh - text_h) / 2, label, r == this.row && focused ? theme.text : theme.muted, this.size, .normal, this.font)
             }
             p.clip(.{ x: text_x - 2, y: b.y, w: b.w - gutter + 2, h: b.h })
+            if this.find_open && this.find_input.text.length > 0 {
+                let matches = this.find_matches()
+                each matches as hit {
+                    if hit.row != r : continue
+                    let from = hit.col.max(vr.start)
+                    let to = (hit.col + hit.len).min(seg_end)
+                    if from < to {
+                        let sx = this.width_of(win, r, vr.start, from)
+                        let ex = this.width_of(win, r, vr.start, to)
+                        p.fill(.{ x: text_x + sx - this.scroll_x, y: y, w: (ex - sx).max(2), h: lh }, theme.warning.opacity(0.32))
+                    }
+                }
+            }
             if selecting && r >= r1 && r <= r2 {
                 let from = r == r1 ? c1.max(vr.start) : vr.start
                 let to = r == r2 ? c2.min(seg_end) : seg_end
@@ -396,7 +568,17 @@ struct Snapshot {
                 p.text(text_x - this.scroll_x, ty, content.range(vr.start, vr.len), theme.text, this.size, .normal, this.font)
             }
             if focused && vi == caret_row {
-                p.fill(.{ x: text_x + this.width_of(win, r, vr.start, this.col) - this.scroll_x, y: y + 2, w: 1.5, h: lh - 4 }, theme.text)
+                let cx = text_x + this.width_of(win, r, vr.start, this.col) - this.scroll_x
+                if win.ime_text.length > 0 {
+                    let iw = win.platform.text_width(win.ime_text, this.resolved())
+                    p.fill(.{ x: cx, y: y, w: iw, h: lh }, theme.surface)
+                    p.text(cx, ty, win.ime_text, theme.text, this.size, .normal, this.font)
+                    p.fill(.{ x: cx, y: y + lh - 2, w: iw, h: 1.5 }, theme.accent)
+                    cx += iw
+                }
+                let caret_b = Bounds{ x: cx, y: y + 2, w: 1.5, h: lh - 4 }
+                p.fill(caret_b, theme.text)
+                win.set_ime_area(caret_b)
             }
             p.unclip()
         }
@@ -509,6 +691,12 @@ struct Snapshot {
                 else : this.undo()
             } else if e.key == .y && !this.read_only {
                 this.redo()
+            } else if e.key == .f {
+                this.open_find()
+                this.find_input.focus_handle(win).focus()
+            } else if e.key == .h && !this.read_only {
+                this.open_replace()
+                this.find_input.focus_handle(win).focus()
             } else if e.key == .home {
                 this.move_to(0, 0, m.shift)
             } else if e.key == .end {

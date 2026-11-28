@@ -14,17 +14,40 @@
     + muted: Color
     /// Buttons, selections and focus rings.
     + accent: Color
+    /// Hovered accent color.
+    + accent_hover: Color (rgb(0x60a5fa))
     /// Text on the accent color.
     + accent_text: Color
+    /// Focus ring highlight color.
+    + ring: Color (rgba(0x3b82f688))
     + danger: Color
+    + success: Color (rgb(0x22c55e))
+    + warning: Color (rgb(0xf59e0b))
+    + info: Color (rgb(0x38bdf8))
     + radius: f32 (6)
     + font_size: f32 (14)
+    /// Global text scale multiplier (1.0 = default).
+    + font_scale: f32 (1.0)
+    /// UI density multiplier (0.85 = compact, 1.0 = normal, 1.15 = comfortable).
+    + density: f32 (1.0)
+
+    + fn with_scale(scale: f32) Theme {
+        this.font_scale = clamp32(scale, 0.5, 3.0)
+        return this
+    }
+
+    + fn with_density(density: f32) Theme {
+        this.density = clamp32(density, 0.7, 1.5)
+        return this
+    }
 
     + static fn dark() Theme {
         return Theme{
             background: rgb(0x1e1f22), surface: rgb(0x2b2d31), elevated: rgb(0x383a40),
             border: rgb(0x45474f), text: rgb(0xe6e6e8), muted: rgb(0x9a9ca5),
-            accent: rgb(0x3b82f6), accent_text: rgb(0xffffff), danger: rgb(0xef4444)
+            accent: rgb(0x3b82f6), accent_hover: rgb(0x60a5fa), accent_text: rgb(0xffffff),
+            ring: rgba(0x3b82f688), danger: rgb(0xef4444), success: rgb(0x22c55e),
+            warning: rgb(0xf59e0b), info: rgb(0x38bdf8)
         }
     }
 
@@ -32,7 +55,49 @@
         return Theme{
             background: rgb(0xf7f7f8), surface: rgb(0xffffff), elevated: rgb(0xececef),
             border: rgb(0xd4d4d8), text: rgb(0x18181b), muted: rgb(0x71717a),
-            accent: rgb(0x2563eb), accent_text: rgb(0xffffff), danger: rgb(0xdc2626)
+            accent: rgb(0x2563eb), accent_hover: rgb(0x1d4ed8), accent_text: rgb(0xffffff),
+            ring: rgba(0x2563eb88), danger: rgb(0xdc2626), success: rgb(0x16a34a),
+            warning: rgb(0xd97706), info: rgb(0x0284c7)
+        }
+    }
+
+    + static fn nord() Theme {
+        return Theme{
+            background: rgb(0x2e3440), surface: rgb(0x3b4252), elevated: rgb(0x434c5e),
+            border: rgb(0x4c566a), text: rgb(0xeceff4), muted: rgb(0xd8dee9),
+            accent: rgb(0x88c0d0), accent_hover: rgb(0x8fbcbb), accent_text: rgb(0x2e3440),
+            ring: rgba(0x88c0d088), danger: rgb(0xbf616a), success: rgb(0xa3be8c),
+            warning: rgb(0xebcb8b), info: rgb(0x81a1c1)
+        }
+    }
+
+    + static fn dracula() Theme {
+        return Theme{
+            background: rgb(0x282a36), surface: rgb(0x343746), elevated: rgb(0x44475a),
+            border: rgb(0x6272a4), text: rgb(0xf8f8f2), muted: rgb(0xbd93f9),
+            accent: rgb(0xbd93f9), accent_hover: rgb(0xff79c6), accent_text: rgb(0x282a36),
+            ring: rgba(0xbd93f988), danger: rgb(0xff5555), success: rgb(0x50fa7b),
+            warning: rgb(0xf1fa8c), info: rgb(0x8be9fd)
+        }
+    }
+
+    + static fn catppuccin() Theme {
+        return Theme{
+            background: rgb(0x1e1e2e), surface: rgb(0x313244), elevated: rgb(0x45475a),
+            border: rgb(0x585b70), text: rgb(0xcdd6f4), muted: rgb(0xa6adc8),
+            accent: rgb(0x89b4fa), accent_hover: rgb(0xb4befe), accent_text: rgb(0x1e1e2e),
+            ring: rgba(0x89b4fa88), danger: rgb(0xf38ba8), success: rgb(0xa6e3a1),
+            warning: rgb(0xf9e2af), info: rgb(0x89dceb)
+        }
+    }
+
+    + static fn high_contrast() Theme {
+        return Theme{
+            background: rgb(0x000000), surface: rgb(0x121212), elevated: rgb(0x222222),
+            border: rgb(0xffffff), text: rgb(0xffffff), muted: rgb(0xd4d4d4),
+            accent: rgb(0xfacc15), accent_hover: rgb(0xfef08a), accent_text: rgb(0x000000),
+            ring: rgb(0xfacc15), danger: rgb(0xff4444), success: rgb(0x4ade80),
+            warning: rgb(0xfbbf24), info: rgb(0x38bdf8)
         }
     }
 }

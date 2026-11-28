@@ -1,5 +1,7 @@
 
-+ enum PrimitiveKind { quad, shadow, text, image, line, arc, circle, ring, triangle, clip, unclip }
+use image
+
++ enum PrimitiveKind { quad, shadow, blur, text, image, line, arc, circle, ring, triangle, clip, unclip }
 
 /// One drawing command. Which fields matter depends on `kind`.
 + struct Primitive {
@@ -7,6 +9,11 @@
     + bounds: Bounds (.{})
     + color: Color (.{})
     + border_color: Color (.{})
+    + border_color_top: ?Color (null)
+    + border_color_right: ?Color (null)
+    + border_color_bottom: ?Color (null)
+    + border_color_left: ?Color (null)
+    + border_style: BorderStyle (.solid)
     + border: Edges (.{})
     /// The radius of a circle or ring.
     + radius: f32 (0)
@@ -15,14 +22,19 @@
     /// With `gradient`, the color `color` fades to.
     + color2: Color (.{})
     + gradient: bool (false)
+    + gradient_kind: GradientKind (.linear)
+    + gradient_stops: ?Array[GradientStop] (null)
     /// The gradient's angle, as in `Gradient`.
     + angle: f32 (180)
+    + rotate_deg: f32 (0)
     + fit: ImageFit (.fill)
     /// For text: a label made only of symbols, such as "+", is centered on its own shape.
     + center_symbols: bool (false)
-    /// The blur of a shadow, the width of a line or ring.
+    /// The blur of a shadow/backdrop_blur, the width of a line or ring.
     + width: f32 (0)
     + text: String ("")
+    + image_obj: ?image.Image (null)
+    + image_bytes: ?String (null)
     + font: ResolvedFont (.{})
     /// Line end points, triangle corners.
     + points: [Point x 3] ({ .{}, .{}, .{} })

@@ -1,0 +1,1027 @@
+// Batteries-included desktop widgets: SplitPane, ToastStack, CommandPalette,
+// Table, TreeView, Combobox, MultiSelect, NumberInput, Collapsible, ColorPicker, DatePicker.
+
+// ---- SplitPane ----
+
+/// A resizable horizontal or vertical split container with a draggable divider and
+/// double-click-to-reset.
++ class SplitPane {
+    + direction: Direction (.row)
+    /// Current split ratio (0..1) of the first pane.
+    + ratio: f32 (0.5)
+    /// Ratio restored when double-clicking the divider.
+    + default_ratio: f32 (0.5)
+    + min_first: f32 (80)
+    + min_second: f32 (80)
+    + divider_size: f32 (6)
+    ~+ id: String (next_widget_id("split"))
+
+    + static fn horizontal(ratio: f32 (0.5)) SplitPane {
+        return SplitPane{ direction: .row, ratio: ratio, default_ratio: ratio }
+    }
+
+    + static fn vertical(ratio: f32 (0.5)) SplitPane {
+        return SplitPane{ direction: .column, ratio: ratio, default_ratio: ratio }
+    }
+
+    + fn render(win: Window, first: Div, second: Div) Div {
+        let t = win.theme
+        let row = this.direction == .row
+        let pb = win.bounds_of(this.id)
+        let total = isset(pb) ? (row ? pb.w : pb.h) : (row ? win.width : win.height)
+        let avail = (total - this.divider_size).max(1)
+        let first_px = clamp32(avail * this.ratio, this.min_first, (avail - this.min_second).max(this.min_first))
+
+        let container = div().id(this.id).size_full().overflow_hidden()
+        if row : container.flex_row()
+        else : container.flex_col()
+
+        let pane1 = div().overflow_hidden().flex_shrink_0().child(first)
+        if row : pane1.w(first_px).h_full()
+        else : pane1.h(first_px).w_full()
+
+        let pane2 = div().flex_1().min_w(0).min_h(0).overflow_hidden().child(second)
+
+        let handle = div().flex_shrink_0().center().bg(t.border.opacity(0.6))
+            .cursor(row ? .resize_ew : .resize_ns)
+            .hover(fn(s) { s.bg(t.accent.opacity(0.7)) })
+            .on_double_click(fn(e) { this.ratio = this.default_ratio })
+            .on_drag(fn(e) {
+                let cur_b = win.bounds_of(this.id) ?! return
+                let span = ((row ? cur_b.w : cur_b.h) - this.divider_size).max(1)
+                let offset = row ? (e.x - cur_b.x) : (e.y - cur_b.y)
+                let clamped = clamp32(offset, this.min_first, (span - this.min_second).max(this.min_first))
+                this.ratio = clamp32(clamped / span, 0.05, 0.95)
+            })
+        if row : handle.w(this.divider_size).h_full()
+        else : handle.h(this.divider_size).w_full()
+
+        return container.child(pane1).child(handle).child(pane2)
+    }
+}
+
+// ---- ToastStack ----
+
++ enum ToastKind { info, success, warning, error }
+
++ class Toast {
+    + id: uint
+    + title: String
+    + body: String ("")
+    + kind: ToastKind (.info)
+    + action_label: String ("")
+    + on_action: ?fn()() (null)
+}
+
+/// Manages a corner stack of auto-dismissing toast notifications.
++ class ToastStack {
+    ~+ items: Array[Toast] (.{})
+    - next_id: uint (0)
+
+    + fn push(win: Window, title: String, kind: ToastKind (.info), duration: f64 (4.0), body: String (""), action_label: String (""), on_action: ?fn()() (null)) uint {
+        this.next_id++
+        let tid = this.next_id
+        this.items.append(Toast{
+            id: tid, title: title, body: body, kind: kind,
+            action_label: action_label, on_action: on_action
+        })
+        if duration > 0 {
+            win.after(duration, fn() { this.dismiss(tid) })
+        }
+        return tid
+    }
+
+    + fn dismiss(id: uint) {
+        this.items.remove_where(fn(item: Toast) bool { return item.id == id })
+    }
+
+    + fn clear() { this.items.clear() }
+
+    + fn render(win: Window) Div {
+        if this.items.length == 0 : return div().hidden()
+        let t = win.theme
+        let stack = div().absolute().deferred().right(16).bottom(16).w(340).gap(8).click_through()
+        each this.items as toast {
+            let accent = match toast.kind : Color {
+                .info => t.info
+                .success => t.success
+                .warning => t.warning
+                .error => t.danger
+            }
+            let ic = match toast.kind : Icon {
+                .info => .info
+                .success => .check_circle
+                .warning => .warning
+                .error => .x_circle
+            }
+            let tid = toast.id
+            let card_div = div().role(.alert).flex().items_start().gap(10).p(12).rounded(t.radius + 2)
+                .bg(t.elevated).border(1).border_color(t.border).border_l(3).border_color_l(accent).shadow_lg()
+                .child(icon(ic, 16).text_color(accent).mt(1))
+            let body_col = div().flex_1().gap(2)
+                .child(div().text_sm().font_medium().text_color(t.text).child(toast.title))
+            if toast.body.length > 0 {
+                body_col.child(div().text_xs().text_color(t.muted).child(toast.body))
+            }
+            let act = toast.on_action
+            if toast.action_label.length > 0 && isset(act) {
+                body_col.child(div().pt(4).child(button(win, toast.action_label).h(24).px(8).text_xs().on_click(fn(e) {
+                    act()
+                    this.dismiss(tid)
+                })))
+            }
+            card_div.child(body_col)
+                .child(icon_button(win, .x, 22).on_click(fn(e) { this.dismiss(tid) }))
+            stack.child(card_div)
+        }
+        return stack
+    }
+}
+
+// ---- CommandPalette ----
+
++ class CommandItem {
+    + id: String ("")
+    + label: String
+    + category: String ("")
+    + shortcut: String ("")
+    + icon: ?Icon (null)
+    + action: fn()()
+
+    + static fn new(label: String, action: fn()()) CommandItem {
+        return CommandItem{ label: label, action: action }
+    }
+    + fn with_category(cat: String) CommandItem { this.category = cat; return this }
+    + fn with_shortcut(sc: String) CommandItem { this.shortcut = sc; return this }
+    + fn with_icon(ic: Icon) CommandItem { this.icon = ic; return this }
+}
+
+/// Fuzzy-searchable modal command palette (like VS Code / Zed Ctrl+Shift+P).
++ class CommandPalette {
+    + items: Array[CommandItem] (.{})
+    ~+ open: bool (false)
+    + placeholder: String ("Type a command…")
+    + query: TextInput (TextInput.new("Type a command…"))
+    ~+ highlighted: uint (0)
+
+    + fn show(win: Window) {
+        this.open = true
+        this.query.set_text("")
+        this.highlighted = 0
+        this.query.focus_handle(win).focus()
+    }
+
+    + fn close() { this.open = false }
+
+    + fn filtered() Array[CommandItem] {
+        let q = this.query.text.trim().lower()
+        if q.length == 0 : return this.items
+        let scored = Array[(int, CommandItem)]{}
+        each this.items as item {
+            let text = (item.category.length > 0 ? item.category + " " + item.label : item.label).lower()
+            let s = fuzzy_score(q, text)
+            if s >= 0 : scored.append((s, item))
+        }
+        // Sort descending by score
+        let i: uint = 1
+        while i < scored.length {
+            let cur = scored.get(i) !!
+            let j = i
+            while j > 0 {
+                let prev = scored.get(j - 1) !!
+                if prev[0] >= cur[0] : break
+                scored.set(j, prev) _
+                j--
+            }
+            scored.set(j, cur) _
+            i++
+        }
+        let out = Array[CommandItem]{}
+        each scored as pair : out.append(pair[1])
+        return out
+    }
+
+    + fn run_selected() bool {
+        let list = this.filtered()
+        let item = list.get(this.highlighted) ! return false
+        this.close()
+        item.action()
+        return true
+    }
+
+    + fn render(win: Window) Div {
+        if !this.open : return div().hidden()
+        let t = win.theme
+        this.query.placeholder = this.placeholder
+        let list = this.filtered()
+        if this.highlighted >= list.length && list.length > 0 : this.highlighted = list.length - 1
+        this.query.on_submit = fn(txt) { this.run_selected() }
+
+        let rows = div().max_h(320).overflow_y_scroll().p(4).gap(2)
+        if list.length == 0 {
+            rows.child(div().p(16).center().text_sm().text_color(t.muted).child("No matching commands"))
+        } else {
+            each list as item, i {
+                let active = i == this.highlighted
+                let row = div().flex().items_center().gap(8).h(34).px(10).rounded(t.radius).cursor_pointer()
+                    .when(active, fn(d) { d.bg(t.accent.opacity(0.22)) })
+                    .hover(fn(s) { s.bg(t.accent.opacity(0.15)) })
+                    .on_click(fn(e) {
+                        this.highlighted = i
+                        this.run_selected()
+                    })
+                let ic = item.icon
+                if isset(ic) : row.child(icon(ic, 15).text_color(t.muted))
+                if item.category.length > 0 {
+                    row.child(div().text_xs().text_color(t.muted).child(item.category + ":"))
+                }
+                row.child(div().flex_1().truncate().text_sm().text_color(t.text).child(item.label))
+                if item.shortcut.length > 0 : row.child(kbd(win, item.shortcut))
+                rows.child(row)
+            }
+        }
+        let panel = div().w(520).max_w(win.width - 32).bg(t.surface).border(1).border_color(t.border)
+            .rounded(t.radius * 2).shadow_lg().overflow_hidden()
+            .on_key_down(fn(e) {
+                if e.key == .down && list.length > 0 {
+                    this.highlighted = (this.highlighted + 1) % list.length
+                    e.stop_propagation()
+                } else if e.key == .up && list.length > 0 {
+                    this.highlighted = this.highlighted == 0 ? list.length - 1 : this.highlighted - 1
+                    e.stop_propagation()
+                } else if e.key == .enter {
+                    this.run_selected()
+                    e.stop_propagation()
+                }
+            })
+            .child(div().p(8).border_b(1).border_color(t.border).child(this.query.render(win)))
+            .child(rows)
+        return modal(win, panel, fn() { this.close() })
+    }
+}
+
+fn fuzzy_score(query: String, text: String) int {
+    if query.length == 0 : return 0
+    if text.contains(query) : return 1000 - text.length.to(int)
+    let qi: uint = 0
+    let score = 0
+    let streak = 0
+    let ti: uint = 0
+    while ti < text.length && qi < query.length {
+        if text[ti] == query[qi] {
+            streak++
+            score += 10 + streak * 5
+            if ti == 0 || text[ti - 1] == ' ' || text[ti - 1] == '_' || text[ti - 1] == '-' : score += 15
+            qi++
+        } else {
+            streak = 0
+        }
+        ti++
+    }
+    return qi == query.length ? score : -1
+}
+
+// ---- Data Table ----
+
++ class TableColumn {
+    + key: String
+    + label: String
+    + width: f32 (140)
+    + min_width: f32 (60)
+    + sortable: bool (true)
+    + align: TextAlign (.left)
+
+    + static fn new(key: String, label: String, width: f32 (140)) TableColumn {
+        return TableColumn{ key: key, label: label, width: width }
+    }
+}
+
+/// A data table with sortable columns, draggable column width resizing, row selection,
+/// sticky header, and virtualized row rendering.
++ class Table {
+    + columns: Array[TableColumn] (.{})
+    + rows: Array[Array[String]] (.{})
+    ~+ sort_col: ?uint (null)
+    ~+ sort_asc: bool (true)
+    ~+ selected_rows: HashSet[uint] (.{})
+    + multi_select: bool (false)
+    + row_height: f32 (32)
+    + on_select: ?fn(uint)() (null)
+    ~+ id: String (next_widget_id("table"))
+    - order: Array[uint] (.{})
+    - order_rows_len: uint (0)
+    - drag_start_x: f32 (0)
+    - drag_start_w: f32 (0)
+
+    + fn sort_by(col: uint) {
+        let sc = this.sort_col
+        if isset(sc) && sc == col {
+            this.sort_asc = !this.sort_asc
+        } else {
+            this.sort_col = col
+            this.sort_asc = true
+        }
+        this.rebuild_order()
+    }
+
+    - fn ensure_order() {
+        if this.order.length == this.rows.length && this.order_rows_len == this.rows.length : return
+        this.rebuild_order()
+    }
+
+    - fn rebuild_order() {
+        this.order.clear()
+        each 0 .. this.rows.length as i : this.order.append(i)
+        this.order_rows_len = this.rows.length
+        let sc = this.sort_col ?! return
+        let asc = this.sort_asc
+        // Insertion sort on row indices
+        let i: uint = 1
+        while i < this.order.length {
+            let idx = this.order.get(i) !!
+            let val = this.cell_value(idx, sc)
+            let j = i
+            while j > 0 {
+                let prev_idx = this.order.get(j - 1) !!
+                let pv = this.cell_value(prev_idx, sc)
+                let cmp = compare_str(pv, val)
+                if asc ? cmp <= 0 : cmp >= 0 : break
+                this.order.set(j, prev_idx) _
+                j--
+            }
+            this.order.set(j, idx) _
+            i++
+        }
+    }
+
+    - fn cell_value(row_idx: uint, col_idx: uint) String {
+        let r = this.rows.get(row_idx) ! return ""
+        return r.get(col_idx) !? ""
+    }
+
+    + fn render(win: Window) Div {
+        let t = win.theme
+        this.ensure_order()
+        let header = div().role(.row).flex().h(34).bg(t.elevated).border_b(1).border_color(t.border).flex_shrink_0()
+        each this.columns as col, ci {
+            let sc = this.sort_col
+            let is_sorted = isset(sc) && sc == ci
+            let cell = div().w(col.width).flex_shrink_0().flex().items_center().px(10).gap(4)
+                .text_xs().font_semibold().text_color(t.muted).overflow_hidden()
+            if col.sortable {
+                cell.cursor_pointer().hover(fn(s) { s.text_color(t.text) }).on_click(fn(e) { this.sort_by(ci) })
+            }
+            cell.child(div().flex_1().truncate().child(col.label))
+            if is_sorted {
+                cell.child(icon(this.sort_asc ? .chevron_up : .chevron_down, 12).text_color(t.accent))
+            }
+            // Resize handle on column right border
+            let resizer = div().w(5).h_full().cursor(.resize_ew).flex_shrink_0()
+                .on_mouse_down(fn(e) {
+                    this.drag_start_x = e.x
+                    this.drag_start_w = col.width
+                    e.stop_propagation()
+                })
+                .on_drag(fn(e) {
+                    col.width = (this.drag_start_w + (e.x - this.drag_start_x)).max(col.min_width)
+                })
+            header.child(cell).child(resizer)
+        }
+
+        let body = uniform_list(win, this.id + "/rows", this.order.length, this.row_height, fn(vi) {
+            let ri = this.order.get(vi) !? vi
+            let selected = this.selected_rows.has(ri)
+            let row = div().role(.row).aria_selected(selected).flex().items_center()
+                .bg(selected ? t.accent.opacity(0.2) : (vi % 2 == 0 ? t.surface : t.background))
+                .border_b(1).border_color(t.border.opacity(0.4)).cursor_pointer()
+                .hover(fn(s) { if !selected : s.bg(t.elevated.opacity(0.6)) })
+                .on_click(fn(e) {
+                    if !this.multi_select || !e.modifiers.secondary : this.selected_rows.clear()
+                    if this.selected_rows.has(ri) : this.selected_rows.remove(ri)
+                    else : this.selected_rows.add(ri)
+                    let cb = this.on_select
+                    if isset(cb) : cb(ri)
+                })
+            each this.columns as col, ci {
+                let txt = this.cell_value(ri, ci)
+                let cell = div().role(.cell).w(col.width + 5).flex_shrink_0().px(10).text_sm().truncate()
+                if col.align == .center : cell.text_center()
+                else if col.align == .right : cell.text_right()
+                row.child(cell.child(txt))
+            }
+            return row
+        }).flex_1()
+
+        return div().id(this.id).role(.table).flex_col().border(1).border_color(t.border).rounded(t.radius).overflow_hidden()
+            .child(header)
+            .child(body)
+    }
+}
+
+fn compare_str(a: String, b: String) int {
+    let n = a.length.min(b.length)
+    let i: uint = 0
+    while i < n {
+        if a[i] != b[i] : return a[i] < b[i] ? -1 : 1
+        i++
+    }
+    if a.length == b.length : return 0
+    return a.length < b.length ? -1 : 1
+}
+
+// ---- TreeView ----
+
++ class TreeNode {
+    + id: String
+    + label: String
+    + icon: ?Icon (null)
+    + children: Array[TreeNode] (.{})
+    + expanded: bool (false)
+
+    + static fn new(id: String, label: String, icon: ?Icon (null)) TreeNode {
+        return TreeNode{ id: id, label: label, icon: icon }
+    }
+
+    + fn add(child: TreeNode) TreeNode {
+        this.children.append(child)
+        return this
+    }
+}
+
+struct FlatTreeRow {
+    node: TreeNode
+    depth: uint
+}
+
+/// Hierarchical tree view with expand/collapse, indentation guides, selection, and keyboard navigation.
++ class TreeView {
+    + roots: Array[TreeNode] (.{})
+    ~+ selected_id: String ("")
+    + on_select: ?fn(TreeNode)() (null)
+    ~+ id: String (next_widget_id("tree"))
+    - handle: ?FocusHandle (null)
+
+    - fn flatten() Array[FlatTreeRow] {
+        let out = Array[FlatTreeRow]{}
+        each this.roots as r : collect_tree_rows(r, 0, out)
+        return out
+    }
+
+    + fn select(node: TreeNode) {
+        this.selected_id = node.id
+        let cb = this.on_select
+        if isset(cb) : cb(node)
+    }
+
+    + fn render(win: Window) Div {
+        let t = win.theme
+        let fh = this.handle ?? win.focus_handle()
+        this.handle = fh
+        let flat = this.flatten()
+        let box = div().id(this.id).role(.tree).track_focus(fh).p(4).gap(1).overflow_y_scroll()
+            .on_key_down(fn(e) {
+                if flat.length == 0 : return
+                let cur: uint = 0
+                let found = false
+                each flat as r, i {
+                    if r.node.id == this.selected_id { cur = i; found = true; break }
+                }
+                if e.key == .down {
+                    let next = found ? (cur + 1).min(flat.length - 1) : 0
+                    this.select((flat.get(next) !!).node)
+                    e.stop_propagation()
+                } else if e.key == .up {
+                    let prev = found ? (cur > 0 ? cur - 1 : 0) : flat.length - 1
+                    this.select((flat.get(prev) !!).node)
+                    e.stop_propagation()
+                } else if e.key == .right && found {
+                    let node = (flat.get(cur) !!).node
+                    if node.children.length > 0 : node.expanded = true
+                    e.stop_propagation()
+                } else if e.key == .left && found {
+                    let node = (flat.get(cur) !!).node
+                    if node.children.length > 0 : node.expanded = false
+                    e.stop_propagation()
+                } else if e.key == .enter && found {
+                    let node = (flat.get(cur) !!).node
+                    if node.children.length > 0 : node.expanded = !node.expanded
+                    e.stop_propagation()
+                }
+            })
+        each flat as item {
+            let node = item.node
+            let has_kids = node.children.length > 0
+            let selected = node.id == this.selected_id
+            let row = div().id(this.id + "/" + node.id).role(.treeitem).aria_selected(selected)
+                .flex().items_center().gap(6).h(28).pr(8).pl(8 + item.depth.to(f32) * 16).rounded(t.radius).cursor_pointer()
+                .when(selected, fn(d) { d.bg(t.accent.opacity(0.22)) })
+                .hover(fn(s) { if !selected : s.bg(t.elevated) })
+                .on_click(fn(e) {
+                    if has_kids : node.expanded = !node.expanded
+                    this.select(node)
+                })
+            if has_kids {
+                row.aria_expanded(node.expanded)
+                row.child(icon(node.expanded ? .chevron_down : .chevron_right, 12).text_color(t.muted))
+            } else {
+                row.child(div().w(12).flex_shrink_0())
+            }
+            let ic = node.icon
+            if isset(ic) : row.child(icon(ic, 14).text_color(selected ? t.accent : t.muted))
+            row.child(div().flex_1().truncate().text_sm().text_color(t.text).child(node.label))
+            box.child(row)
+        }
+        return box
+    }
+}
+
+fn collect_tree_rows(n: TreeNode, depth: uint, out: Array[FlatTreeRow]) {
+    out.append(.{ node: n, depth: depth })
+    if n.expanded {
+        each n.children as c : collect_tree_rows(c, depth + 1, out)
+    }
+}
+
+// ---- Combobox (searchable select) & MultiSelect ----
+
+/// A searchable select dropdown with live filtering and keyboard selection.
++ class Combobox {
+    + options: Array[String] (.{})
+    ~+ selected: ?uint (null)
+    + placeholder: String ("Search…")
+    + width: f32 (220)
+    + disabled: bool (false)
+    + on_change: ?fn(uint, String)() (null)
+    ~+ id: String (next_widget_id("combobox"))
+    + search: TextInput (TextInput.new("Filter…"))
+    popup: Popup (Popup{})
+
+    + static fn new(options: Array[String]) Combobox {
+        return Combobox{ options: options }
+    }
+
+    + get value: String {
+        let s = this.selected ?! return ""
+        return this.options.get(s) !? ""
+    }
+
+    + fn select(index: uint) {
+        if index >= this.options.length : return
+        this.selected = index
+        this.popup.close()
+        let cb = this.on_change
+        if isset(cb) : cb(index, this.options.get(index) !? "")
+    }
+
+    + fn render(win: Window) Div {
+        let t = win.theme
+        let q = this.search.text.trim().lower()
+        let list = div().w(this.width).p(6).gap(4).bg(t.elevated).border(1).border_color(t.border)
+            .rounded(t.radius + 2).shadow_lg().text_sm()
+            .child(this.search.render(win))
+        let rows = div().max_h(220).overflow_y_scroll().gap(1)
+        let count: uint = 0
+        each this.options as opt, i {
+            if q.length > 0 && !opt.lower().contains(q) : continue
+            count++
+            let chosen = isset(this.selected) && this.selected == i
+            rows.child(div().role(.option).aria_selected(chosen).flex().items_center().gap(8).h(28).px(8).rounded(t.radius).cursor_pointer()
+                .hover(fn(s) { s.bg(t.accent.opacity(0.18)) })
+                .on_click(fn(e) { this.select(i) })
+                .child(div().flex_1().truncate().child(opt))
+                .child(icon(.check, 13).when(!chosen, fn(d) { d.invisible() })))
+        }
+        if count == 0 : rows.child(div().p(8).text_xs().text_color(t.muted).child("No matches"))
+        list.child(rows)
+        let label = this.value.length > 0 ? this.value : this.placeholder
+        return div().id(this.id).role(.combobox).aria_expanded(this.popup.open).disabled(this.disabled)
+            .w(this.width).h(32).px(10).flex().items_center().gap(8).flex_shrink_0()
+            .bg(t.surface).border(1).border_color(this.popup.open ? t.accent : t.border).rounded(t.radius)
+            .cursor_pointer()
+            .on_click(fn(e) {
+                if this.popup.open { this.popup.close() }
+                else {
+                    let b = win.bounds_of(this.id) ?? Bounds{ x: win.mouse_x, y: win.mouse_y }
+                    this.search.set_text("")
+                    this.popup.open_below(b)
+                    this.search.focus_handle(win).focus()
+                }
+            })
+            .child(div().flex_1().truncate().text_color(this.value.length > 0 ? t.text : t.muted).child(label))
+            .child(icon(.chevron_down, 14).text_color(t.muted))
+            .child(this.popup.render(win, list))
+    }
+}
+
+/// A multi-selection dropdown displaying chosen options as removable chips.
++ class MultiSelect {
+    + options: Array[String] (.{})
+    ~+ selected: HashSet[uint] (.{})
+    + placeholder: String ("Select items…")
+    + width: f32 (260)
+    + disabled: bool (false)
+    + on_change: ?fn(Array[uint])() (null)
+    ~+ id: String (next_widget_id("multiselect"))
+    popup: Popup (Popup{})
+
+    + static fn new(options: Array[String]) MultiSelect {
+        return MultiSelect{ options: options }
+    }
+
+    + fn toggle(index: uint) {
+        if index >= this.options.length : return
+        if this.selected.has(index) : this.selected.remove(index)
+        else : this.selected.add(index)
+        let cb = this.on_change
+        if isset(cb) : cb(this.selected_indices())
+    }
+
+    + fn selected_indices() Array[uint] {
+        let out = Array[uint]{}
+        each 0 .. this.options.length as i {
+            if this.selected.has(i) : out.append(i)
+        }
+        return out
+    }
+
+    + fn render(win: Window) Div {
+        let t = win.theme
+        let list = div().w(this.width).p(4).gap(1).bg(t.elevated).border(1).border_color(t.border)
+            .rounded(t.radius + 2).shadow_lg().max_h(240).overflow_y_scroll().text_sm()
+        each this.options as opt, i {
+            let chosen = this.selected.has(i)
+            list.child(div().role(.option).aria_selected(chosen).flex().items_center().gap(8).h(28).px(8).rounded(t.radius).cursor_pointer()
+                .hover(fn(s) { s.bg(t.accent.opacity(0.18)) })
+                .on_click(fn(e) { this.toggle(i) })
+                .child(div().flex_1().truncate().child(opt))
+                .child(icon(.check, 13).when(!chosen, fn(d) { d.invisible() })))
+        }
+        let chips = div().flex_1().flex().flex_wrap().items_center().gap(4)
+        let indices = this.selected_indices()
+        if indices.length == 0 {
+            chips.child(div().text_sm().text_color(t.muted).child(this.placeholder))
+        } else {
+            each indices as idx {
+                let txt = this.options.get(idx) !? ""
+                chips.child(div().flex().items_center().gap(4).px(6).h(22).rounded(4).bg(t.accent.opacity(0.2)).text_color(t.text).text_xs()
+                    .child(txt)
+                    .child(icon(.x, 10).cursor_pointer().on_click(fn(e) {
+                        this.toggle(idx)
+                        e.stop_propagation()
+                    })))
+            }
+        }
+        return div().id(this.id).role(.combobox).aria_expanded(this.popup.open).disabled(this.disabled)
+            .w(this.width).min_h(34).px(8).py(4).flex().items_center().gap(6).flex_shrink_0()
+            .bg(t.surface).border(1).border_color(this.popup.open ? t.accent : t.border).rounded(t.radius)
+            .cursor_pointer()
+            .on_click(fn(e) {
+                if this.popup.open { this.popup.close() }
+                else {
+                    let b = win.bounds_of(this.id) ?? Bounds{ x: win.mouse_x, y: win.mouse_y }
+                    this.popup.open_below(b)
+                }
+            })
+            .child(chips)
+            .child(icon(.chevron_down, 14).text_color(t.muted))
+            .child(this.popup.render(win, list))
+    }
+}
+
+// ---- NumberInput ----
+
+/// Numeric input with +/- stepper buttons, min/max/step clamping, and horizontal drag-to-scrub.
++ class NumberInput {
+    + value: f64 (0)
+    + min: f64 (-1000000)
+    + max: f64 (1000000)
+    + step: f64 (1)
+    + disabled: bool (false)
+    + on_change: ?fn(f64)() (null)
+    ~+ id: String (next_widget_id("num"))
+    - scrub_start_x: f32 (0)
+    - scrub_start_val: f64 (0)
+
+    + static fn new(value: f64 (0), min: f64 (-1000000), max: f64 (1000000), step: f64 (1)) NumberInput {
+        return NumberInput{ value: value, min: min, max: max, step: step }
+    }
+
+    + fn set(v: f64) {
+        let clamped = v.max(this.min).min(this.max)
+        if clamped == this.value : return
+        this.value = clamped
+        let cb = this.on_change
+        if isset(cb) : cb(this.value)
+    }
+
+    + fn increment() { this.set(this.value + this.step) }
+    + fn decrement() { this.set(this.value - this.step) }
+
+    + fn render(win: Window) Div {
+        let t = win.theme
+        let label = format_number(this.value)
+        return div().id(this.id).disabled(this.disabled).flex().items_center().h(32)
+            .bg(t.surface).border(1).border_color(t.border).rounded(t.radius).overflow_hidden()
+            .child(div().w(28).h_full().center().cursor_pointer().border_r(1).border_color(t.border)
+                .hover(fn(s) { s.bg(t.elevated) })
+                .on_click(fn(e) { this.decrement() })
+                .child(icon(.minus, 13)))
+            .child(div().flex_1().min_w(48).h_full().center().px(8).cursor(.resize_ew).text_sm().text_color(t.text)
+                .on_mouse_down(fn(e) {
+                    this.scrub_start_x = e.x
+                    this.scrub_start_val = this.value
+                })
+                .on_drag(fn(e) {
+                    let steps = round32((e.x - this.scrub_start_x) / 6.0).to(f64)
+                    this.set(this.scrub_start_val + steps * this.step)
+                })
+                .child(label))
+            .child(div().w(28).h_full().center().cursor_pointer().border_l(1).border_color(t.border)
+                .hover(fn(s) { s.bg(t.elevated) })
+                .on_click(fn(e) { this.increment() })
+                .child(icon(.plus, 13)))
+    }
+}
+
+fn format_number(v: f64) String {
+    let r = round32(v.to(f32)).to(f64)
+    if (v - r).abs() < 0.0001 : return "%{r.to(int)}"
+    let scaled = round32((v * 100.0).to(f32)) / 100.0
+    return "%{scaled}"
+}
+
+// ---- Collapsible / Accordion ----
+
+/// An expandable/collapsible disclosure section.
++ class Collapsible {
+    + title: String
+    + open: bool (false)
+    + disabled: bool (false)
+    ~+ id: String (next_widget_id("collapse"))
+
+    + static fn new(title: String, open: bool (false)) Collapsible {
+        return Collapsible{ title: title, open: open }
+    }
+
+    + fn toggle() { this.open = !this.open }
+
+    + fn render(win: Window, body: fn()(Div)) Div {
+        let t = win.theme
+        let box = div().id(this.id).disabled(this.disabled).border(1).border_color(t.border).rounded(t.radius).overflow_hidden()
+        let hdr = div().role(.button).aria_expanded(this.open).flex().items_center().gap(8).px(12).h(36)
+            .bg(t.surface).cursor_pointer().hover(fn(s) { s.bg(t.elevated) })
+            .on_click(fn(e) { this.toggle() })
+            .child(icon(this.open ? .chevron_down : .chevron_right, 14).text_color(t.muted))
+            .child(div().flex_1().text_sm().font_medium().text_color(t.text).child(this.title))
+        box.child(hdr)
+        if this.open {
+            box.child(div().p(12).border_t(1).border_color(t.border).bg(t.background).child(body()))
+        }
+        return box
+    }
+}
+
+// ---- ColorPicker ----
+
+/// An interactive HSL/alpha color picker with preset swatches and live preview.
++ class ColorPicker {
+    + hue: f32 (210)
+    + sat: f32 (0.85)
+    + light: f32 (0.55)
+    + alpha: f32 (1.0)
+    + on_change: ?fn(Color)() (null)
+    + swatches: Array[Color] (.{
+        rgb(0xef4444), rgb(0xf97316), rgb(0xf59e0b), rgb(0x22c55e)
+        rgb(0x14b8a6), rgb(0x3b82f6), rgb(0x8b5cf6), rgb(0xec4899)
+    })
+
+    + get color: Color { return hsla(this.hue, this.sat, this.light, this.alpha) }
+
+    + fn set_hsl(h: f32, s: f32, l: f32, a: f32 (1.0)) {
+        this.hue = clamp32(h, 0, 360)
+        this.sat = clamp32(s, 0, 1)
+        this.light = clamp32(l, 0, 1)
+        this.alpha = clamp32(a, 0, 1)
+        let cb = this.on_change
+        if isset(cb) : cb(this.color)
+    }
+
+    + fn set_color(c: Color) {
+        let r = c.r.to(f32) / 255.0
+        let g = c.g.to(f32) / 255.0
+        let b = c.b.to(f32) / 255.0
+        let hi = r.max(g).max(b)
+        let lo = r.min(g).min(b)
+        let l = (hi + lo) * 0.5
+        let d = hi - lo
+        let s: f32 = 0
+        let h: f32 = 0
+        if d > 0.0001 {
+            s = l > 0.5 ? d / (2.0 - hi - lo) : d / (hi + lo)
+            if hi == r : h = ((g - b) / d + (g < b ? 6.0 : 0.0)) * 60.0
+            else if hi == g : h = ((b - r) / d + 2.0) * 60.0
+            else : h = ((r - g) / d + 4.0) * 60.0
+        }
+        this.set_hsl(h, s, l, c.a.to(f32) / 255.0)
+    }
+
+    + fn render(win: Window) Div {
+        let t = win.theme
+        let cur = this.color
+        let hex_label = color_hex(cur)
+        let sw_row = div().flex().gap(6).flex_wrap()
+        each this.swatches as sw {
+            let sc = sw
+            sw_row.child(div().size(20).rounded(4).bg(sc).border(1).border_color(t.border).cursor_pointer()
+                .on_click(fn(e) { this.set_color(sc) }))
+        }
+        return div().w(240).p(12).gap(10).bg(t.surface).border(1).border_color(t.border).rounded(t.radius + 2)
+            .child(div().flex().items_center().gap(10)
+                .child(div().size(32).rounded(t.radius).bg(cur).border(1).border_color(t.border))
+                .child(div().flex_1().text_sm().font_medium().text_color(t.text).child(hex_label)))
+            .child(div().gap(4)
+                .child(div().text_xs().text_color(t.muted).child("Hue (%{round32(this.hue).to(int)}°)"))
+                .child(slider(win, this.hue / 360.0, fn(v) { this.set_hsl(v * 360.0, this.sat, this.light, this.alpha) })))
+            .child(div().gap(4)
+                .child(div().text_xs().text_color(t.muted).child("Saturation (%{round32(this.sat * 100).to(int)}%)"))
+                .child(slider(win, this.sat, fn(v) { this.set_hsl(this.hue, v, this.light, this.alpha) })))
+            .child(div().gap(4)
+                .child(div().text_xs().text_color(t.muted).child("Lightness (%{round32(this.light * 100).to(int)}%)"))
+                .child(slider(win, this.light, fn(v) { this.set_hsl(this.hue, this.sat, v, this.alpha) })))
+            .child(div().gap(4)
+                .child(div().text_xs().text_color(t.muted).child("Alpha (%{round32(this.alpha * 100).to(int)}%)"))
+                .child(slider(win, this.alpha, fn(v) { this.set_hsl(this.hue, this.sat, this.light, v) })))
+            .child(sw_row)
+    }
+}
+
+fn color_hex(c: Color) String {
+    let hex = "0123456789abcdef"
+    let b2 = fn(v: u8) String {
+        let hi = (v >> 4).to(uint)
+        let lo = (v & 0x0f).to(uint)
+        return hex.range(hi, 1) + hex.range(lo, 1)
+    }
+    return "#" + b2(c.r) + b2(c.g) + b2(c.b)
+}
+
+// ---- DatePicker ----
+
+/// A calendar date picker with month/year navigation and day selection.
++ class DatePicker {
+    + year: int (2026)
+    + month: int (1)
+    + day: int (1)
+    + on_change: ?fn(int, int, int)() (null)
+
+    + static fn new(year: int, month: int, day: int) DatePicker {
+        return DatePicker{ year: year, month: month.max(1).min(12), day: day.max(1).min(31) }
+    }
+
+    + fn prev_month() {
+        if this.month <= 1 { this.month = 12; this.year-- }
+        else : this.month--
+    }
+
+    + fn next_month() {
+        if this.month >= 12 { this.month = 1; this.year++ }
+        else : this.month++
+    }
+
+    + fn select_day(d: int) {
+        let max_d = days_in_month(this.year, this.month)
+        this.day = d.max(1).min(max_d)
+        let cb = this.on_change
+        if isset(cb) : cb(this.year, this.month, this.day)
+    }
+
+    + fn formatted() String {
+        let m = this.month < 10 ? "0%{this.month}" : "%{this.month}"
+        let d = this.day < 10 ? "0%{this.day}" : "%{this.day}"
+        return "%{this.year}-%{m}-%{d}"
+    }
+
+    + fn render(win: Window) Div {
+        let t = win.theme
+        let mnames = Array[String]{ "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" }
+        let mlabel = mnames.get((this.month - 1).to(uint)) !? "Jan"
+        let hdr = div().flex().items_center().justify_between().pb(8)
+            .child(icon_button(win, .chevron_left, 26).on_click(fn(e) { this.prev_month() }))
+            .child(div().text_sm().font_semibold().text_color(t.text).child("%{mlabel} %{this.year}"))
+            .child(icon_button(win, .chevron_right, 26).on_click(fn(e) { this.next_month() }))
+        let wd = div().grid(7).gap(2).pb(4)
+        each Array[String]{ "Su", "Mo", "Tu", "We", "Th", "Fr", "Sa" } as w {
+            wd.child(div().h(22).center().text_xs().text_color(t.muted).child(w))
+        }
+        let grid = div().grid(7).gap(2)
+        let first_wd = weekday_of(this.year, this.month, 1)
+        let total = days_in_month(this.year, this.month)
+        each 0 .. first_wd.to(uint) : grid.child(div().h(28))
+        let d = 1
+        while d <= total {
+            let day_num = d
+            let active = day_num == this.day
+            grid.child(div().h(28).center().rounded(t.radius).cursor_pointer().text_xs()
+                .bg(active ? t.accent : transparent())
+                .text_color(active ? t.accent_text : t.text)
+                .when(!active, fn(el) { el.hover(fn(s) { s.bg(t.elevated) }) })
+                .on_click(fn(e) { this.select_day(day_num) })
+                .child("%{day_num}"))
+            d++
+        }
+        return div().w(248).p(12).bg(t.surface).border(1).border_color(t.border).rounded(t.radius + 2)
+            .child(hdr).child(wd).child(grid)
+    }
+}
+
+fn days_in_month(y: int, m: int) int {
+    if m == 2 {
+        let leap = (y % 4 == 0 && y % 100 != 0) || (y % 400 == 0)
+        return leap ? 29 : 28
+    }
+    if m == 4 || m == 6 || m == 9 || m == 11 : return 30
+    return 31
+}
+
+// Sakamoto's algorithm: 0 = Sunday .. 6 = Saturday
+fn weekday_of(y: int, m: int, d: int) int {
+    let t = Array[int]{ 0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4 }
+    let yr = m < 3 ? y - 1 : y
+    let off = t.get((m - 1).to(uint)) !? 0
+    return (yr + yr / 4 - yr / 100 + yr / 400 + off + d) % 7
+}
+
+// ---- Application MenuBar ----
+
++ class AppMenu {
+    + title: String
+    + items: Array[MenuItem] (.{})
+
+    + static fn new(title: String, items: Array[MenuItem]) AppMenu {
+        return AppMenu{ title: title, items: items }
+    }
+}
+
+/// Top application menu bar with dropdown menus and hover-to-switch when open.
+/// On macOS, when `native` is true and running in an OS window, installs into the native macOS
+/// top menu bar (`NSMenu`) automatically.
++ class MenuBar {
+    + menus: Array[AppMenu] (.{})
+    /// Uses macOS's native top menu bar when available instead of drawing an in-window bar.
+    + native: bool (true)
+    ~+ open_index: ?uint (null)
+    ~+ id: String (next_widget_id("menubar"))
+    - native_installed: bool (false)
+
+    + static fn new(menus: Array[AppMenu]) MenuBar {
+        return MenuBar{ menus: menus }
+    }
+
+    /// Forces a refresh of the native OS menu bar (if active) on the next render.
+    + fn invalidate_native() { this.native_installed = false }
+
+    + fn close() { this.open_index = null }
+
+    + fn render(win: Window) Div {
+        if this.native && isset(active_sdl_window_ptr) {
+            if !this.native_installed {
+                if set_app_menu(this.menus) {
+                    this.native_installed = true
+                    return div().hidden()
+                }
+            } else {
+                return div().hidden()
+            }
+        }
+        let t = win.theme
+        let bar = div().id(this.id).role(.navigation).flex().items_center().h(30).px(6).gap(2)
+            .bg(t.surface).border_b(1).border_color(t.border).flex_shrink_0().text_sm()
+        let cur_open = this.open_index
+        if isset(cur_open) {
+            bar.child(anchored(0, 0).w(win.width).h(win.height).on_mouse_down(fn(e) { this.close() }))
+        }
+        each this.menus as m, i {
+            let is_open = isset(cur_open) && cur_open == i
+            let btn_id = this.id + "/" + i
+            let btn = div().id(btn_id).px(10).h(24).flex().items_center().rounded(4).cursor_pointer()
+                .text_color(t.text).bg(is_open ? t.elevated : transparent())
+                .hover(fn(s) { s.bg(t.elevated) })
+                .on_click(fn(e) {
+                    if is_open : this.open_index = null
+                    else : this.open_index = i
+                })
+                .on_hover_enter(fn() {
+                    if isset(this.open_index) : this.open_index = i
+                })
+                .child(m.title)
+            bar.child(btn)
+            if is_open {
+                let b = win.bounds_of(btn_id) ?? Bounds{ x: 6, y: 30, w: 60, h: 24 }
+                bar.child(anchored(b.x, b.bottom + 2, b.y - 2)
+                    .on_dismiss(fn() { this.close() })
+                    .child(menu(win, m.items, fn() { this.close() })))
+            }
+        }
+        return bar
+    }
+}

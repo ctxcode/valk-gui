@@ -36,6 +36,7 @@ class Layout {
     platform: Platform
     window_w: f32 (INF)
     window_h: f32 (INF)
+    scroll_view: ?Bounds (null)
 
     /// The border-box size of `n`. `kw`/`kh` are sizes the parent decided, `pw`/`ph` the parent's
     /// inner size for fractions, `aw`/`ah` the space available.
@@ -46,11 +47,25 @@ class Layout {
         let h = kh
         if w < 0 {
             w = s.width.resolve(pw)
-            if w >= 0 : w = clamp_size(w, s.min_width, s.max_width, pad.horizontal)
+            if w >= 0 {
+                if s.box_sizing == .content_box : w += pad.horizontal
+                w = clamp_size(w, s.min_width, s.max_width, pad.horizontal)
+            }
         }
         if h < 0 {
             h = s.height.resolve(ph)
-            if h >= 0 : h = clamp_size(h, s.min_height, s.max_height, pad.vertical)
+            if h >= 0 {
+                if s.box_sizing == .content_box : h += pad.vertical
+                h = clamp_size(h, s.min_height, s.max_height, pad.vertical)
+            }
+        }
+        let ratio = s.ratio
+        if isset(ratio) && ratio > 0 {
+            if w >= 0 && h < 0 {
+                h = clamp_size(w / ratio, s.min_height, s.max_height, pad.vertical)
+            } else if h >= 0 && w < 0 {
+                w = clamp_size(h * ratio, s.min_width, s.max_width, pad.horizontal)
+            }
         }
         if w < 0 || h < 0 {
             let iw = w >= 0 ? (w - pad.horizontal).max(0) : UNKNOWN
@@ -60,6 +75,13 @@ class Layout {
             let cw, ch = this.content_size(n, iw, ih, iaw, iah)
             if w < 0 : w = clamp_size(cw + pad.horizontal, s.min_width, s.max_width, pad.horizontal)
             if h < 0 : h = clamp_size(ch + pad.vertical, s.min_height, s.max_height, pad.vertical)
+            if isset(ratio) && ratio > 0 {
+                if s.width.kind == .auto && s.height.kind != .auto {
+                    w = clamp_size(h * ratio, s.min_width, s.max_width, pad.horizontal)
+                } else if s.height.kind == .auto && s.width.kind != .auto {
+                    h = clamp_size(w / ratio, s.min_height, s.max_height, pad.vertical)
+                }
+            }
         }
         return (w, h)
     }
@@ -84,7 +106,16 @@ class Layout {
 
     - fn compute_content(n: Div, iw: f32, ih: f32, aw: f32, ah: f32) (f32, f32) {
         if n.kind == .image {
-            let size = this.platform.image_size(n.content)
+            let size = Point{}
+            let img_obj = n.image_obj
+            let img_bytes = n.image_bytes
+            if isset(img_obj) {
+                size = .{ x: img_obj.width.to(f32), y: img_obj.height.to(f32) }
+            } else if isset(img_bytes) {
+                size = this.platform.image_bytes_size(img_bytes)
+            } else {
+                size = this.platform.image_size(n.content)
+            }
             if size.x > 0 && size.y > 0 {
                 if iw >= 0 && ih < 0 : return (iw, iw * size.y / size.x)
                 if ih >= 0 && iw < 0 : return (ih * size.x / size.y, ih)
@@ -104,7 +135,7 @@ class Layout {
                 if c.aw == max : return (c.w, c.h)
             }
         }
-        let widest, count = text_extent(this.platform, n.content, n.resolved_font, max, n.nowrap, n.ellipsis)
+        let widest, count = text_extent(this.platform, n.content, n.resolved_font, max, n.nowrap, n.ellipsis, n.line_clamp_val)
         let h = count.to(f32) * n.resolved_font.line_height
         remember(n, LayoutCache{ iw: 0, ih: 0, aw: max, ah: 0, w: widest, h: h })
         return (widest, h)
@@ -118,20 +149,50 @@ class Layout {
 
     /// Places `n` at its final position and lays out its children.
     fn place(n: Div, x: f32, y: f32, w: f32, h: f32) {
-        n.bounds = .{ x: x, y: y, w: w, h: h }
         let s = n.style
-        let inner = n.bounds.inset(s.padding.add(s.border_widths))
+        let px = x + s.translate_x
+        let py = y + s.translate_y
+        let pw = w
+        let ph = h
+        if s.scale_factor != 1 && s.scale_factor > 0 {
+            let sw = w * s.scale_factor
+            let sh = h * s.scale_factor
+            px += (w - sw) / 2
+            py += (h - sh) / 2
+            pw = sw
+            ph = sh
+        }
+        if s.position == .sticky {
+            let sv = this.scroll_view
+            if isset(sv) {
+                let st = s.inset_top
+                if isset(st) && py < sv.y + st : py = sv.y + st
+                let sl = s.inset_left
+                if isset(sl) && px < sv.x + sl : px = sv.x + sl
+                let parent = n.parent
+                if isset(parent) {
+                    let p_inner = parent.bounds.inset(parent.style.padding.add(parent.style.border_widths))
+                    if isset(st) && py + ph > p_inner.bottom : py = (p_inner.bottom - ph).max(y)
+                    if isset(sl) && px + pw > p_inner.right : px = (p_inner.right - pw).max(x)
+                }
+            }
+        }
+        n.bounds = .{ x: px, y: py, w: pw, h: ph }
+        let inner = n.bounds.inset(scroll_inner_edges(s))
         if n.kind == .text {
             let natural = this.natural_width(n)
             if natural >= 0 && natural <= inner.w + 0.01 {
                 n.lines = null
             } else {
-                n.lines = wrap_text(this.platform, n.content, n.resolved_font, inner.w, n.nowrap, n.ellipsis)
+                n.lines = wrap_text(this.platform, n.content, n.resolved_font, inner.w, n.nowrap, n.ellipsis, n.line_clamp_val)
             }
             return
         }
         if n.kind != .div || n.child_nodes.length == 0 : return
+        let prev_sv = this.scroll_view
+        if s.overflow_x == .scroll || s.overflow_y == .scroll : this.scroll_view = inner
         let cw, ch = this.flex(n, inner.w, inner.h, inner.w, inner.h, true)
+        this.scroll_view = prev_sv
         n.content_w = cw
         n.content_h = ch
     }
@@ -169,7 +230,9 @@ class Layout {
             let pad = cs.padding.add(cs.border_widths)
             let pad_main = row ? pad.horizontal : pad.vertical
             let main_size = row ? cs.width.resolve(main_def) : cs.height.resolve(main_def)
+            if main_size >= 0 && cs.box_sizing == .content_box : main_size += pad_main
             item.cross_size = row ? cs.height.resolve(cross_def) : cs.width.resolve(cross_def)
+            if item.cross_size >= 0 && cs.box_sizing == .content_box : item.cross_size += (row ? pad.vertical : pad.horizontal)
             if item.cross_size >= 0 {
                 item.known_cross = row ? clamp_size(item.cross_size, cs.min_height, cs.max_height, pad.vertical) : clamp_size(item.cross_size, cs.min_width, cs.max_width, pad.horizontal)
             } else if item.align == .stretch && cross_def >= 0 && !wrap {
@@ -292,7 +355,7 @@ class Layout {
         if !perform : return (content_w, content_h)
 
         // Placement
-        let inner = n.bounds.inset(s.padding.add(s.border_widths))
+        let inner = n.bounds.inset(scroll_inner_edges(s))
         if s.overflow_x == .scroll {
             n.scroll_x = clamp32(n.scroll_x, 0, (content_w - inner.w).max(0))
         } else {
@@ -484,6 +547,16 @@ fn remember(n: Div, entry: LayoutCache) {
     n.cache = cache
     if cache.length >= 8 : cache.clear()
     cache.append(entry)
+}
+
+fn scroll_inner_edges(s: Style) Edges {
+    let edges = s.padding.add(s.border_widths)
+    if s.scrollbar_mode == .gutter {
+        let g: f32 = s.thin_scrollbar ? 8 : 10
+        if s.overflow_y == .scroll : edges.right += g
+        if s.overflow_x == .scroll : edges.bottom += g
+    }
+    return edges
 }
 
 fn clamp_size(value: f32, min: ?f32, max: ?f32, floor: f32) f32 {

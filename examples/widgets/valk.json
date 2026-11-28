@@ -1,0 +1,15 @@
+{
+    "src": "src",
+    "dependencies": {
+        "gui": {
+            "src": "../../"
+        },
+        "sdl": {
+            "src": "github.com/zikue/valk-sdl",
+            "version": "0.1.x",
+            "libs": true,
+            "current": "0.1.0",
+            "current_hash": "ec5d29ac07e6745a627f81108a7fbc44cd1ee725"
+        }
+    }
+}

@@ -1,5 +1,10 @@
 
+use image
+
 enum NodeKind { div, text, canvas, image }
+
+/// Tooltip placement preference.
++ enum Placement { auto, top, bottom, left, right }
 
 /// Something that draws itself as an element tree. The root of a window is one, and so is
 /// every component with state of its own.
@@ -15,20 +20,32 @@ enum NodeKind { div, text, canvas, image }
     ~+ name: ?String (null)
     ~+ kind: NodeKind (.div)
     ~+ content: String ("")
+    image_obj: ?image.Image (null)
+    image_bytes: ?String (null)
     painter: ?fn(Painter, Bounds)() (null)
 
     // Handlers and state styles
     hover_style: ?fn(Style)() (null)
     active_style: ?fn(Style)() (null)
     focus_style: ?fn(Style)() (null)
+    focus_visible_style: ?fn(Style)() (null)
     focus_handle: ?FocusHandle (null)
     on_mouse_down_fn: ?fn(MouseEvent)() (null)
     on_mouse_up_fn: ?fn(MouseEvent)() (null)
     on_click_fn: ?fn(MouseEvent)() (null)
+    on_double_click_fn: ?fn(MouseEvent)() (null)
+    on_context_menu_fn: ?fn(MouseEvent)() (null)
     on_mouse_move_fn: ?fn(MouseEvent)() (null)
+    on_hover_fn: ?fn(bool)() (null)
+    on_hover_enter_fn: ?fn()() (null)
+    on_hover_leave_fn: ?fn()() (null)
+    on_focus_fn: ?fn()() (null)
+    on_blur_fn: ?fn()() (null)
     on_drag_fn: ?fn(MouseEvent)() (null)
     on_scroll_fn: ?fn(ScrollEvent)() (null)
+    on_pinch_fn: ?fn(PinchEvent)() (null)
     on_key_down_fn: ?fn(KeyEvent)() (null)
+    on_key_up_fn: ?fn(KeyEvent)() (null)
     on_input_fn: ?fn(String)() (null)
     on_drop_files_fn: ?fn(Array[String])() (null)
     drag_payload: ?String (null)
@@ -37,7 +54,18 @@ enum NodeKind { div, text, canvas, image }
     drag_over_style: ?fn(Style)() (null)
     actions: ?Map[fn()()] (null)
     tooltip_text: ?String (null)
+    tooltip_builder: ?fn()(Div) (null)
+    tooltip_placement: Placement (.auto)
     on_dismiss_fn: ?fn()() (null)
+
+    // Disabled and accessibility metadata
+    is_disabled: bool (false)
+    aria_role: Role (.none)
+    aria_label_text: String ("")
+    aria_checked_val: ?bool (null)
+    aria_expanded_val: ?bool (null)
+    aria_selected_val: ?bool (null)
+    aria_value_val: ?f32 (null)
 
     // Filled in every frame
     ~+ key: u64 (0)
@@ -52,9 +80,11 @@ enum NodeKind { div, text, canvas, image }
     text_align: TextAlign (.left)
     nowrap: bool (false)
     ellipsis: bool (false)
+    line_clamp_val: uint (0)
     decor_underline: bool (false)
     decor_strike: bool (false)
     text_selectable: bool (false)
+    effective_disabled: bool (false)
     // null when the text is one line
     lines: ?Array[String] (null)
     cache: ?Array[LayoutCache] (null)
@@ -92,6 +122,19 @@ enum NodeKind { div, text, canvas, image }
     + fn active(refine: fn(Style)()) SELF { this.active_style = refine; return this }
     /// Style changes while the element's focus handle has focus.
     + fn focus(refine: fn(Style)()) SELF { this.focus_style = refine; return this }
+    /// Style changes while the element has focus arrived via keyboard navigation (Tab/Shift+Tab).
+    + fn focus_visible(refine: fn(Style)()) SELF { this.focus_visible_style = refine; return this }
+
+    /// Disables interaction (dims visuals, shows `not_allowed` cursor, blocks mouse/keyboard/focus).
+    + fn disabled(on: bool (true)) SELF { this.is_disabled = on; return this }
+
+    /// Accessibility metadata.
+    + fn role(r: Role) SELF { this.aria_role = r; return this }
+    + fn aria_label(label: String) SELF { this.aria_label_text = label; return this }
+    + fn aria_checked(v: bool) SELF { this.aria_checked_val = v; return this }
+    + fn aria_expanded(v: bool) SELF { this.aria_expanded_val = v; return this }
+    + fn aria_selected(v: bool) SELF { this.aria_selected_val = v; return this }
+    + fn aria_value(v: f32) SELF { this.aria_value_val = v; return this }
 
     /// Makes the element focusable: clicking it focuses `handle`, Tab moves to it, and its key
     /// handlers receive key presses while it is focused.
@@ -102,14 +145,30 @@ enum NodeKind { div, text, canvas, image }
     /// Runs when the left button is pressed and released on the element. Only the innermost
     /// element with a click handler runs.
     + fn on_click(handler: fn(MouseEvent)()) SELF { this.on_click_fn = handler; return this }
+    /// Runs when the left button is double-clicked on the element.
+    + fn on_double_click(handler: fn(MouseEvent)()) SELF { this.on_double_click_fn = handler; return this }
+    /// Runs when the right mouse button is clicked on the element.
+    + fn on_context_menu(handler: fn(MouseEvent)()) SELF { this.on_context_menu_fn = handler; return this }
     + fn on_mouse_move(handler: fn(MouseEvent)()) SELF { this.on_mouse_move_fn = handler; return this }
+    /// Runs with `true` when the mouse enters the element and `false` when it leaves.
+    + fn on_hover(handler: fn(bool)()) SELF { this.on_hover_fn = handler; return this }
+    + fn on_hover_enter(handler: fn()()) SELF { this.on_hover_enter_fn = handler; return this }
+    + fn on_hover_leave(handler: fn()()) SELF { this.on_hover_leave_fn = handler; return this }
+    /// Runs when this element's focus handle gains focus.
+    + fn on_focus(handler: fn()()) SELF { this.on_focus_fn = handler; return this }
+    /// Runs when this element's focus handle loses focus.
+    + fn on_blur(handler: fn()()) SELF { this.on_blur_fn = handler; return this }
     /// Runs on every mouse move while the button that was pressed on the element is held, also
     /// when the mouse is outside it.
     + fn on_drag(handler: fn(MouseEvent)()) SELF { this.on_drag_fn = handler; return this }
     + fn on_scroll(handler: fn(ScrollEvent)()) SELF { this.on_scroll_fn = handler; return this }
+    /// Runs on pinch-to-zoom gestures (trackpad/touch or Ctrl+wheel).
+    + fn on_pinch(handler: fn(PinchEvent)()) SELF { this.on_pinch_fn = handler; return this }
     /// Runs for key presses while the element, or one of its children, has focus. The root
     /// element also receives them when nothing has focus.
     + fn on_key_down(handler: fn(KeyEvent)()) SELF { this.on_key_down_fn = handler; return this }
+    /// Runs for key releases while the element, or one of its children, has focus.
+    + fn on_key_up(handler: fn(KeyEvent)()) SELF { this.on_key_up_fn = handler; return this }
     /// Runs with typed text while the element, or one of its children, has focus.
     + fn on_input(handler: fn(String)()) SELF { this.on_input_fn = handler; return this }
     /// Runs with the paths of files dropped on the element from outside the program.
@@ -140,7 +199,18 @@ enum NodeKind { div, text, canvas, image }
     }
 
     /// Text shown in a small box near the mouse after it rests on the element for half a second.
-    + fn tooltip(text: String) SELF { this.tooltip_text = text; return this }
+    + fn tooltip(text: String, placement: Placement (.auto)) SELF {
+        this.tooltip_text = text
+        this.tooltip_placement = placement
+        return this
+    }
+
+    /// Custom `Div` content shown as a rich tooltip near the element.
+    + fn tooltip_content(build: fn()(Div), placement: Placement (.auto)) SELF {
+        this.tooltip_builder = build
+        this.tooltip_placement = placement
+        return this
+    }
 
     /// Runs when Escape is pressed and nothing else used it, for the last element with this
     /// handler in the tree: close a menu, dialog or popover.
@@ -149,10 +219,10 @@ enum NodeKind { div, text, canvas, image }
     /// The text of a text element.
     + get text: String { return this.content }
 
-    + fn is_focusable() bool { return isset(this.focus_handle) }
+    + fn is_focusable() bool { return isset(this.focus_handle) && !this.is_disabled && !this.effective_disabled }
 
     fn has_mouse_handlers() bool {
-        return isset(this.on_mouse_down_fn) || isset(this.on_mouse_up_fn) || isset(this.on_click_fn) || isset(this.on_drag_fn) || isset(this.drag_payload)
+        return isset(this.on_mouse_down_fn) || isset(this.on_mouse_up_fn) || isset(this.on_click_fn) || isset(this.on_double_click_fn) || isset(this.on_context_menu_fn) || isset(this.on_drag_fn) || isset(this.drag_payload)
     }
 }
 
@@ -180,9 +250,23 @@ enum NodeKind { div, text, canvas, image }
     return d
 }
 
+/// An image decoded from raw PNG/JPG/BMP/QOI bytes (for example from `#embed`).
++ fn img_bytes(bytes: String) Div {
+    let d = Div{ kind: .image }
+    d.image_bytes = bytes
+    return d
+}
+
+/// An image from an already-decoded `image.Image`.
++ fn img_from(img: image.Image) Div {
+    let d = Div{ kind: .image }
+    d.image_obj = img
+    return d
+}
+
 /// The style the element uses this frame: its own with the state refinements applied.
-fn apply_state_styles(d: Div, hovered: bool, active: bool, focused: bool, drag_over: bool) {
-    if !hovered && !active && !focused && !drag_over : return
+fn apply_state_styles(d: Div, hovered: bool, active: bool, focused: bool, focus_visible: bool, drag_over: bool) {
+    if !hovered && !active && !focused && !focus_visible && !drag_over : return
     let s = d.style
     if hovered {
         let f = d.hover_style
@@ -193,6 +277,13 @@ fn apply_state_styles(d: Div, hovered: bool, active: bool, focused: bool, drag_o
     }
     if focused {
         let f = d.focus_style
+        if isset(f) {
+            if s == d.style : s = copy s
+            f(s)
+        }
+    }
+    if focus_visible {
+        let f = d.focus_visible_style
         if isset(f) {
             if s == d.style : s = copy s
             f(s)
@@ -216,7 +307,7 @@ fn apply_state_styles(d: Div, hovered: bool, active: bool, focused: bool, drag_o
 }
 
 fn has_state_styles(d: Div) bool {
-    return isset(d.hover_style) || isset(d.active_style) || isset(d.focus_style) || isset(d.drag_over_style)
+    return isset(d.hover_style) || isset(d.active_style) || isset(d.focus_style) || isset(d.focus_visible_style) || isset(d.drag_over_style)
 }
 
 /// An element placed at a point of the window, painted above everything else. It moves to stay

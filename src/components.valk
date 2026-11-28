@@ -6,9 +6,9 @@
 + fn button(win: Window, label: String, icon: ?Icon (null)) Div {
     let t = win.theme
     let bg = t.elevated
-    return button_content(div().flex().center().gap(6).h(32).px(14).rounded(t.radius).bg(bg)
+    return button_content(div().flex().center().gap(6).h(round32(32 * t.density)).px(14).rounded(t.radius).bg(bg)
         .border(1).border_color(t.border).text_color(t.text).font_medium().whitespace_nowrap()
-        .selectable(false).cursor_pointer()
+        .selectable(false).cursor_pointer().role(.button)
         .hover(fn(s) { s.bg(bg.lighten(0.06)) })
         .active(fn(s) { s.bg(bg.darken(0.1)) }), label, icon)
 }
@@ -17,9 +17,9 @@
 + fn button_primary(win: Window, label: String, icon: ?Icon (null)) Div {
     let t = win.theme
     let bg = t.accent
-    return button_content(div().flex().center().gap(6).h(32).px(14).rounded(t.radius).bg(bg)
+    return button_content(div().flex().center().gap(6).h(round32(32 * t.density)).px(14).rounded(t.radius).bg(bg)
         .text_color(t.accent_text).font_medium().whitespace_nowrap()
-        .selectable(false).cursor_pointer()
+        .selectable(false).cursor_pointer().role(.button)
         .hover(fn(s) { s.bg(bg.lighten(0.1)) })
         .active(fn(s) { s.bg(bg.darken(0.1)) }), label, icon)
 }
@@ -27,7 +27,7 @@
 /// A square button with only an icon; give it a `tooltip`.
 + fn icon_button(win: Window, name: Icon, size: f32 (32)) Div {
     let t = win.theme
-    return div().size(size).flex_shrink_0().rounded(t.radius).center().text_color(t.muted).cursor_pointer()
+    return div().size(size).flex_shrink_0().rounded(t.radius).center().text_color(t.muted).cursor_pointer().role(.button)
         .hover(fn(s) { s.bg(t.elevated).text_color(t.text) })
         .active(fn(s) { s.bg(t.border) })
         .child(icon(name, round32(size * 0.5)))
@@ -53,7 +53,7 @@ fn button_content(d: Div, label: String, ic: ?Icon) Div {
     } else {
         mark.bg(t.surface).border_color(t.border)
     }
-    let row = div().flex().items_center().gap(8).cursor_pointer().child(mark)
+    let row = div().flex().items_center().gap(8).cursor_pointer().role(.checkbox).aria_checked(checked).child(mark)
     if label.length > 0 : row.child(label)
     return row
 }
@@ -65,7 +65,7 @@ fn button_content(d: Div, label: String, ic: ?Icon) Div {
     return div().w(36).h(20).p(2).rounded_full().flex().items_center().flex_shrink_0()
         .bg(on ? t.accent : t.elevated)
         .when(on, fn(d) { d.justify_end() })
-        .cursor_pointer()
+        .cursor_pointer().role(.switch_).aria_checked(on)
         .child(knob)
 }
 
@@ -80,7 +80,7 @@ fn button_content(d: Div, label: String, ic: ?Icon) Div {
         let b = e.bounds
         if b.w > 16 : on_change(clamp32((e.x - b.x - 8) / (b.w - 16), 0, 1))
     }
-    return div().h(20).cursor_pointer()
+    return div().h(20).cursor_pointer().role(.slider).aria_value(v)
         .on_mouse_down(set)
         .on_drag(set)
         .child(canvas(fn(p, b) {
@@ -97,11 +97,95 @@ fn button_content(d: Div, label: String, ic: ?Icon) Div {
 /// A bar filled to `value` (0 to 1).
 + fn progress(win: Window, value: f32) Div {
     let t = win.theme
-    return div().h(6).rounded_full().bg(t.elevated).overflow_hidden().flex()
-        .child(div().w_frac(clamp32(value, 0, 1)).rounded_full().bg(t.accent))
+    let v = clamp32(value, 0, 1)
+    return div().h(6).rounded_full().bg(t.elevated).overflow_hidden().flex().role(.progressbar).aria_value(v)
+        .child(div().w_frac(v).rounded_full().bg(t.accent))
 }
 
 /// A thin line between sections.
 + fn divider(win: Window) Div {
     return div().h(1).flex_shrink_0().bg(win.theme.border)
+}
+
+/// A breadcrumb trail of clickable path segments.
++ fn breadcrumbs(win: Window, items: Array[String], on_select: fn(uint)()) Div {
+    let t = win.theme
+    let row = div().role(.navigation).flex().items_center().gap(6).text_sm()
+    each items as label, i {
+        let last = i + 1 == items.length
+        if i > 0 : row.child(icon(.chevron_right, 12).text_color(t.muted))
+        let item = div().px(4).py(2).rounded(4).text_color(last ? t.text : t.muted).whitespace_nowrap()
+        if last {
+            item.font_medium()
+        } else {
+            item.cursor_pointer().hover(fn(s) { s.text_color(t.text).bg(t.elevated) })
+                .on_click(fn(e) { on_select(i) })
+        }
+        row.child(item.child(label))
+    }
+    return row
+}
+
+/// Page navigation controls (prev, page numbers, next). `page` is 1-based.
++ fn pagination(win: Window, page: uint, total_pages: uint, on_change: fn(uint)()) Div {
+    let t = win.theme
+    let total = total_pages.max(1)
+    let cur = page.max(1).min(total)
+    let row = div().role(.navigation).flex().items_center().gap(4).text_sm()
+    row.child(icon_button(win, .chevron_left, 28).disabled(cur <= 1).on_click(fn(e) {
+        if cur > 1 : on_change(cur - 1)
+    }))
+    let start: uint = cur > 3 ? cur - 2 : 1
+    let end: uint = (start + 4).min(total)
+    if end - start < 4 && end > 4 : start = end - 4
+    let p = start
+    while p <= end {
+        let num = p
+        let active = num == cur
+        row.child(div().min_w(28).h(28).px(6).center().rounded(t.radius).cursor_pointer().role(.button)
+            .bg(active ? t.accent : t.surface).border(1).border_color(active ? t.accent : t.border)
+            .text_color(active ? t.accent_text : t.text).font_medium()
+            .when(!active, fn(d) { d.hover(fn(s) { s.bg(t.elevated) }) })
+            .on_click(fn(e) { on_change(num) })
+            .child("%{num}"))
+        p++
+    }
+    row.child(icon_button(win, .chevron_right, 28).disabled(cur >= total).on_click(fn(e) {
+        if cur < total : on_change(cur + 1)
+    }))
+    return row
+}
+
+/// An animated shimmer placeholder box for loading states.
++ fn skeleton(win: Window, w: f32, h: f32, radius: f32 (-1)) Div {
+    win.request_frame()
+    let t = win.theme
+    let r = radius >= 0 ? radius : t.radius
+    let phase = ((sin32((win.time * 3.0).to(f32)) + 1.0) * 0.5)
+    let c = t.surface.mix(t.elevated, 0.35 + phase * 0.55)
+    return div().w(w).h(h).rounded(r).bg(c).flex_shrink_0()
+}
+
+/// A segmented control with a sliding active background pill.
++ fn segmented(win: Window, id: String, labels: Array[String], selected: uint, on_select: fn(uint)()) Div {
+    let t = win.theme
+    let bar = div().id(id).role(.tablist).flex().items_center().p(3).gap(2).rounded(t.radius + 2)
+        .bg(t.surface).border(1).border_color(t.border)
+    let parent = win.bounds_of(id)
+    let active_b = win.bounds_of(id + "/" + selected)
+    if isset(parent) && isset(active_b) {
+        let x = win.transition(id + "/seg_x", active_b.x - parent.x, 0.16)
+        let w = win.transition(id + "/seg_w", active_b.w, 0.16)
+        bar.child(div().absolute().left(x).top(3).w(w).h((parent.h - 6).max(20)).rounded(t.radius).bg(t.elevated).shadow_sm())
+    }
+    each labels as label, i {
+        let active = i == selected
+        bar.child(div().id(id + "/" + i).role(.tab).aria_selected(active).px(12).h(26).flex().items_center().justify_center()
+            .rounded(t.radius).cursor_pointer().text_sm().whitespace_nowrap().z_index(1)
+            .text_color(active ? t.text : t.muted).when(active, fn(d) { d.font_medium() })
+            .hover(fn(s) { s.text_color(t.text) })
+            .on_click(fn(e) { on_select(i) })
+            .child(label))
+    }
+    return bar
 }

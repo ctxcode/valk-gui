@@ -1,0 +1,114 @@
+use valk.core
+
+// Cross-platform accessibility bridge:
+// - Tracks accessibility tree diffs (focus changes, role/state updates, alerts)
+// - Exports AccessKit-compatible JSON tree snapshots (`win.accessibility_json()`)
+// - Dispatches live screen-reader announcements to OS accessibility APIs:
+//   * macOS: VoiceOver via NSAccessibilityPostNotificationWithUserInfo (AppKit ObjC runtime)
+//   * Windows: Win32 NotifyWinEvent (user32) + live region notification
+//   * Linux: AT-SPI2 / Speech Dispatcher (when accessibility bus / screen reader is active)
+
+#if OS == "win"
+extern fn NotifyWinEvent(event: u32, hwnd: ?ptr, id_object: i32, id_child: i32) void;
+value WIN_EVENT_OBJECT_FOCUS (0x8005)
+value WIN_EVENT_OBJECT_LIVE_REGION_CHANGED (0x8019)
+#end
+
+/// Dispatches a live announcement to the operating system's screen reader when running in a live
+/// OS window. Safe no-op in headless test mode.
+fn a11y_announce_os(text: String) {
+    if text.length == 0 || !isset(active_sdl_window_ptr) : return
+    #if OS == "macos"
+    let ns_app = msg0(mac_cls("NSApplication"), mac_sel("sharedApplication"))
+    if !isset(ns_app) : return
+    let key = ns_string("NSAccessibilityAnnouncementKey")
+    let val = ns_string(text)
+    let dict = msg2_ptr(mac_cls("NSDictionary"), mac_sel("dictionaryWithObject:forKey:"), val, key)
+    let notif = ns_string("NSAccessibilityAnnouncementRequested")
+    post_ns_a11y_notif(ns_app, notif, dict)
+    #elif OS == "win"
+    @unsafe
+    NotifyWinEvent(WIN_EVENT_OBJECT_LIVE_REGION_CHANGED, null, -4, 0)
+    #else
+    // Only invoke speech-dispatcher when the user explicitly opted into OS screen-reader output
+    let active = core.getenv("VALK_GUI_A11Y") !? ""
+    if active == "" || active == "0" : return
+    let p = core.Process.start("spd-say", .{ "-e", text }, stdout: .discard, stderr: .discard) ! return
+    p.detach() _
+    #end
+}
+
+#if OS == "macos"
+extern fn NSAccessibilityPostNotificationWithUserInfo(element: ?ptr, notification: ?ptr, user_info: ?ptr) void;
+
+fn msg2_ptr(obj: ?ptr, sel: ?ptr, a: ?ptr, b: ?ptr) ?ptr {
+    @unsafe
+    let f = objc_msgSend.@cast(fnptr(?ptr, ?ptr, ?ptr, ?ptr)(?ptr))
+    return f(obj, sel, a, b)
+}
+
+fn post_ns_a11y_notif(elem: ?ptr, notif: ?ptr, info: ?ptr) {
+    @unsafe
+    NSAccessibilityPostNotificationWithUserInfo(elem, notif, info)
+}
+#end
+
+/// Serializes an array of `AccessibleNode`s to JSON (suitable for external assistive tools,
+/// AT-SPI bridges, or snapshot testing).
++ fn accessibility_nodes_to_json(nodes: Array[AccessibleNode]) String {
+    let parts = Array[String]{}
+    each nodes as n {
+        let fields = Array[String]{
+            "\"role\":\"" + n.role.name() + "\""
+            "\"id\":\"" + json_esc(n.id) + "\""
+            "\"label\":\"" + json_esc(n.label) + "\""
+            "\"bounds\":{\"x\":%{round32(n.bounds.x).to(int)},\"y\":%{round32(n.bounds.y).to(int)},\"w\":%{round32(n.bounds.w).to(int)},\"h\":%{round32(n.bounds.h).to(int)}}"
+            "\"disabled\":%{n.disabled}"
+            "\"focused\":%{n.focused}"
+        }
+        let ck = n.checked
+        if isset(ck) : fields.append("\"checked\":%{ck}")
+        let ex = n.expanded
+        if isset(ex) : fields.append("\"expanded\":%{ex}")
+        let sel = n.selected
+        if isset(sel) : fields.append("\"selected\":%{sel}")
+        let val = n.value
+        if isset(val) : fields.append("\"value\":%{val}")
+        parts.append("{" + fields.join(",") + "}")
+    }
+    return "[" + parts.join(",") + "]"
+}
+
+fn json_esc(s: String) String {
+    return s.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
+}
+
+extend Window {
+    /// Returns the current accessibility tree serialized as JSON.
+    + fn accessibility_json() String {
+        return accessibility_nodes_to_json(this.accessibility_tree())
+    }
+
+    /// Synchronizes the accessibility tree after a frame, notifying `on_a11y_update` and
+    /// announcing focus changes or new alert nodes when accessibility announcements are active.
+    fn sync_a11y() {
+        let nodes = this.accessibility_tree()
+        let sig = accessibility_nodes_to_json(nodes)
+        if sig == this.last_a11y_sig : return
+        this.last_a11y_sig = sig
+        let cb = this.on_a11y_update
+        if isset(cb) : cb(nodes)
+        // Track newly focused semantic element
+        let focused_desc = ""
+        each nodes as n {
+            if n.focused {
+                focused_desc = n.label.length > 0 ? "%{n.label}, %{n.role.name()}" : n.role.name()
+                break
+            }
+        }
+        if focused_desc.length > 0 && focused_desc != this.last_a11y_focus {
+            this.last_a11y_focus = focused_desc
+            if this.a11y_announce_focus : this.announce(focused_desc)
+        }
+    }
+}

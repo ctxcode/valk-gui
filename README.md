@@ -288,20 +288,20 @@ moves the clock for timers and animations, and `win.wait_tasks()` waits for `spa
 | `editor` | file tree, tabs, syntax colors, command palette, find in files; `make editor` opens this repository |
 | `dashboard` | live charts, animated numbers, a sortable table of 5000 rows |
 | `showcase` | canvas drawing, sliders and a long list |
+| `widgets` | split panes, data table, tree view, command palette, toasts, markdown, pickers, themes |
+
+See [docs/theming.md](docs/theming.md) for theme presets, semantic tokens, and styling tips, and [docs/api.md](docs/api.md) for the full API reference.
 
 ![Kanban](docs/kanban.png)
 
 ![Editor](docs/editor.png)
 
-## Not supported
+## Platform Notes
 
-- **Input methods (IME):** text typed through an input method (Chinese, Japanese, Korean)
-  arrives when it is committed, but the word being composed is not shown inline at the caret yet.
-- **Accessibility:** no accessibility tree is exposed, so screen readers see an empty window.
-- **Windows:** one operating-system window per program; floating panels live inside it. No
-  native menu bar.
-- **Right-to-left text:** reordered for display; the text fields edit it in logical order, and
-  Arabic ligatures beyond lam-alef are not formed.
+- **GPU & Software Rendering:** Automatically uses SDL3's hardware-accelerated backend (Vulkan/OpenGL, Metal, D3D11/12) with a GPU glyph atlas and LRU texture cache, and falls back transparently to the pure-Valk software rasterizer on GPU-less VMs or for effects like `backdrop_blur` (`VALK_GUI_SOFTWARE=1` forces software mode).
+- **Multiple Windows & Menus:** Use `gui.App` for multi-window apps; `gui.MenuBar` installs into macOS's native top menu bar (`NSMenu`) and renders in-window on Linux and Windows.
+- **IME & International Text:** Supports inline IME composition (`EVENT_TEXT_EDITING` + `SDL_SetTextInputArea`), TrueType/OpenType kerning, combining marks, Latin & Arabic/Persian shaping, `CBDT`/`CBLC` color emoji, and `gui.bidi_map` visual cursor movement.
+- **Accessibility & Dev Tools:** Elements expose semantic `Role` / ARIA attributes via `win.accessibility_tree()`, `win.accessibility_json()`, and OS live announcements (`win.announce`). Press `F12` (or set `VALK_GUI_INSPECTOR=1` / `VALK_GUI_DEBUG=1`) for the interactive layout inspector and FPS overlay.
 
 ## Development
 

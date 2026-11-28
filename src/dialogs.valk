@@ -1,14 +1,265 @@
+use image
+use sdl
 use valk.core
+use valk.fs
+
+extern fn SDL_OpenURL(url: cstring) bool;
+extern fn SDL_GetSystemTheme() i32;
+extern fn SDL_GetDisplays(count: *i32) ?*[u32];
+extern fn SDL_GetDisplayName(display_id: u32) ?cstring;
+extern fn SDL_GetDisplayContentScale(display_id: u32) f32;
+extern fn SDL_free(mem: ?ptr) void;
+
+struct SdlDialogFileFilter {
+    name: ?cstring (null)
+    pattern: ?cstring (null)
+}
+
+extern fn SDL_ShowOpenFileDialog(callback: fnptr(?ptr, ?*[?cstring], i32)(), userdata: ?ptr, window: ?ptr, filters: ?*[SdlDialogFileFilter], nfilters: i32, default_location: ?cstring, allow_many: bool) void;
+extern fn SDL_ShowSaveFileDialog(callback: fnptr(?ptr, ?*[?cstring], i32)(), userdata: ?ptr, window: ?ptr, filters: ?*[SdlDialogFileFilter], nfilters: i32, default_location: ?cstring) void;
+extern fn SDL_ShowOpenFolderDialog(callback: fnptr(?ptr, ?*[?cstring], i32)(), userdata: ?ptr, window: ?ptr, default_location: ?cstring, allow_many: bool) void;
 
 + enum FileDialog { open, save, folder }
 
-/// Shows the system's file dialog and calls `done` with the chosen path, or with "" when it was
-/// cancelled or the system has no dialog program. The dialog runs on another thread, so the window
-/// keeps drawing. Linux uses `zenity` or `kdialog`, macOS AppleScript, Windows PowerShell.
-+ fn choose_file(win: Window, done: fn(String)(), kind: FileDialog (.open), title: String ("")) {
+/// An extension filter for native file dialogs, e.g. `FileFilter{ name: "Images", pattern: "png;jpg" }`.
++ struct FileFilter {
+    + name: String
+    + pattern: String
+}
+
+/// Options for native file and folder dialogs.
++ class FileDialogOptions {
+    + title: String ("")
+    + default_location: String ("")
+    + filters: Array[FileFilter] (.{})
+    + allow_many: bool (false)
+}
+
+// Active SDL3 native file dialog pending completion
+class PendingFileDialog {
+    done: fn(Array[String])()
+    finished: bool (false)
+    paths: Array[String] (.{})
+}
+
+global active_file_dialog: ?PendingFileDialog (null)
+global active_sdl_window_ptr: ?ptr (null)
+
+fn sdl_file_dialog_cb(userdata: ?ptr, filelist: ?*[?cstring], filter: i32) {
+    let dlg = active_file_dialog
+    if !isset(dlg) : return
+    let out = Array[String]{}
+    if isset(filelist) {
+        @unsafe
+        let i: uint = 0
+        while true {
+            let p = filelist[i]
+            if !isset(p) : break
+            out.append(p.to_string())
+            i++
+        }
+    }
+    dlg.paths = out
+    dlg.finished = true
+}
+
+fn poll_native_file_dialog() bool {
+    let dlg = active_file_dialog ?! return false
+    if !dlg.finished : return false
+    active_file_dialog = null
+    dlg.done(dlg.paths)
+    return true
+}
+
+/// Returns the OS color scheme preference (light, dark, or unknown).
++ fn system_theme() SystemTheme {
+    let raw = SDL_GetSystemTheme()
+    if raw == 1 : return .light
+    if raw == 2 : return .dark
+    return .unknown
+}
+
+/// Returns information about all connected monitors / displays.
++ fn displays() Array[DisplayInfo] {
+    let out = Array[DisplayInfo]{}
+    let count: i32 = 0
+    let primary = sdl.get_primary_display()
+    let ids = SDL_GetDisplays(&count)
+    if !isset(ids) || count <= 0 : return out
+    let i: i32 = 0
+    while i < count {
+        @unsafe
+        let id = ids[i.to(uint)]
+        let name_ptr = SDL_GetDisplayName(id)
+        let name = isset(name_ptr) ? name_ptr.to_string() : "Display %{i + 1}"
+        let rb = sdl.get_display_bounds(id) ?? sdl.Rect{}
+        let ub = sdl.get_display_usable_bounds(id) ?? rb
+        let scale = SDL_GetDisplayContentScale(id)
+        if scale <= 0 : scale = 1.0
+        out.append(.{
+            id: id
+            name: name
+            bounds: .{ x: rb.x.to(f32), y: rb.y.to(f32), w: rb.w.to(f32), h: rb.h.to(f32) }
+            usable_bounds: .{ x: ub.x.to(f32), y: ub.y.to(f32), w: ub.w.to(f32), h: ub.h.to(f32) }
+            scale: scale
+            primary: id == primary
+        })
+        i++
+    }
+    @unsafe
+    SDL_free(ids.@cast(ptr))
+    return out
+}
+
+/// Opens `url` in the system's default browser or handler. Uses SDL3's `SDL_OpenURL` first so
+/// the OS receives a focus-activation token (such as Wayland `xdg_activation_v1` via
+/// `org.freedesktop.portal.OpenURI`) and raises the browser window, with an OS fallback.
++ fn open_url(url: String) bool {
+    if url.length == 0 : return false
+    @unsafe
+    if SDL_OpenURL(url.data_cstring) : return true
+    #if OS == "macos"
+    let p = core.Process.start("open", .{ url }, stdout: .discard, stderr: .discard) ! return false
+    p.detach() _
+    return true
+    #elif OS == "win"
+    let p = core.Process.start("cmd", .{ "/C", "start", "", url }, stdout: .discard, stderr: .discard) ! return false
+    p.detach() _
+    return true
+    #else
+    let p = core.Process.start("xdg-open", .{ url }, stdout: .discard, stderr: .discard) ! return false
+    p.detach() _
+    return true
+    #end
+}
+
+/// Reveals `path` (file or folder) in the operating system's file manager.
++ fn reveal_in_file_manager(path: String) bool {
+    if path.length == 0 : return false
+    #if OS == "macos"
+    let p = core.Process.start("open", .{ "-R", path }, stdout: .discard, stderr: .discard) ! return false
+    p.detach() _
+    return true
+    #elif OS == "win"
+    let p = core.Process.start("explorer", .{ "/select," + path }, stdout: .discard, stderr: .discard) ! return false
+    p.detach() _
+    return true
+    #else
+    let uri = path.starts_with("file://") ? path : "file://" + path
+    let dbus = core.Process.start("gdbus", .{
+        "call", "--session",
+        "--dest", "org.freedesktop.FileManager1",
+        "--object-path", "/org/freedesktop/FileManager1",
+        "--method", "org.freedesktop.FileManager1.ShowItems",
+        "['" + uri.replace("'", "\\'") + "']", ""
+    }, stdout: .discard, stderr: .discard) !? null
+    if isset(dbus) {
+        dbus.detach() _
+        return true
+    }
+    let dir = fs.is_dir(path) ? path : parent_dir(path)
+    let p = core.Process.start("xdg-open", .{ dir.length > 0 ? dir : "." }, stdout: .discard, stderr: .discard) ! return false
+    p.detach() _
+    return true
+    #end
+}
+
+/// Sends a native desktop notification.
++ fn notify(title: String, body: String, icon: String ("")) bool {
+    if title.length == 0 && body.length == 0 : return false
+    #if OS == "macos"
+    let safe_body = body.replace("\"", "\\\"")
+    let safe_title = title.replace("\"", "\\\"")
+    let script = "display notification \"" + safe_body + "\" with title \"" + safe_title + "\""
+    let p = core.Process.start("osascript", .{ "-e", script }, stdout: .discard, stderr: .discard) ! return false
+    p.detach() _
+    return true
+    #elif OS == "win"
+    let safe_title = title.replace("'", "''")
+    let safe_body = body.replace("'", "''")
+    let script = "[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] > $null; $t = [Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent(1); $nodes = $t.GetElementsByTagName('text'); $nodes.Item(0).AppendChild($t.CreateTextNode('" + safe_title + "')) > $null; $nodes.Item(1).AppendChild($t.CreateTextNode('" + safe_body + "')) > $null; [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('valk-gui').Show([Windows.UI.Notifications.ToastNotification]::new($t))"
+    let p = core.Process.start("powershell", .{ "-NoProfile", "-Command", script }, stdout: .discard, stderr: .discard) ! return false
+    p.detach() _
+    return true
+    #else
+    let args = Array[String]{}
+    if icon.length > 0 : args.append_many(.{ "-i", icon })
+    args.append(title)
+    if body.length > 0 : args.append(body)
+    let p = core.Process.start("notify-send", args, stdout: .discard, stderr: .discard) ! return false
+    p.detach() _
+    return true
+    #end
+}
+
+/// Shows the native file/folder dialog (using SDL3's native dialog API when an OS window is active,
+/// or OS fallback otherwise) and calls `done` with all selected paths (empty when cancelled).
++ fn choose_files(win: Window, done: fn(Array[String])(), kind: FileDialog (.open), options: FileDialogOptions (FileDialogOptions{})) {
+    let win_ptr = active_sdl_window_ptr
+    if isset(win_ptr) && !isset(active_file_dialog) {
+        active_file_dialog = PendingFileDialog{ done: done }
+        let sdl_filters = Array[SdlDialogFileFilter]{}
+        each options.filters as f {
+            @unsafe
+            sdl_filters.append(.{ name: f.name.data_cstring, pattern: f.pattern.data_cstring })
+        }
+        let loc: ?cstring = null
+        @unsafe
+        if options.default_location.length > 0 : loc = options.default_location.data_cstring
+        let nfilters = sdl_filters.length.to(i32)
+        let fptr: ?*[SdlDialogFileFilter] = null
+        @unsafe
+        if nfilters > 0 : fptr = sdl_filters.data.@cast(*[SdlDialogFileFilter])
+        if kind == .open {
+            SDL_ShowOpenFileDialog(sdl_file_dialog_cb, null, win_ptr, fptr, nfilters, loc, options.allow_many)
+        } else if kind == .save {
+            SDL_ShowSaveFileDialog(sdl_file_dialog_cb, null, win_ptr, fptr, nfilters, loc)
+        } else {
+            SDL_ShowOpenFolderDialog(sdl_file_dialog_cb, null, win_ptr, loc, options.allow_many)
+        }
+        win.request_frame()
+        return
+    }
     let mode = kind.to(int)
-    let heading: atomic String = title
-    win.spawn[String](fn() String { return run_file_dialog(mode, heading) }, done) ! done("")
+    let heading: atomic String = options.title
+    win.spawn[String](fn() String { return run_file_dialog(mode, heading) }, fn(path: String) {
+        let res = Array[String]{}
+        if path.length > 0 : res.append(path)
+        done(res)
+    }) ! done(Array[String]{})
+}
+
+/// Shows the system's file dialog and calls `done` with the chosen path, or with "" when it was
+/// cancelled or the system has no dialog program.
++ fn choose_file(win: Window, done: fn(String)(), kind: FileDialog (.open), title: String ("")) {
+    choose_files(win, fn(paths: Array[String]) {
+        done(paths.get(0) !? "")
+    }, kind, .{ title: title })
+}
+
+/// Reads an image file on a background thread and decodes it on completion, calling `done` on the
+/// window thread without blocking the UI during file I/O.
++ fn load_image_async(win: Window, path: String, done: fn(?image.Image)()) {
+    let p: atomic String = path
+    win.spawn[String](fn() String {
+        return fs.read(p) !? ""
+    }, fn(bytes: String) {
+        if bytes.length == 0 {
+            done(null)
+            return
+        }
+        let img = image.decode(bytes) !? null
+        done(isset(img) ? img.to_rgba() : null)
+    }) ! done(null)
+}
+
+fn parent_dir(path: String) String {
+    let i = path.length
+    while i > 0 {
+        i--
+        if path[i] == '/' || path[i] == '\\' : return i == 0 ? "/" : path.range(0, i)
+    }
+    return "."
 }
 
 fn run_file_dialog(mode: int, title: String) String {

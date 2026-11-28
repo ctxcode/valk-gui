@@ -64,7 +64,7 @@ fn next_widget_id(kind: String) String {
 /// A panel of menu entries. Choosing one calls `close` and then the entry's action.
 + fn menu(win: Window, items: Array[MenuItem], close: fn()()) Div {
     let t = win.theme
-    let panel = div().min_w(180).p(4).gap(1).bg(t.elevated).border(1).border_color(t.border).rounded(t.radius + 2)
+    let panel = div().role(.menu).min_w(180).p(4).gap(1).bg(t.elevated).border(1).border_color(t.border).rounded(t.radius + 2)
         .shadow_lg().text_sm()
     each items as item {
         if item.separator {
@@ -72,7 +72,7 @@ fn next_widget_id(kind: String) String {
             continue
         }
         let color = item.disabled ? t.muted : (item.danger ? t.danger : t.text)
-        let row = div().flex().items_center().gap(8).h(30).px(8).rounded(t.radius).text_color(color)
+        let row = div().role(.menuitem).disabled(item.disabled).flex().items_center().gap(8).h(30).px(8).rounded(t.radius).text_color(color)
         let ic = item.icon
         if isset(ic) {
             row.child(icon(ic, 15))
@@ -102,6 +102,7 @@ fn next_widget_id(kind: String) String {
     /// Called with the index of the chosen option.
     + on_change: ?fn(uint)() (null)
     + width: f32 (180)
+    + disabled: bool (false)
     ~+ id: String (next_widget_id("select"))
     popup: Popup (Popup{})
     highlighted: uint (0)
@@ -151,7 +152,7 @@ fn next_widget_id(kind: String) String {
         }
         return div().id(this.id).w(this.width).h(32).px(10).flex().items_center().gap(8).flex_shrink_0()
             .bg(t.surface).border(1).border_color(this.popup.open || fh.is_focused() ? t.accent : t.border).rounded(t.radius)
-            .cursor_pointer().track_focus(fh)
+            .cursor_pointer().role(.combobox).aria_expanded(this.popup.open).disabled(this.disabled).track_focus(fh)
             .hover(fn(s) { s.bg(t.elevated) })
             .on_click(fn(e) { this.toggle(win) })
             .on_key_down(fn(e) {
@@ -185,6 +186,7 @@ fn next_widget_id(kind: String) String {
 /// pressing Escape calls `on_close`.
 + fn modal(win: Window, content: Div, on_close: fn()()) Div {
     return anchored(0, 0).w(win.width).h(win.height).center().bg(rgba(0x00000088))
+        .role(.dialog).focus_trap()
         .on_dismiss(on_close)
         .on_click(fn(e) { on_close() })
         .on_scroll(fn(e) { e.stop_propagation() })
@@ -207,13 +209,23 @@ fn next_widget_id(kind: String) String {
 // ---- Tabs ----
 
 /// A row of tabs with a line under the selected one that slides to the new tab. `id` names the
-/// row, unique in the window.
+/// row, unique in the window. Supports Left/Right arrow navigation when focused.
 + fn tabs(win: Window, id: String, labels: Array[String], selected: uint, on_select: fn(uint)()) Div {
     let t = win.theme
-    let row = div().id(id).flex().gap(4).border_b(1).border_color(t.border)
+    let row = div().id(id).role(.tablist).flex().gap(4).border_b(1).border_color(t.border)
+        .on_key_down(fn(e) {
+            if labels.length == 0 : return
+            if e.key == .right {
+                on_select((selected + 1) % labels.length)
+                e.stop_propagation()
+            } else if e.key == .left {
+                on_select(selected == 0 ? labels.length - 1 : selected - 1)
+                e.stop_propagation()
+            }
+        })
     each labels as label, i {
         let active = i == selected
-        row.child(div().id(id + "/" + i).px(12).h(36).flex().items_center().cursor_pointer().text_sm()
+        row.child(div().id(id + "/" + i).role(.tab).aria_selected(active).px(12).h(36).flex().items_center().cursor_pointer().text_sm()
             .text_color(active ? t.text : t.muted).when(active, fn(d) { d.font_medium() })
             .hover(fn(s) { s.text_color(t.text) })
             .on_click(fn(e) { on_select(i) })
@@ -252,9 +264,55 @@ fn next_widget_id(kind: String) String {
     let mark = div().size(16).rounded_full().border(1).flex_shrink_0().center()
         .border_color(checked ? t.accent : t.border).bg(t.surface)
     if checked : mark.border(5)
-    let row = div().flex().items_center().gap(8).cursor_pointer().child(mark)
+    let row = div().flex().items_center().gap(8).cursor_pointer().role(.radio).aria_checked(checked).child(mark)
     if label.length > 0 : row.child(label)
     return row
+}
+
+/// A floating popover / hover card anchored to a trigger element with placement preference,
+/// automatic flip when near window edges, and an arrow indicator.
++ class Popover {
+    ~+ open: bool (false)
+    + placement: Placement (.bottom)
+    + hover_trigger: bool (false)
+    ~+ id: String (next_widget_id("popover"))
+
+    + fn toggle() { this.open = !this.open }
+    + fn close() { this.open = false }
+
+    + fn render(win: Window, trigger: Div, content: Div) Div {
+        let t = win.theme
+        let host = div().id(this.id).relative()
+        if this.hover_trigger {
+            trigger.on_hover(fn(inside) { this.open = inside })
+        } else {
+            trigger.on_click(fn(e) { this.toggle() })
+        }
+        host.child(trigger)
+        if this.open {
+            let b = win.bounds_of(this.id) ?? Bounds{ x: win.mouse_x, y: win.mouse_y, w: 40, h: 32 }
+            let px = b.x
+            let py = b.bottom + 8
+            let above = b.y - 8
+            if this.placement == .top {
+                px = b.x
+                py = (b.y - 120).max(8)
+            } else if this.placement == .right {
+                px = b.right + 8
+                py = b.y
+            } else if this.placement == .left {
+                px = (b.x - 220).max(8)
+                py = b.y
+            }
+            let card_box = div().p(10).bg(t.elevated).border(1).border_color(t.border).rounded(t.radius + 2).shadow_lg().child(content)
+            let pop = anchored(px, py, above).on_dismiss(fn() { this.close() }).child(card_box)
+            if !this.hover_trigger {
+                host.child(anchored(0, 0).w(win.width).h(win.height).on_mouse_down(fn(e) { this.close() }))
+            }
+            host.child(pop)
+        }
+        return host
+    }
 }
 
 /// A small rounded label, such as a count or a status.

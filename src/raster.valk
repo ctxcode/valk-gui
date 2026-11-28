@@ -51,23 +51,54 @@ class Canvas {
         this.clip_y1 = y1
     }
 
+    fn set_clip_intersect(b: Bounds, limit: ?Bounds) {
+        if isset(limit) {
+            this.set_clip(b.intersect(limit))
+        } else {
+            this.set_clip(b)
+        }
+    }
+
+    fn clear_rect(b: Bounds, c: Color) {
+        let s = this.scale
+        let x0 = floor32(b.x * s).to(i32).max(0).min(this.width)
+        let y0 = floor32(b.y * s).to(i32).max(0).min(this.height)
+        let x1 = ceil32((b.x + b.w) * s).to(i32).max(x0).min(this.width)
+        let y1 = ceil32((b.y + b.h) * s).to(i32).max(y0).min(this.height)
+        if x0 >= x1 || y0 >= y1 : return
+        let packed: u32 = c.r.to(u32) | (c.g.to(u32) << 8) | (c.b.to(u32) << 16) | (255.to(u32) << 24)
+        let w_u = this.width.to(uint)
+        @unsafe
+        let p32 = this.pixels.data.@cast(*[u32])
+        let y = y0
+        while y < y1 {
+            let row = y.to(uint) * w_u
+            let at = row + x0.to(uint)
+            let end = row + x1.to(uint)
+            while at < end {
+                p32[at] = packed
+                at++
+            }
+            y++
+        }
+    }
+
     fn clear(c: Color) {
         let total = this.width.to(uint) * this.height.to(uint)
-        let px = this.pixels
+        let packed: u32 = c.r.to(u32) | (c.g.to(u32) << 8) | (c.b.to(u32) << 16) | (255.to(u32) << 24)
+        @unsafe
+        let p = this.pixels.data.@cast(*[u32])
         let i: uint = 0
         while i < total {
-            let at = i * 4
-            px[at] = c.r
-            px[at + 1] = c.g
-            px[at + 2] = c.b
-            px[at + 3] = 255
+            p[i] = packed
             i++
         }
     }
 
     fn blend_pixel_at(at: uint, r: u8, g: u8, b: u8, a: u8) {
         if a == 0 : return
-        let px = this.pixels
+        @unsafe
+        let px = this.pixels.data.@cast(*[u8])
         if a == 255 {
             px[at] = r
             px[at + 1] = g
@@ -77,9 +108,12 @@ class Canvas {
         }
         let sa = a.to(u32)
         let inv = 255 - sa
-        px[at] = ((r.to(u32) * sa + px[at].to(u32) * inv + 127) / 255).to(u8)
-        px[at + 1] = ((g.to(u32) * sa + px[at + 1].to(u32) * inv + 127) / 255).to(u8)
-        px[at + 2] = ((b.to(u32) * sa + px[at + 2].to(u32) * inv + 127) / 255).to(u8)
+        let tr = r.to(u32) * sa + px[at].to(u32) * inv + 128
+        let tg = g.to(u32) * sa + px[at + 1].to(u32) * inv + 128
+        let tb = b.to(u32) * sa + px[at + 2].to(u32) * inv + 128
+        px[at] = ((tr + (tr >> 8)) >> 8).to(u8)
+        px[at + 1] = ((tg + (tg >> 8)) >> 8).to(u8)
+        px[at + 2] = ((tb + (tb >> 8)) >> 8).to(u8)
         px[at + 3] = 255
     }
 
@@ -88,32 +122,37 @@ class Canvas {
         let lx = x0.max(this.clip_x0)
         let rx = x1.min(this.clip_x1)
         if lx >= rx : return
-        let px = this.pixels
         let row = y.to(uint) * this.width.to(uint)
-        let x = lx
         if a == 255 {
-            while x < rx {
-                let at = (row + x.to(uint)) * 4
-                px[at] = r
-                px[at + 1] = g
-                px[at + 2] = b
-                px[at + 3] = 255
-                x++
+            let packed: u32 = r.to(u32) | (g.to(u32) << 8) | (b.to(u32) << 16) | (255.to(u32) << 24)
+            @unsafe
+            let p32 = this.pixels.data.@cast(*[u32])
+            let at = row + lx.to(uint)
+            let end = row + rx.to(uint)
+            while at < end {
+                p32[at] = packed
+                at++
             }
             return
         }
         let sa = a.to(u32)
         let inv = 255 - sa
-        let r_sa = r.to(u32) * sa + 127
-        let g_sa = g.to(u32) * sa + 127
-        let b_sa = b.to(u32) * sa + 127
-        while x < rx {
-            let at = (row + x.to(uint)) * 4
-            px[at] = ((r_sa + px[at].to(u32) * inv) / 255).to(u8)
-            px[at + 1] = ((g_sa + px[at + 1].to(u32) * inv) / 255).to(u8)
-            px[at + 2] = ((b_sa + px[at + 2].to(u32) * inv) / 255).to(u8)
+        let r_sa = r.to(u32) * sa + 128
+        let g_sa = g.to(u32) * sa + 128
+        let b_sa = b.to(u32) * sa + 128
+        @unsafe
+        let px = this.pixels.data.@cast(*[u8])
+        let at = (row + lx.to(uint)) * 4
+        let end = (row + rx.to(uint)) * 4
+        while at < end {
+            let tr = r_sa + px[at].to(u32) * inv
+            let tg = g_sa + px[at + 1].to(u32) * inv
+            let tb = b_sa + px[at + 2].to(u32) * inv
+            px[at] = ((tr + (tr >> 8)) >> 8).to(u8)
+            px[at + 1] = ((tg + (tg >> 8)) >> 8).to(u8)
+            px[at + 2] = ((tb + (tb >> 8)) >> 8).to(u8)
             px[at + 3] = 255
-            x++
+            at += 4
         }
     }
 
@@ -170,6 +209,10 @@ class Canvas {
         let ix1 = (ceil32(bx + bw).to(i32) - pad_right).max(ix0).min(x1)
         let iy0 = (floor32(by).to(i32) + pad_top).max(y0).min(y1)
         let iy1 = (ceil32(by + bh).to(i32) - pad_bot).max(iy0).min(y1)
+        // Tighter horizontal interior bounds for straight vertical edges (y in [iy0, iy1))
+        let edge_pad = ceil32(bw_px + 1.5).to(i32)
+        let ex0 = (floor32(bx).to(i32) + edge_pad).max(x0).min(x1)
+        let ex1 = (ceil32(bx + bw).to(i32) - edge_pad).max(ex0).min(x1)
 
         // Premultiplied fill and stroke in [0..1]
         let fa = fill.a.to(f32) / 255.0
@@ -187,18 +230,81 @@ class Canvas {
         while y < y1 {
             let py = y.to(f32) + 0.5 - cy
             let row = y.to(uint) * w_u
-            let in_mid_y = y >= iy0 && y < iy1
-            if in_mid_y && ix0 < ix1 {
-                // Left edge strip (border / AA)
+            if y >= iy0 && y < iy1 && ex0 < ex1 {
+                // Straight left vertical edge (~2-3px), flat interior span, straight right vertical edge (~2-3px)
+                this.sdf_edge_row(row, x0, ex0, cx, hw, bw_px, fr, fg, fb, fa, sr, sg, sb, sa)
+                if fill.a > 0 : this.fill_span(y, ex0, ex1, fill.r, fill.g, fill.b, fill.a)
+                this.sdf_edge_row(row, ex1, x1, cx, hw, bw_px, fr, fg, fb, fa, sr, sg, sb, sa)
+            } else if ix0 < ix1 {
+                // Left corner strip
                 this.sdf_box_row(row, x0, ix0, cx, py, hw, hh, rtl, rtr, rbr, rbl, bw_px, fr, fg, fb, fa, sr, sg, sb, sa)
-                // Flat interior span
-                if fill.a > 0 : this.fill_span(y, ix0, ix1, fill.r, fill.g, fill.b, fill.a)
-                // Right edge strip
+                // Straight top/bottom edge between corners: SDF distance is constant across x in [ix0, ix1)
+                let d = py.abs() - hh
+                let outer = clamp32(0.5 - d, 0.0, 1.0)
+                if outer > 0.0 {
+                    let cr = fr
+                    let cg = fg
+                    let cb = fb
+                    let ca = fa
+                    if bw_px > 0.0 {
+                        let inner = clamp32(0.5 - (d + bw_px), 0.0, 1.0)
+                        cr = sr + (fr - sr) * inner
+                        cg = sg + (fg - sg) * inner
+                        cb = sb + (fb - sb) * inner
+                        ca = sa + (fa - sa) * inner
+                    }
+                    ca *= outer
+                    if ca > 0.001 {
+                        cr *= outer
+                        cg *= outer
+                        cb *= outer
+                        let r8 = clamp32((cr / ca) * 255.0 + 0.5, 0.0, 255.0).to(u8)
+                        let g8 = clamp32((cg / ca) * 255.0 + 0.5, 0.0, 255.0).to(u8)
+                        let b8 = clamp32((cb / ca) * 255.0 + 0.5, 0.0, 255.0).to(u8)
+                        let a8 = clamp32(ca * 255.0 + 0.5, 0.0, 255.0).to(u8)
+                        this.fill_span(y, ix0, ix1, r8, g8, b8, a8)
+                    }
+                }
+                // Right corner strip
                 this.sdf_box_row(row, ix1, x1, cx, py, hw, hh, rtl, rtr, rbr, rbl, bw_px, fr, fg, fb, fa, sr, sg, sb, sa)
             } else {
                 this.sdf_box_row(row, x0, x1, cx, py, hw, hh, rtl, rtr, rbr, rbl, bw_px, fr, fg, fb, fa, sr, sg, sb, sa)
             }
             y++
+        }
+    }
+
+    // Fast straight vertical edge row (no rounded corner math or sqrt)
+    - fn sdf_edge_row(row: uint, x0: i32, x1: i32, cx: f32, hw: f32, bw: f32, fr: f32, fg: f32, fb: f32, fa: f32, sr: f32, sg: f32, sb: f32, sa: f32) {
+        let x = x0
+        while x < x1 {
+            let d = (x.to(f32) + 0.5 - cx).abs() - hw
+            let outer = clamp32(0.5 - d, 0.0, 1.0)
+            if outer > 0.0 {
+                let cr = fr
+                let cg = fg
+                let cb = fb
+                let ca = fa
+                if bw > 0.0 {
+                    let inner = clamp32(0.5 - (d + bw), 0.0, 1.0)
+                    cr = sr + (fr - sr) * inner
+                    cg = sg + (fg - sg) * inner
+                    cb = sb + (fb - sb) * inner
+                    ca = sa + (fa - sa) * inner
+                }
+                ca *= outer
+                if ca > 0.001 {
+                    cr *= outer
+                    cg *= outer
+                    cb *= outer
+                    let r8 = clamp32((cr / ca) * 255.0 + 0.5, 0.0, 255.0).to(u8)
+                    let g8 = clamp32((cg / ca) * 255.0 + 0.5, 0.0, 255.0).to(u8)
+                    let b8 = clamp32((cb / ca) * 255.0 + 0.5, 0.0, 255.0).to(u8)
+                    let a8 = clamp32(ca * 255.0 + 0.5, 0.0, 255.0).to(u8)
+                    this.blend_pixel_at((row + x.to(uint)) * 4, r8, g8, b8, a8)
+                }
+            }
+            x++
         }
     }
 
@@ -348,19 +454,46 @@ class Canvas {
         if x0 >= x1 || y0 >= y1 : return
 
         let base_a = color.a.to(f32)
+        let pad_i = ceil32(pad).to(i32)
+        let ix0 = (floor32(bx).to(i32) + ceil32(rtl.max(rbl)).to(i32) + pad_i).max(x0).min(x1)
+        let ix1 = (ceil32(bx + bw).to(i32) - ceil32(rtr.max(rbr)).to(i32) - pad_i).max(ix0).min(x1)
+        let iy0 = (floor32(by).to(i32) + ceil32(rtl.max(rtr)).to(i32) + pad_i).max(y0).min(y1)
+        let iy1 = (ceil32(by + bh).to(i32) - ceil32(rbl.max(rbr)).to(i32) - pad_i).max(iy0).min(y1)
         let w_u = this.width.to(uint)
         let y = y0
         while y < y1 {
             let py = y.to(f32) + 0.5 - cy
             let row = y.to(uint) * w_u
-            let x = x0
-            while x < x1 {
-                let px = x.to(f32) + 0.5 - cx
-                let d = sdf_rbox(px, py, hw, hh, rtl, rtr, rbr, rbl)
-                let a = 0.5 - 0.5 * approx_erf(d * inv_denom)
-                let a8 = clamp32(base_a * a + 0.5, 0.0, 255.0).to(u8)
-                if a8 > 0 : this.blend_pixel_at((row + x.to(uint)) * 4, color.r, color.g, color.b, a8)
-                x++
+            if y >= iy0 && y < iy1 && ix0 < ix1 {
+                let x = x0
+                while x < ix0 {
+                    let px = x.to(f32) + 0.5 - cx
+                    let d = sdf_rbox(px, py, hw, hh, rtl, rtr, rbr, rbl)
+                    let a = 0.5 - 0.5 * approx_erf(d * inv_denom)
+                    let a8 = clamp32(base_a * a + 0.5, 0.0, 255.0).to(u8)
+                    if a8 > 0 : this.blend_pixel_at((row + x.to(uint)) * 4, color.r, color.g, color.b, a8)
+                    x++
+                }
+                this.fill_span(y, ix0, ix1, color.r, color.g, color.b, color.a)
+                x = ix1
+                while x < x1 {
+                    let px = x.to(f32) + 0.5 - cx
+                    let d = sdf_rbox(px, py, hw, hh, rtl, rtr, rbr, rbl)
+                    let a = 0.5 - 0.5 * approx_erf(d * inv_denom)
+                    let a8 = clamp32(base_a * a + 0.5, 0.0, 255.0).to(u8)
+                    if a8 > 0 : this.blend_pixel_at((row + x.to(uint)) * 4, color.r, color.g, color.b, a8)
+                    x++
+                }
+            } else {
+                let x = x0
+                while x < x1 {
+                    let px = x.to(f32) + 0.5 - cx
+                    let d = sdf_rbox(px, py, hw, hh, rtl, rtr, rbr, rbl)
+                    let a = 0.5 - 0.5 * approx_erf(d * inv_denom)
+                    let a8 = clamp32(base_a * a + 0.5, 0.0, 255.0).to(u8)
+                    if a8 > 0 : this.blend_pixel_at((row + x.to(uint)) * 4, color.r, color.g, color.b, a8)
+                    x++
+                }
             }
             y++
         }
@@ -383,7 +516,9 @@ class Canvas {
 
         let bax = bx - ax
         let bay = by - ay
-        let denom = (bax * bax + bay * bay).max(0.0001)
+        let inv_denom = 1.0 / (bax * bax + bay * bay).max(0.0001)
+        let max_d = half_w + 0.5
+        let max_d2 = max_d * max_d
         let base_a = color.a.to(f32)
         let w_u = this.width.to(uint)
         let y = y0
@@ -393,14 +528,17 @@ class Canvas {
             let x = x0
             while x < x1 {
                 let pax = x.to(f32) + 0.5 - ax
-                let h = clamp32((pax * bax + pay * bay) / denom, 0.0, 1.0)
+                let h = clamp32((pax * bax + pay * bay) * inv_denom, 0.0, 1.0)
                 let dx = pax - bax * h
                 let dy = pay - bay * h
-                let d = math.sqrt((dx * dx + dy * dy).to(f64)).to(f32) - half_w
-                let cov = clamp32(0.5 - d, 0.0, 1.0)
-                if cov > 0.0 {
-                    let a8 = (base_a * cov + 0.5).to(u8)
-                    this.blend_pixel_at((row + x.to(uint)) * 4, color.r, color.g, color.b, a8)
+                let d2 = dx * dx + dy * dy
+                if d2 < max_d2 {
+                    let d = math.sqrt(d2.to(f64)).to(f32) - half_w
+                    let cov = clamp32(0.5 - d, 0.0, 1.0)
+                    if cov > 0.0 {
+                        let a8 = (base_a * cov + 0.5).to(u8)
+                        this.blend_pixel_at((row + x.to(uint)) * 4, color.r, color.g, color.b, a8)
+                    }
                 }
                 x++
             }
@@ -612,9 +750,15 @@ class Canvas {
         let y1 = (dy + g.height).min(this.clip_y1)
         if x0 >= x1 || y0 >= y1 : return
 
-        let bm = g.bitmap
+        @unsafe
+        let bm = g.bitmap.data.@cast(*[u8])
+        let lp = lut.data.@cast(*[u8])
+        let px = this.pixels.data.@cast(*[u8])
         let gw = g.width.to(uint)
         let cw = this.width.to(uint)
+        let cr = color.r.to(u32)
+        let cg = color.g.to(u32)
+        let cb = color.b.to(u32)
         let y = y0
         while y < y1 {
             let gy = (y - dy).to(uint) * gw
@@ -623,14 +767,363 @@ class Canvas {
             while x < x1 {
                 let raw = bm[gy + (x - dx).to(uint)]
                 if raw > 0 {
-                    let a8 = lut[raw.to(uint)]
-                    if a8 > 0 : this.blend_pixel_at((row + x.to(uint)) * 4, color.r, color.g, color.b, a8)
+                    let a8 = lp[raw.to(uint)]
+                    if a8 > 0 {
+                        let at = (row + x.to(uint)) * 4
+                        if a8 == 255 {
+                            px[at] = color.r
+                            px[at + 1] = color.g
+                            px[at + 2] = color.b
+                            px[at + 3] = 255
+                        } else {
+                            let sa = a8.to(u32)
+                            let inv = 255 - sa
+                            let tr = cr * sa + px[at].to(u32) * inv + 128
+                            let tg = cg * sa + px[at + 1].to(u32) * inv + 128
+                            let tb = cb * sa + px[at + 2].to(u32) * inv + 128
+                            px[at] = ((tr + (tr >> 8)) >> 8).to(u8)
+                            px[at + 1] = ((tg + (tg >> 8)) >> 8).to(u8)
+                            px[at + 2] = ((tb + (tb >> 8)) >> 8).to(u8)
+                            px[at + 3] = 255
+                        }
+                    }
                 }
                 x++
             }
             y++
         }
     }
+
+    fn blit_color_glyph(g: RasterGlyph, dx: i32, dy: i32, alpha: u8) {
+        if g.width <= 0 || g.height <= 0 || alpha == 0 || g.rgba.length < (g.width * g.height * 4).to(uint) : return
+        let x0 = dx.max(this.clip_x0)
+        let y0 = dy.max(this.clip_y0)
+        let x1 = (dx + g.width).min(this.clip_x1)
+        let y1 = (dy + g.height).min(this.clip_y1)
+        if x0 >= x1 || y0 >= y1 : return
+        let gw = g.width.to(uint)
+        let cw = this.width.to(uint)
+        let af = alpha.to(u32)
+        let y = y0
+        while y < y1 {
+            let gy = (y - dy).to(uint) * gw
+            let row = y.to(uint) * cw
+            let x = x0
+            while x < x1 {
+                let src = (gy + (x - dx).to(uint)) * 4
+                let a = (g.rgba[src + 3].to(u32) * af + 127) / 255
+                if a > 0 {
+                    this.blend_pixel_at((row + x.to(uint)) * 4, g.rgba[src], g.rgba[src + 1], g.rgba[src + 2], a.to(u8))
+                }
+                x++
+            }
+            y++
+        }
+    }
+
+    fn rotated_box(b: Bounds, corners: Corners, fill: Color, border: f32, stroke: Color, deg: f32) {
+        if b.w <= 0 || b.h <= 0 : return
+        let s = this.scale
+        let bx = b.x * s; let by = b.y * s; let bw = b.w * s; let bh = b.h * s
+        let hw = bw * 0.5; let hh = bh * 0.5
+        let cx = bx + hw; let cy = by + hh
+        let rad = deg * 0.017453292
+        let cs = cos32(rad); let sn = sin32(rad)
+        let ext_x = (hw * cs).abs() + (hh * sn).abs() + 2.0
+        let ext_y = (hw * sn).abs() + (hh * cs).abs() + 2.0
+        let x0 = floor32(cx - ext_x).to(i32).max(this.clip_x0)
+        let y0 = floor32(cy - ext_y).to(i32).max(this.clip_y0)
+        let x1 = ceil32(cx + ext_x).to(i32).min(this.clip_x1)
+        let y1 = ceil32(cy + ext_y).to(i32).min(this.clip_y1)
+        if x0 >= x1 || y0 >= y1 : return
+        let max_r = hw.min(hh)
+        let rtl = (corners.top_left * s).min(max_r); let rtr = (corners.top_right * s).min(max_r)
+        let rbr = (corners.bottom_right * s).min(max_r); let rbl = (corners.bottom_left * s).min(max_r)
+        let bw_px = border * s
+        let fa = fill.a.to(f32) / 255.0
+        let fr = (fill.r.to(f32) / 255.0) * fa; let fg = (fill.g.to(f32) / 255.0) * fa; let fb = (fill.b.to(f32) / 255.0) * fa
+        let sa = stroke.a.to(f32) / 255.0
+        let sr = (stroke.r.to(f32) / 255.0) * sa; let sg = (stroke.g.to(f32) / 255.0) * sa; let sb = (stroke.b.to(f32) / 255.0) * sa
+        let w_u = this.width.to(uint)
+        let y = y0
+        while y < y1 {
+            let dy = y.to(f32) + 0.5 - cy
+            let row = y.to(uint) * w_u
+            let x = x0
+            while x < x1 {
+                let dx = x.to(f32) + 0.5 - cx
+                let px = dx * cs + dy * sn
+                let py = -dx * sn + dy * cs
+                let d = sdf_rbox(px, py, hw, hh, rtl, rtr, rbr, rbl)
+                let outer = clamp32(0.5 - d, 0.0, 1.0)
+                if outer > 0.0 {
+                    let cr = fr; let cg = fg; let cb = fb; let ca = fa
+                    if bw_px > 0.0 {
+                        let inner = clamp32(0.5 - (d + bw_px), 0.0, 1.0)
+                        cr = sr + (fr - sr) * inner; cg = sg + (fg - sg) * inner
+                        cb = sb + (fb - sb) * inner; ca = sa + (fa - sa) * inner
+                    }
+                    ca *= outer
+                    if ca > 0.001 {
+                        cr *= outer; cg *= outer; cb *= outer
+                        let r8 = clamp32((cr / ca) * 255.0 + 0.5, 0.0, 255.0).to(u8)
+                        let g8 = clamp32((cg / ca) * 255.0 + 0.5, 0.0, 255.0).to(u8)
+                        let b8 = clamp32((cb / ca) * 255.0 + 0.5, 0.0, 255.0).to(u8)
+                        let a8 = clamp32(ca * 255.0 + 0.5, 0.0, 255.0).to(u8)
+                        this.blend_pixel_at((row + x.to(uint)) * 4, r8, g8, b8, a8)
+                    }
+                }
+                x++
+            }
+            y++
+        }
+    }
+
+    fn gradient_box_ex(b: Bounds, corners: Corners, from: Color, to: Color, kind: GradientKind, stops: ?Array[GradientStop], angle: f32, border: f32, stroke: Color) {
+        if kind == .linear && !isset(stops) {
+            this.gradient_box(b, corners, from, to, angle, border, stroke)
+            return
+        }
+        if b.w <= 0 || b.h <= 0 : return
+        let s = this.scale
+        let bx = b.x * s; let by = b.y * s; let bw = b.w * s; let bh = b.h * s
+        let hw = bw * 0.5; let hh = bh * 0.5; let cx = bx + hw; let cy = by + hh
+        let max_r = hw.min(hh)
+        let rtl = (corners.top_left * s).min(max_r); let rtr = (corners.top_right * s).min(max_r)
+        let rbr = (corners.bottom_right * s).min(max_r); let rbl = (corners.bottom_left * s).min(max_r)
+        let bw_px = border * s
+        let rad = angle * 0.017453292
+        let dir_x = sin32(rad); let dir_y = -cos32(rad)
+        let extent = ((hw * dir_x).abs() + (hh * dir_y).abs()).max(0.0001)
+        let rad_max = math.sqrt((hw * hw + hh * hh).to(f64)).to(f32).max(0.0001)
+        let x0 = floor32(bx - 1.0).to(i32).max(this.clip_x0)
+        let y0 = floor32(by - 1.0).to(i32).max(this.clip_y0)
+        let x1 = ceil32(bx + bw + 1.0).to(i32).min(this.clip_x1)
+        let y1 = ceil32(by + bh + 1.0).to(i32).min(this.clip_y1)
+        if x0 >= x1 || y0 >= y1 : return
+        let sa = stroke.a.to(f32) / 255.0
+        let sr = (stroke.r.to(f32) / 255.0) * sa; let sg = (stroke.g.to(f32) / 255.0) * sa; let sb = (stroke.b.to(f32) / 255.0) * sa
+        let w_u = this.width.to(uint)
+        let y = y0
+        while y < y1 {
+            let py = y.to(f32) + 0.5 - cy
+            let row = y.to(uint) * w_u
+            let x = x0
+            while x < x1 {
+                let px = x.to(f32) + 0.5 - cx
+                let d = sdf_rbox(px, py, hw, hh, rtl, rtr, rbr, rbl)
+                let outer = clamp32(0.5 - d, 0.0, 1.0)
+                if outer > 0.0 {
+                    let t: f32 = 0
+                    if kind == .radial {
+                        t = clamp32(math.sqrt((px * px + py * py).to(f64)).to(f32) / rad_max, 0.0, 1.0)
+                    } else if kind == .conic {
+                        let ang = math.atan2(py.to(f64), px.to(f64)).to(f32) * 57.2957795 + 90.0 - angle
+                        let norm = ang - floor32(ang / 360.0) * 360.0
+                        t = clamp32(norm / 360.0, 0.0, 1.0)
+                    } else {
+                        t = clamp32((px * dir_x + py * dir_y) / extent * 0.5 + 0.5, 0.0, 1.0)
+                    }
+                    let c = sample_gradient_color(from, to, stops, t)
+                    let fa = c.a.to(f32) / 255.0
+                    let cr = (c.r.to(f32) / 255.0) * fa; let cg = (c.g.to(f32) / 255.0) * fa; let cb = (c.b.to(f32) / 255.0) * fa; let ca = fa
+                    if bw_px > 0.0 {
+                        let inner = clamp32(0.5 - (d + bw_px), 0.0, 1.0)
+                        cr = sr + (cr - sr) * inner; cg = sg + (cg - sg) * inner
+                        cb = sb + (cb - sb) * inner; ca = sa + (ca - sa) * inner
+                    }
+                    ca *= outer
+                    if ca > 0.001 {
+                        cr *= outer; cg *= outer; cb *= outer
+                        let r8 = clamp32((cr / ca) * 255.0 + 0.5, 0.0, 255.0).to(u8)
+                        let g8 = clamp32((cg / ca) * 255.0 + 0.5, 0.0, 255.0).to(u8)
+                        let b8 = clamp32((cb / ca) * 255.0 + 0.5, 0.0, 255.0).to(u8)
+                        let a8 = clamp32(ca * 255.0 + 0.5, 0.0, 255.0).to(u8)
+                        this.blend_pixel_at((row + x.to(uint)) * 4, r8, g8, b8, a8)
+                    }
+                }
+                x++
+            }
+            y++
+        }
+    }
+
+    /// Separable box blur of existing canvas pixels within `b` (frosted glass backdrop blur).
+    fn backdrop_blur(b: Bounds, corners: Corners, radius: f32) {
+        if radius <= 0.5 || b.w <= 0 || b.h <= 0 : return
+        let s = this.scale
+        let bx = b.x * s; let by = b.y * s; let bw = b.w * s; let bh = b.h * s
+        let x0 = floor32(bx).to(i32).max(this.clip_x0)
+        let y0 = floor32(by).to(i32).max(this.clip_y0)
+        let x1 = ceil32(bx + bw).to(i32).min(this.clip_x1)
+        let y1 = ceil32(by + bh).to(i32).min(this.clip_y1)
+        if x0 >= x1 || y0 >= y1 : return
+        let rw = (x1 - x0).to(uint)
+        let rh = (y1 - y0).to(uint)
+        let rad = round32(radius * s).to(i32).max(1).min(24)
+        let tmp = [u8]{ 0 x (rw * rh * 4) }
+        let cw = this.width.to(uint)
+        @unsafe
+        let px = this.pixels.data.@cast(*[u8])
+        let tp = tmp.data.@cast(*[u8])
+        // Horizontal pass
+        let y: i32 = y0
+        while y < y1 {
+            let ly = (y - y0).to(uint)
+            let src_row = y.to(uint) * cw
+            let x: i32 = x0
+            while x < x1 {
+                let lx = (x - x0).to(uint)
+                let sr: u32 = 0; let sg: u32 = 0; let sb: u32 = 0; let cnt: u32 = 0
+                let k = (x - rad).max(0)
+                let kend = (x + rad).min(this.width - 1)
+                while k <= kend {
+                    let at = (src_row + k.to(uint)) * 4
+                    sr += px[at].to(u32); sg += px[at + 1].to(u32); sb += px[at + 2].to(u32)
+                    cnt++
+                    k++
+                }
+                let dst = (ly * rw + lx) * 4
+                tp[dst] = (sr / cnt).to(u8); tp[dst + 1] = (sg / cnt).to(u8); tp[dst + 2] = (sb / cnt).to(u8); tp[dst + 3] = 255
+                x++
+            }
+            y++
+        }
+        // Vertical pass
+        let has_corners = !corners.is_zero()
+        let hw = bw * 0.5; let hh = bh * 0.5; let cx = bx + hw; let cy = by + hh
+        let max_r = hw.min(hh)
+        let rtl = (corners.top_left * s).min(max_r); let rtr = (corners.top_right * s).min(max_r)
+        let rbr = (corners.bottom_right * s).min(max_r); let rbl = (corners.bottom_left * s).min(max_r)
+        y = y0
+        while y < y1 {
+            let ly = y - y0
+            let py = y.to(f32) + 0.5 - cy
+            let dst_row = y.to(uint) * cw
+            let x: i32 = x0
+            while x < x1 {
+                let lx = (x - x0).to(uint)
+                let sr: u32 = 0; let sg: u32 = 0; let sb: u32 = 0; let cnt: u32 = 0
+                let k = (ly - rad).max(0)
+                let kend = (ly + rad).min(rh.to(i32) - 1)
+                while k <= kend {
+                    let at = (k.to(uint) * rw + lx) * 4
+                    sr += tp[at].to(u32); sg += tp[at + 1].to(u32); sb += tp[at + 2].to(u32)
+                    cnt++
+                    k++
+                }
+                let r8 = (sr / cnt).to(u8); let g8 = (sg / cnt).to(u8); let b8 = (sb / cnt).to(u8)
+                if has_corners {
+                    let d = sdf_rbox(x.to(f32) + 0.5 - cx, py, hw, hh, rtl, rtr, rbr, rbl)
+                    let cov = clamp32(0.5 - d, 0.0, 1.0)
+                    if cov > 0.0 : this.blend_pixel_at((dst_row + x.to(uint)) * 4, r8, g8, b8, clamp32(cov * 255.0 + 0.5, 0.0, 255.0).to(u8))
+                } else {
+                    let d_at = (dst_row + x.to(uint)) * 4
+                    px[d_at] = r8; px[d_at + 1] = g8; px[d_at + 2] = b8; px[d_at + 3] = 255
+                }
+                x++
+            }
+            y++
+        }
+    }
+
+    fn dashed_line(x1: f32, y1: f32, x2: f32, y2: f32, thickness: f32, color: Color, dotted: bool) {
+        if color.a == 0 || thickness <= 0 : return
+        let dx = x2 - x1; let dy = y2 - y1
+        let dist = math.sqrt((dx * dx + dy * dy).to(f64)).to(f32)
+        if dist <= 0.1 : return
+        let ux = dx / dist; let uy = dy / dist
+        let dash = dotted ? thickness.max(1.5) : (thickness * 3.0).max(4.0)
+        let gap = dotted ? (thickness * 2.0).max(3.0) : (thickness * 2.0).max(3.0)
+        let pos: f32 = 0
+        while pos < dist {
+            let seg = (pos + dash).min(dist)
+            if dotted {
+                let cx = x1 + ux * pos; let cy = y1 + uy * pos
+                let r = thickness * 0.5
+                this.box(.{ x: cx - r, y: cy - r, w: thickness, h: thickness }, Corners.all(r), color, 0, color)
+            } else {
+                this.line(.{ x: x1 + ux * pos, y: y1 + uy * pos }, .{ x: x1 + ux * seg, y: y1 + uy * seg }, thickness, color)
+            }
+            pos += dash + gap
+        }
+    }
+}
+
+fn sample_gradient_color(from: Color, to: Color, stops: ?Array[GradientStop], t: f32) Color {
+    if !isset(stops) || stops.length == 0 : return from.mix(to, t)
+    if stops.length == 1 : return (stops.get(0) !!).color
+    let first = stops.get(0) !!
+    if t <= first.position : return first.color
+    let i: uint = 1
+    while i < stops.length {
+        let cur = stops.get(i) !!
+        if t <= cur.position {
+            let prev = stops.get(i - 1) !!
+            let span = (cur.position - prev.position).max(0.0001)
+            return prev.color.mix(cur.color, clamp32((t - prev.position) / span, 0, 1))
+        }
+        i++
+    }
+    return (stops.last() !!).color
+}
+
+/// Visual regression snapshot diff: returns the fraction of differing pixels (0.0 = identical, 1.0 = all different).
++ fn diff_images(a: image.Image, b: image.Image, tolerance: u8 (2)) f32 {
+    if a.width != b.width || a.height != b.height : return 1.0
+    let total = a.width * a.height
+    if total == 0 : return 0.0
+    let ra = a.to_rgba()
+    let rb = b.to_rgba()
+    let diff: uint = 0
+    let tol = tolerance.to(int)
+    let i: uint = 0
+    while i < total {
+        let o = i * 4
+        let dr = (ra.pixels[o].to(int) - rb.pixels[o].to(int)).abs()
+        let dg = (ra.pixels[o + 1].to(int) - rb.pixels[o + 1].to(int)).abs()
+        let db = (ra.pixels[o + 2].to(int) - rb.pixels[o + 2].to(int)).abs()
+        let da = (ra.pixels[o + 3].to(int) - rb.pixels[o + 3].to(int)).abs()
+        if dr > tol || dg > tol || db > tol || da > tol : diff++
+        i++
+    }
+    return diff.to(f32) / total.to(f32)
+}
+
+/// Renders a headless (or live) window's scene into an RGBA `image.Image` for snapshot testing.
++ fn render_scene_image(win: Window, scale: f32 (1.0)) ?image.Image {
+    let pw = round32(win.width * scale).to(i32).max(1)
+    let ph = round32(win.height * scale).to(i32).max(1)
+    let canvas = Canvas.new(pw, ph, scale)
+    canvas.clear(win.theme.background)
+    each win.scene.items as item {
+        match item.kind {
+            .quad => draw_quad(item, canvas)
+            .shadow => canvas.shadow(item.bounds, item.corners, item.width, item.color)
+            .blur => canvas.backdrop_blur(item.bounds, item.corners, item.width)
+            .image => {
+                let img_obj = item.image_obj
+                if isset(img_obj) {
+                    draw_image(item, img_obj.to_rgba(), canvas)
+                } else {
+                    let bytes = item.image_bytes
+                    if isset(bytes) {
+                        let dec = image.decode(bytes) !? null
+                        if isset(dec) : draw_image(item, dec.to_rgba(), canvas)
+                    }
+                }
+            }
+            .line => canvas.line(item.points[0], item.points[1], item.width, item.color)
+            .arc => canvas.arc(item.bounds.x, item.bounds.y, item.bounds.w, item.points[0].x, item.points[0].y, item.width, item.color)
+            .circle => canvas.box(item.bounds, Corners.all(item.radius), item.color, 0, item.color)
+            .ring => canvas.box(item.bounds, Corners.all(item.radius), transparent(), item.width, item.color)
+            .triangle => canvas.triangle(item.points[0], item.points[1], item.points[2], item.color)
+            .clip => canvas.set_clip(item.bounds)
+            .unclip => canvas.reset_clip()
+            default => {}
+        }
+    }
+    return image.Image.from_pixels(canvas.width.to(uint), canvas.height.to(uint), 4, canvas.pixels) !? null
 }
 
 fn build_text_alpha_lut(color: Color) [u8 x 256] {

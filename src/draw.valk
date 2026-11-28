@@ -1,13 +1,19 @@
 use image
 
-fn draw_scene(win: Window, p: SdlPlatform, canvas: Canvas) {
+fn draw_scene(win: Window, p: SdlPlatform, canvas: Canvas, dirty: ?Bounds (null)) {
     let scale = canvas.scale
-    canvas.reset_clip()
-    canvas.clear(win.theme.background)
+    if isset(dirty) {
+        canvas.set_clip(dirty)
+        canvas.clear_rect(dirty, win.theme.background)
+    } else {
+        canvas.reset_clip()
+        canvas.clear(win.theme.background)
+    }
     each win.scene.items as item {
         match item.kind {
             .quad => draw_quad(item, canvas)
             .shadow => canvas.shadow(item.bounds, item.corners, item.width, item.color)
+            .blur => canvas.backdrop_blur(item.bounds, item.corners, item.width)
             .text => {
                 let fonts = p.fonts
                 let x = round32(item.bounds.x * scale) / scale
@@ -16,43 +22,142 @@ fn draw_scene(win: Window, p: SdlPlatform, canvas: Canvas) {
                 fonts.draw(canvas, item.text, item.font, x, y, item.color)
             }
             .image => {
-                let img = p.load_image(item.text)
-                if isset(img) : draw_image(item, img, canvas)
+                let img = item.image_obj
+                if !isset(img) {
+                    let bytes = item.image_bytes
+                    if isset(bytes) : img = p.load_image_bytes(bytes)
+                    else : img = p.load_image(item.text)
+                }
+                if isset(img) : draw_image(item, img.to_rgba(), canvas)
             }
             .line => canvas.line(item.points[0], item.points[1], item.width, item.color)
             .arc => canvas.arc(item.bounds.x, item.bounds.y, item.bounds.w, item.points[0].x, item.points[0].y, item.width, item.color)
             .circle => canvas.box(item.bounds, Corners.all(item.radius), item.color, 0, item.color)
             .ring => canvas.box(item.bounds, Corners.all(item.radius), transparent(), item.width, item.color)
             .triangle => canvas.triangle(item.points[0], item.points[1], item.points[2], item.color)
-            .clip => canvas.set_clip(item.bounds)
-            .unclip => canvas.reset_clip()
+            .clip => canvas.set_clip_intersect(item.bounds, dirty)
+            .unclip => {
+                if isset(dirty) : canvas.set_clip(dirty)
+                else : canvas.reset_clip()
+            }
         }
     }
     canvas.reset_clip()
+}
+
+/// Computes the union bounding box of primitives that changed between frames for partial software redraws.
+/// Returns null if the entire frame must be redrawn (e.g. count changed drastically or blur present),
+/// or a zero-sized Bounds if nothing changed at all.
+fn compute_dirty_rect(prev: Array[Primitive], cur: Array[Primitive], full: Bounds) ?Bounds {
+    if prev.length == 0 : return null
+    let dirty: ?Bounds = null
+    let max_len = prev.length.max(cur.length)
+    let i: uint = 0
+    while i < max_len {
+        if i < prev.length && i < cur.length {
+            let a = prev.get(i) !!
+            let b = cur.get(i) !!
+            if b.kind == .blur || a.kind == .blur : return null
+            if !primitives_equal(a, b) {
+                dirty = union_bounds(dirty, primitive_bounds(a))
+                dirty = union_bounds(dirty, primitive_bounds(b))
+            }
+        } else if i < prev.length {
+            let a = prev.get(i) !!
+            if a.kind == .blur : return null
+            dirty = union_bounds(dirty, primitive_bounds(a))
+        } else {
+            let b = cur.get(i) !!
+            if b.kind == .blur : return null
+            dirty = union_bounds(dirty, primitive_bounds(b))
+        }
+        i++
+    }
+    let d = dirty ?! return Bounds{}
+    let expanded = d.grow(4).intersect(full)
+    if expanded.w * expanded.h > full.w * full.h * 0.6 : return null
+    return expanded
+}
+
+fn union_bounds(a: ?Bounds, b: Bounds) ?Bounds {
+    if b.w <= 0 || b.h <= 0 : return a
+    if !isset(a) : return b
+    let x0 = a.x.min(b.x); let y0 = a.y.min(b.y)
+    let x1 = a.right.max(b.right); let y1 = a.bottom.max(b.bottom)
+    return Bounds{ x: x0, y: y0, w: x1 - x0, h: y1 - y0 }
+}
+
+fn primitive_bounds(p: Primitive) Bounds {
+    if p.kind == .shadow : return p.bounds.grow(p.width * 2 + 4)
+    if p.kind == .line {
+        let x0 = p.points[0].x.min(p.points[1].x) - p.width - 2
+        let y0 = p.points[0].y.min(p.points[1].y) - p.width - 2
+        let x1 = p.points[0].x.max(p.points[1].x) + p.width + 2
+        let y1 = p.points[0].y.max(p.points[1].y) + p.width + 2
+        return .{ x: x0, y: y0, w: x1 - x0, h: y1 - y0 }
+    }
+    if p.kind == .arc {
+        let r = p.bounds.w + p.width + 2
+        return .{ x: p.bounds.x - r, y: p.bounds.y - r, w: r * 2, h: r * 2 }
+    }
+    if p.kind == .triangle {
+        let x0 = p.points[0].x.min(p.points[1].x).min(p.points[2].x) - 2
+        let y0 = p.points[0].y.min(p.points[1].y).min(p.points[2].y) - 2
+        let x1 = p.points[0].x.max(p.points[1].x).max(p.points[2].x) + 2
+        let y1 = p.points[0].y.max(p.points[1].y).max(p.points[2].y) + 2
+        return .{ x: x0, y: y0, w: x1 - x0, h: y1 - y0 }
+    }
+    return p.bounds
+}
+
+fn primitives_equal(a: Primitive, b: Primitive) bool {
+    if a.kind != b.kind : return false
+    if a.bounds.x != b.bounds.x || a.bounds.y != b.bounds.y || a.bounds.w != b.bounds.w || a.bounds.h != b.bounds.h : return false
+    if a.color.r != b.color.r || a.color.g != b.color.g || a.color.b != b.color.b || a.color.a != b.color.a : return false
+    if a.border_color.r != b.border_color.r || a.border_color.g != b.border_color.g || a.border_color.b != b.border_color.b || a.border_color.a != b.border_color.a : return false
+    if a.width != b.width || a.radius != b.radius || a.rotate_deg != b.rotate_deg : return false
+    if a.text != b.text : return false
+    if a.points[0].x != b.points[0].x || a.points[0].y != b.points[0].y || a.points[1].x != b.points[1].x || a.points[1].y != b.points[1].y : return false
+    return true
 }
 
 fn draw_quad(item: Primitive, canvas: Canvas) {
     let b = item.bounds
     if b.w <= 0 || b.h <= 0 : return
     let border = item.border
-    let has_border = !border.is_zero() && !item.border_color.is_transparent()
-    if item.gradient {
-        canvas.gradient_box(b, item.corners, item.color, item.color2, item.angle, has_border && border.is_uniform() ? border.top : 0, item.border_color)
+    let ct = item.border_color_top ?? item.border_color
+    let cr = item.border_color_right ?? item.border_color
+    let cb = item.border_color_bottom ?? item.border_color
+    let cl = item.border_color_left ?? item.border_color
+    let per_side = isset(item.border_color_top) || isset(item.border_color_right) || isset(item.border_color_bottom) || isset(item.border_color_left)
+    let has_border = !border.is_zero() && (!ct.is_transparent() || !cr.is_transparent() || !cb.is_transparent() || !cl.is_transparent())
+    let uniform_solid = has_border && border.is_uniform() && !per_side && item.border_style == .solid
+    if item.rotate_deg != 0 && !item.gradient {
+        canvas.rotated_box(b, item.corners, item.color, uniform_solid ? border.top : 0, item.border_color, item.rotate_deg)
         return
     }
-    if !item.corners.is_zero() || (has_border && border.is_uniform()) {
-        let uniform = has_border && border.is_uniform()
-        canvas.box(b, item.corners, item.color, uniform ? border.top : 0, item.border_color)
-        if !has_border || uniform : return
+    if item.gradient {
+        canvas.gradient_box_ex(b, item.corners, item.color, item.color2, item.gradient_kind, item.gradient_stops, item.angle, uniform_solid ? border.top : 0, item.border_color)
+        if !has_border || uniform_solid : return
+    } else if !item.corners.is_zero() || uniform_solid {
+        canvas.box(b, item.corners, item.color, uniform_solid ? border.top : 0, item.border_color)
+        if !has_border || uniform_solid : return
     } else if !item.color.is_transparent() {
         canvas.fill_rect(b, item.color)
     }
     if has_border {
-        let c = item.border_color
-        if border.top > 0 : canvas.fill_rect(.{ x: b.x, y: b.y, w: b.w, h: border.top }, c)
-        if border.bottom > 0 : canvas.fill_rect(.{ x: b.x, y: b.bottom - border.bottom, w: b.w, h: border.bottom }, c)
-        if border.left > 0 : canvas.fill_rect(.{ x: b.x, y: b.y + border.top, w: border.left, h: b.h - border.top - border.bottom }, c)
-        if border.right > 0 : canvas.fill_rect(.{ x: b.right - border.right, y: b.y + border.top, w: border.right, h: b.h - border.top - border.bottom }, c)
+        if item.border_style == .dashed || item.border_style == .dotted {
+            let dotted = item.border_style == .dotted
+            if border.top > 0 && !ct.is_transparent() : canvas.dashed_line(b.x, b.y + border.top * 0.5, b.right, b.y + border.top * 0.5, border.top, ct, dotted)
+            if border.bottom > 0 && !cb.is_transparent() : canvas.dashed_line(b.x, b.bottom - border.bottom * 0.5, b.right, b.bottom - border.bottom * 0.5, border.bottom, cb, dotted)
+            if border.left > 0 && !cl.is_transparent() : canvas.dashed_line(b.x + border.left * 0.5, b.y, b.x + border.left * 0.5, b.bottom, border.left, cl, dotted)
+            if border.right > 0 && !cr.is_transparent() : canvas.dashed_line(b.right - border.right * 0.5, b.y, b.right - border.right * 0.5, b.bottom, border.right, cr, dotted)
+            return
+        }
+        if border.top > 0 && !ct.is_transparent() : canvas.fill_rect(.{ x: b.x, y: b.y, w: b.w, h: border.top }, ct)
+        if border.bottom > 0 && !cb.is_transparent() : canvas.fill_rect(.{ x: b.x, y: b.bottom - border.bottom, w: b.w, h: border.bottom }, cb)
+        if border.left > 0 && !cl.is_transparent() : canvas.fill_rect(.{ x: b.x, y: b.y + border.top, w: border.left, h: b.h - border.top - border.bottom }, cl)
+        if border.right > 0 && !cr.is_transparent() : canvas.fill_rect(.{ x: b.right - border.right, y: b.y + border.top, w: border.right, h: b.h - border.top - border.bottom }, cr)
     }
 }
 

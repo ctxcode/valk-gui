@@ -7,7 +7,7 @@
     let prev = win.find(id)
     if isset(prev) {
         scroll = prev.scroll_y
-        viewport = prev.bounds.inset(prev.style.padding.add(prev.style.border_widths)).h
+        viewport = prev.bounds.inset(scroll_inner_edges(prev.style)).h
     }
     let first = floor32(scroll / row_height).to(uint).min(count)
     let last = (first + ceil32(viewport / row_height).to(uint) + 1).min(count)
@@ -19,4 +19,97 @@
         list.child(r)
     }
     return list.child(div().h((count - last).to(f32) * row_height).flex_shrink_0())
+}
+
+/// A virtualized scrolling grid of `count` cells in `cols` equal columns with fixed `row_height`,
+/// building only the rows currently in view.
++ fn uniform_grid(win: Window, id: String, count: uint, cols: uint, row_height: f32, cell: fn(uint)(Div), gap: f32 (8)) Div {
+    let c = cols.max(1)
+    let rows = (count + c - 1) / c
+    let stride = row_height + gap
+    let scroll: f32 = 0
+    let viewport = win.height
+    let prev = win.find(id)
+    if isset(prev) {
+        scroll = prev.scroll_y
+        viewport = prev.bounds.inset(scroll_inner_edges(prev.style)).h
+    }
+    let first = floor32(scroll / stride).to(uint).min(rows)
+    let last = (first + ceil32(viewport / stride).to(uint) + 1).min(rows)
+    let list = div().id(id).overflow_y_scroll()
+        .child(div().h(first.to(f32) * stride).flex_shrink_0())
+    each first .. last - first as r {
+        let row_div = div().id(id + "/r" + r).flex().gap(gap).h(row_height).mb(r + 1 < rows ? gap : 0).flex_shrink_0()
+        each 0 .. c as col {
+            let idx = r * c + col
+            if idx < count {
+                let item = cell(idx).flex_1().h(row_height)
+                if !isset(item.name) : item.id(id + "/" + idx)
+                row_div.child(item)
+            } else {
+                row_div.child(div().flex_1())
+            }
+        }
+        list.child(row_div)
+    }
+    let remaining = rows - last
+    return list.child(div().h(remaining.to(f32) * stride).flex_shrink_0())
+}
+
+global virtual_heights: Map[HashMap[uint, f32]] (.{})
+
+/// A variable-height virtualized scrolling list. Measures rendered rows each frame and caches
+/// their heights, falling back to `estimated_height` for unmeasured rows.
++ fn virtual_list(win: Window, id: String, count: uint, estimated_height: f32, row: fn(uint)(Div)) Div {
+    let est = estimated_height.max(1)
+    let cached = virtual_heights.get(id) !? null
+    let heights = isset(cached) ? cached : HashMap[uint, f32]{}
+    if !isset(cached) : virtual_heights.set(id, heights)
+    let scroll: f32 = 0
+    let viewport = win.height
+    let prev = win.find(id)
+    if isset(prev) {
+        scroll = prev.scroll_y
+        viewport = prev.bounds.inset(scroll_inner_edges(prev.style)).h
+        // Record measured heights from previous frame's rendered rows
+        each prev.child_nodes as child {
+            let cname = child.name
+            if isset(cname) && cname.starts_with(id + "/") {
+                let idx_str = cname.range(id.length + 1, cname.length - id.length - 1)
+                let idx = idx_str.to(uint) ! continue
+                if child.bounds.h > 0 : heights.set(idx, child.bounds.h)
+            }
+        }
+    }
+    // Find visible range using measured/estimated heights
+    let y: f32 = 0
+    let first: uint = 0
+    let top_pad: f32 = 0
+    while first < count {
+        let h = heights.get(first) !? est
+        if y + h >= scroll : break
+        y += h
+        first++
+    }
+    top_pad = y
+    let last = first
+    let end_y = scroll + viewport + est
+    while last < count && y < end_y {
+        y += heights.get(last) !? est
+        last++
+    }
+    let bot_pad: f32 = 0
+    let j = last
+    while j < count {
+        bot_pad += heights.get(j) !? est
+        j++
+    }
+    let list = div().id(id).overflow_y_scroll()
+        .child(div().h(top_pad).flex_shrink_0())
+    each first .. last - first as i {
+        let r = row(i).flex_shrink_0()
+        if !isset(r.name) : r.id(id + "/" + i)
+        list.child(r)
+    }
+    return list.child(div().h(bot_pad).flex_shrink_0())
 }

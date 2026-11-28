@@ -1,4 +1,7 @@
-// Pure Valk TrueType (.ttf / .ttc) parser and analytical anti-aliased glyph rasterizer.
+use image
+
+// Pure Valk TrueType (.ttf / .ttc) parser and analytical anti-aliased glyph rasterizer,
+// with TrueType `kern` + OpenType `GPOS` pair kerning and `CBDT`/`CBLC` color emoji support.
 
 struct TtfPoint {
     x: f32
@@ -20,6 +23,8 @@ class RasterGlyph {
     offset_y: i32 (0)
     advance: f32 (0)
     bitmap: mut &[u8] ([u8]{})
+    is_color: bool (false)
+    rgba: mut &[u8] ([u8]{})
     valid: bool (false)
 }
 
@@ -37,6 +42,14 @@ class TtfFont {
     hmtx_off: uint (0)
     cmap_sub: uint (0)
     cmap_fmt: u32 (0)
+    kern_off: uint (0)
+    kern_len: uint (0)
+    gpos_off: uint (0)
+    gpos_len: uint (0)
+    cblc_off: uint (0)
+    cbdt_off: uint (0)
+    kern_pairs: HashMap[u64, i32] (.{})
+    kern_loaded: bool (false)
     valid: bool (false)
 
     static fn parse(raw: String) TtfFont {
@@ -66,10 +79,16 @@ class TtfFont {
                 else if tag == "loca" : f.loca_off = off
                 else if tag == "glyf" { f.glyf_off = off; f.glyf_len = len }
                 else if tag == "cmap" : cmap_off = off
+                else if tag == "kern" { f.kern_off = off; f.kern_len = len }
+                else if tag == "GPOS" { f.gpos_off = off; f.gpos_len = len }
+                else if tag == "CBLC" : f.cblc_off = off
+                else if tag == "CBDT" : f.cbdt_off = off
             }
             i++
         }
-        if head_off == 0 || hhea_off == 0 || maxp_off == 0 || f.hmtx_off == 0 || f.loca_off == 0 || f.glyf_off == 0 || cmap_off == 0 : return f
+        let has_color_bmp = f.cblc_off > 0 && f.cbdt_off > 0
+        if head_off == 0 || hhea_off == 0 || maxp_off == 0 || cmap_off == 0 : return f
+        if !has_color_bmp && (f.hmtx_off == 0 || f.loca_off == 0 || f.glyf_off == 0) : return f
         if head_off + 54 > data.length || hhea_off + 36 > data.length || maxp_off + 6 > data.length : return f
 
         f.units_per_em = ttf_u16(data, head_off + 18).to(f32)
@@ -285,6 +304,176 @@ class TtfFont {
         out.offset_y = iy0 + round32(this.ascent.to(f32) * scale).to(i32)
         out.bitmap = bitmap
         return out
+    }
+
+    /// Returns the horizontal kerning adjustment in physical pixels between `left_cp` and `right_cp`.
+    fn kern_advance(left_cp: u32, right_cp: u32, px: f32) f32 {
+        if !this.valid : return 0
+        if !this.kern_loaded {
+            this.kern_loaded = true
+            this.load_kern_table()
+            if this.kern_pairs.length == 0 : this.load_gpos_kern()
+        }
+        if this.kern_pairs.length == 0 : return 0
+        let lg = this.glyph_index(left_cp)
+        let rg = this.glyph_index(right_cp)
+        if lg == 0 || rg == 0 : return 0
+        let key = (lg.to(u64) << 32) | rg.to(u64)
+        let val = this.kern_pairs.get(key) !? 0
+        if val == 0 : return 0
+        let scale = px / (this.ascent - this.descent).to(f32)
+        return val.to(f32) * scale
+    }
+
+    - fn load_kern_table() {
+        if this.kern_off == 0 || this.kern_off + 4 > this.data.length : return
+        let d = this.data
+        let ntables = ttf_u16(d, this.kern_off + 2).to(uint)
+        let p = this.kern_off + 4
+        let t: uint = 0
+        while t < ntables && p + 6 <= this.kern_off + this.kern_len {
+            let sub_len = ttf_u16(d, p + 2).to(uint)
+            let coverage = ttf_u16(d, p + 4)
+            let fmt = coverage >> 8
+            if fmt == 0 && (coverage & 1) != 0 && p + 14 <= d.length {
+                let npairs = ttf_u16(d, p + 6).to(uint)
+                let pp = p + 14
+                let k: uint = 0
+                while k < npairs && pp + 6 <= d.length {
+                    let l = ttf_u16(d, pp)
+                    let r = ttf_u16(d, pp + 2)
+                    let v = ttf_i16(d, pp + 4)
+                    if v != 0 : this.kern_pairs.set((l.to(u64) << 32) | r.to(u64), v)
+                    pp += 6
+                    k++
+                }
+            }
+            if sub_len == 0 : break
+            p += sub_len
+            t++
+        }
+    }
+
+    // Loads OpenType GPOS LookupType 2 (PairPos Format 1 explicit glyph-pair kerning)
+    - fn load_gpos_kern() {
+        let base = this.gpos_off
+        let d = this.data
+        if base == 0 || base + 10 > d.length : return
+        let lookup_list = base + ttf_u16(d, base + 8).to(uint)
+        if lookup_list + 2 > d.length : return
+        let lcount = ttf_u16(d, lookup_list).to(uint)
+        let li: uint = 0
+        while li < lcount && lookup_list + 2 + li * 2 + 2 <= d.length {
+            let loff = lookup_list + ttf_u16(d, lookup_list + 2 + li * 2).to(uint)
+            if loff + 6 > d.length { li++; continue }
+            let ltype = ttf_u16(d, loff)
+            let scount = ttf_u16(d, loff + 4).to(uint)
+            if ltype == 2 {
+                let si: uint = 0
+                while si < scount && loff + 6 + si * 2 + 2 <= d.length {
+                    let sub = loff + ttf_u16(d, loff + 6 + si * 2).to(uint)
+                    if sub + 10 <= d.length {
+                        let pfmt = ttf_u16(d, sub)
+                        let cov = sub + ttf_u16(d, sub + 2).to(uint)
+                        let vf1 = ttf_u16(d, sub + 4)
+                        let vf2 = ttf_u16(d, sub + 6)
+                        if pfmt == 1 && vf1 == 4 && vf2 == 0 {
+                            let cov_glyphs = read_coverage(d, cov)
+                            let psc = ttf_u16(d, sub + 8).to(uint)
+                            let pi: uint = 0
+                            while pi < psc && pi < cov_glyphs.length && sub + 10 + pi * 2 + 2 <= d.length {
+                                let lg = cov_glyphs.get(pi) !? 0
+                                let pset = sub + ttf_u16(d, sub + 10 + pi * 2).to(uint)
+                                if pset + 2 <= d.length {
+                                    let pcnt = ttf_u16(d, pset).to(uint)
+                                    let k: uint = 0
+                                    while k < pcnt && pset + 2 + k * 4 + 4 <= d.length {
+                                        let rg = ttf_u16(d, pset + 2 + k * 4)
+                                        let xadv = ttf_i16(d, pset + 4 + k * 4)
+                                        if xadv != 0 : this.kern_pairs.set((lg.to(u64) << 32) | rg.to(u64), xadv)
+                                        k++
+                                    }
+                                }
+                                pi++
+                            }
+                        }
+                    }
+                    si++
+                }
+            }
+            li++
+        }
+    }
+
+    /// Decodes a color PNG bitmap glyph from a CBDT/CBLC emoji font (such as NotoColorEmoji.ttf).
+    fn rasterize_color_emoji(gid: u32, px: f32) ?RasterGlyph {
+        if this.cblc_off == 0 || this.cbdt_off == 0 : return null
+        let d = this.data
+        let cblc = this.cblc_off
+        if cblc + 8 > d.length : return null
+        let num_sizes = ttf_u32(d, cblc + 4).to(uint)
+        if num_sizes == 0 || cblc + 8 + 48 > d.length : return null
+        // Inspect the first strike's index subtable array
+        let arr_off = cblc + ttf_u32(d, cblc + 8).to(uint)
+        let num_sub = ttf_u32(d, cblc + 16).to(uint)
+        let si: uint = 0
+        while si < num_sub && arr_off + si * 8 + 8 <= d.length {
+            let rec = arr_off + si * 8
+            let first_g = ttf_u16(d, rec)
+            let last_g = ttf_u16(d, rec + 2)
+            if gid >= first_g && gid <= last_g {
+                let sub = arr_off + ttf_u32(d, rec + 4).to(uint)
+                if sub + 8 > d.length : break
+                let idx_fmt = ttf_u16(d, sub)
+                let img_fmt = ttf_u16(d, sub + 2)
+                let img_base = this.cbdt_off + ttf_u32(d, sub + 4).to(uint)
+                let glyph_off: uint = 0
+                let glyph_len: uint = 0
+                if idx_fmt == 1 {
+                    let at = sub + 8 + (gid - first_g).to(uint) * 4
+                    if at + 8 <= d.length {
+                        let o0 = ttf_u32(d, at).to(uint)
+                        let o1 = ttf_u32(d, at + 4).to(uint)
+                        glyph_off = img_base + o0
+                        if o1 > o0 : glyph_len = o1 - o0
+                    }
+                } else if idx_fmt == 3 {
+                    let at = sub + 8 + (gid - first_g).to(uint) * 2
+                    if at + 4 <= d.length {
+                        let o0 = ttf_u16(d, at).to(uint)
+                        let o1 = ttf_u16(d, at + 2).to(uint)
+                        glyph_off = img_base + o0
+                        if o1 > o0 : glyph_len = o1 - o0
+                    }
+                }
+                // CBDT format 17 (small metrics + PNG) or 18 (big metrics + PNG) or 19 (PNG only)
+                let hdr_size: uint = img_fmt == 17 ? 5 : (img_fmt == 18 ? 8 : (img_fmt == 19 ? 0 : 999))
+                if glyph_len > hdr_size + 4 && glyph_off + hdr_size + 4 <= d.length {
+                    let png_len = ttf_u32(d, glyph_off + hdr_size).to(uint)
+                    let png_start = glyph_off + hdr_size + 4
+                    if png_len > 0 && png_start + png_len <= d.length {
+                        let decoded = image.decode(d.range(png_start, png_len)) !? null
+                        if isset(decoded) {
+                            let target = round32(px).to(uint).max(4).min(256)
+                            let scaled = decoded.to_rgba().resize(target, target) !? decoded.to_rgba()
+                            return RasterGlyph{
+                                width: scaled.width.to(i32),
+                                height: scaled.height.to(i32),
+                                offset_x: 0,
+                                offset_y: 0,
+                                advance: scaled.width.to(f32),
+                                is_color: true,
+                                rgba: scaled.pixels,
+                                valid: true
+                            }
+                        }
+                    }
+                }
+                break
+            }
+            si++
+        }
+        return null
     }
 
     - fn collect_edges(gid: u32, scale: f32, m00: f32, m01: f32, m10: f32, m11: f32, tx: f32, ty: f32, out: Array[TtfEdge], depth: int) {
@@ -637,4 +826,31 @@ fn ttf_i16(d: String, at: uint) i32 {
 fn ttf_i8(b: u8) i32 {
     let v = b.to(i32)
     return v >= 128 ? v - 256 : v
+}
+
+fn read_coverage(d: String, off: uint) Array[u32] {
+    let out = Array[u32]{}
+    if off + 4 > d.length : return out
+    let fmt = ttf_u16(d, off)
+    let cnt = ttf_u16(d, off + 2).to(uint)
+    if fmt == 1 {
+        let i: uint = 0
+        while i < cnt && off + 4 + i * 2 + 2 <= d.length {
+            out.append(ttf_u16(d, off + 4 + i * 2))
+            i++
+        }
+    } else if fmt == 2 {
+        let i: uint = 0
+        while i < cnt && off + 4 + i * 6 + 6 <= d.length {
+            let start_g = ttf_u16(d, off + 4 + i * 6)
+            let end_g = ttf_u16(d, off + 6 + i * 6)
+            let g = start_g
+            while g <= end_g && out.length < 4096 {
+                out.append(g)
+                g++
+            }
+            i++
+        }
+    }
+    return out
 }

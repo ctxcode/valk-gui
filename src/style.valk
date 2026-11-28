@@ -8,16 +8,33 @@
 /// How free space on the main axis is shared (`justify_*`).
 + enum Justify { start, center, end, between, around, evenly }
 
-+ enum Position { relative, absolute }
++ enum Position { relative, absolute, sticky }
 
 + enum Overflow { visible, hidden, scroll }
+
++ enum ScrollbarMode { overlay, always, hidden, gutter }
+
++ enum BoxSizing { border_box, content_box }
+
++ enum BorderStyle { solid, dashed, dotted }
+
++ enum GradientKind { linear, radial, conic }
+
++ struct GradientStop {
+    + color: Color
+    + position: f32 (0)
+}
 
 + enum TextAlign { left, center, right }
 
 + enum FontWeight { normal, medium, semibold, bold }
 
 /// The mouse cursor shown over an element.
-+ enum Cursor { default, pointer, text, crosshair, not_allowed, resize_ew, resize_ns, move }
++ enum Cursor {
+    default, pointer, text, crosshair, not_allowed
+    resize_ew, resize_ns, resize_nesw, resize_nwse
+    move, grab, grabbing, wait, progress, help, zoom_in, zoom_out
+}
 
 + enum LengthKind { auto, px, fraction }
 
@@ -60,11 +77,14 @@
     }
 }
 
-/// A linear gradient. The angle follows CSS: 0 runs upwards, 90 to the right, 180 downwards.
+/// A linear, radial, or conic gradient. For linear gradients the angle follows CSS: 0 runs
+/// upwards, 90 to the right, 180 downwards.
 + struct Gradient {
     + from: Color
     + to: Color
     + angle: f32 (180)
+    + kind: GradientKind (.linear)
+    + stops: ?Array[GradientStop] (null)
 }
 
 /// A drop shadow behind an element.
@@ -104,21 +124,39 @@
     + inset_left: ?f32 (null)
     + overflow_x: Overflow (.visible)
     + overflow_y: Overflow (.visible)
+    + scrollbar_mode: ScrollbarMode (.overlay)
+    + thin_scrollbar: bool (false)
+    + box_sizing: BoxSizing (.border_box)
+    + ratio: ?f32 (null)
+    + z_order: int (0)
     + display_none: bool (false)
     + on_top: bool (false)
     + anchor_window: bool (false)
     + pass_through: bool (false)
     + anchor_above: f32 (-1)
     + visible: bool (true)
+    + is_window_drag: bool (false)
+    + is_focus_trap: bool (false)
 
     + background: ?Color (null)
     + border_widths: Edges (.{})
     + border_tint: Color (.{ r: 0, g: 0, b: 0, a: 0 })
+    + border_color_top: ?Color (null)
+    + border_color_right: ?Color (null)
+    + border_color_bottom: ?Color (null)
+    + border_color_left: ?Color (null)
+    + border_style: BorderStyle (.solid)
     + radius: f32 (0)
     + corner_radii: ?Corners (null)
     + gradient: ?Gradient (null)
     + image_fit: ImageFit (.fill)
     + box_shadow: ?Shadow (null)
+    + blur_radius: f32 (0)
+    + translate_x: f32 (0)
+    + translate_y: f32 (0)
+    + scale_factor: f32 (1)
+    + rotate_deg: f32 (0)
+    + transition_seconds: f64 (0)
     + alpha: f32 (1)
     + cursor_style: ?Cursor (null)
 
@@ -130,6 +168,7 @@
     + text_align: ?TextAlign (null)
     + nowrap: ?bool (null)
     + ellipsis: ?bool (null)
+    + max_lines: uint (0)
     + font_italic: ?bool (null)
     + text_underline: ?bool (null)
     + text_strike: ?bool (null)
@@ -206,6 +245,10 @@
     + fn min_h(value: f32) SELF { this.style.min_height = value; return this }
     + fn max_w(value: f32) SELF { this.style.max_width = value; return this }
     + fn max_h(value: f32) SELF { this.style.max_height = value; return this }
+    /// Maintains width / height aspect ratio when one dimension is known.
+    + fn aspect_ratio(ratio: f32) SELF { this.style.ratio = ratio; return this }
+    + fn box_border() SELF { this.style.box_sizing = .border_box; return this }
+    + fn box_content() SELF { this.style.box_sizing = .content_box; return this }
 
     // Spacing
     + fn p(value: f32) SELF { this.style.padding = Edges.all(value); return this }
@@ -228,6 +271,14 @@
     /// inside its parent. It is painted above its in-flow siblings.
     + fn absolute() SELF { this.style.position = .absolute; return this }
     + fn relative() SELF { this.style.position = .relative; return this }
+    /// Keeps the element pinned at its `top`/`left` offset inside the nearest scroll container.
+    + fn sticky() SELF { this.style.position = .sticky; return this }
+    /// Explicit stacking order among sibling elements; higher values paint on top.
+    + fn z_index(z: int) SELF { this.style.z_order = z; return this }
+    /// Marks this element as a draggable window titlebar region for frameless windows.
+    + fn window_drag(on: bool (true)) SELF { this.style.is_window_drag = on; return this }
+    /// Traps Tab / Shift+Tab keyboard focus inside this container (e.g. for modals).
+    + fn focus_trap(on: bool (true)) SELF { this.style.is_focus_trap = on; return this }
     + fn top(value: f32) SELF { this.style.inset_top = value; return this }
     + fn right(value: f32) SELF { this.style.inset_right = value; return this }
     + fn bottom(value: f32) SELF { this.style.inset_bottom = value; return this }
@@ -246,6 +297,14 @@
     + fn overflow_y_scroll() SELF { this.style.overflow_y = .scroll; this.style.overflow_x = .hidden; return this }
     + fn overflow_x_scroll() SELF { this.style.overflow_x = .scroll; this.style.overflow_y = .hidden; return this }
     + fn overflow_scroll() SELF { this.style.overflow_x = .scroll; this.style.overflow_y = .scroll; return this }
+    /// Reserves space for scrollbars so they do not overlap content.
+    + fn scrollbar_gutter() SELF { this.style.scrollbar_mode = .gutter; return this }
+    /// Keeps scrollbars visible at all times when content overflows.
+    + fn scrollbar_always() SELF { this.style.scrollbar_mode = .always; return this }
+    /// Hides scrollbars while still allowing wheel/programmatic scrolling.
+    + fn scrollbar_hidden() SELF { this.style.scrollbar_mode = .hidden; return this }
+    /// Uses a thinner 4px scrollbar thumb.
+    + fn scrollbar_thin() SELF { this.style.thin_scrollbar = true; return this }
     /// Lets the mouse through to what is below the element; its children still take it.
     + fn click_through() SELF { this.style.pass_through = true; return this }
     /// Removes the element from layout and painting.
@@ -266,6 +325,13 @@
     + fn border_b(width: f32) SELF { this.style.border_widths.bottom = width; return this }
     + fn border_l(width: f32) SELF { this.style.border_widths.left = width; return this }
     + fn border_color(color: Color) SELF { this.style.border_tint = color; return this }
+    + fn border_color_t(color: Color) SELF { this.style.border_color_top = color; return this }
+    + fn border_color_r(color: Color) SELF { this.style.border_color_right = color; return this }
+    + fn border_color_b(color: Color) SELF { this.style.border_color_bottom = color; return this }
+    + fn border_color_l(color: Color) SELF { this.style.border_color_left = color; return this }
+    + fn border_solid() SELF { this.style.border_style = .solid; return this }
+    + fn border_dashed() SELF { this.style.border_style = .dashed; return this }
+    + fn border_dotted() SELF { this.style.border_style = .dotted; return this }
     /// The corner radius.
     + fn rounded(radius: f32) SELF { this.style.radius = radius; this.style.corner_radii = null; return this }
     /// Corners as round as the element allows: a pill, or a circle for a square.
@@ -279,7 +345,28 @@
     + fn rounded_br(radius: f32) SELF { let c = this.style.corners(); c.bottom_right = radius; this.style.corner_radii = c; return this }
     + fn rounded_bl(radius: f32) SELF { let c = this.style.corners(); c.bottom_left = radius; this.style.corner_radii = c; return this }
     /// A background that fades from one color to another; see `Gradient` for the angle.
-    + fn bg_gradient(from: Color, to: Color, angle: f32 (180)) SELF { this.style.gradient = Gradient{ from: from, to: to, angle: angle }; return this }
+    + fn bg_gradient(from: Color, to: Color, angle: f32 (180)) SELF { this.style.gradient = Gradient{ from: from, to: to, angle: angle, kind: .linear }; return this }
+    /// A multi-stop linear gradient.
+    + fn bg_gradient_stops(stops: Array[GradientStop], angle: f32 (180)) SELF {
+        let first = stops.length > 0 ? (stops.get(0) !!).color : transparent()
+        let last = stops.length > 0 ? (stops.last() !!).color : transparent()
+        this.style.gradient = Gradient{ from: first, to: last, angle: angle, kind: .linear, stops: stops }
+        return this
+    }
+    /// A radial gradient radiating from the center outward.
+    + fn bg_radial_gradient(from: Color, to: Color) SELF { this.style.gradient = Gradient{ from: from, to: to, kind: .radial }; return this }
+    /// A conic gradient sweeping clockwise around the center starting at `angle` degrees.
+    + fn bg_conic_gradient(from: Color, to: Color, angle: f32 (0)) SELF { this.style.gradient = Gradient{ from: from, to: to, angle: angle, kind: .conic }; return this }
+    /// Blurs pixels behind this element (frosted glass effect).
+    + fn backdrop_blur(px: f32) SELF { this.style.blur_radius = px; return this }
+    /// Translates the element visually and for hit testing.
+    + fn translate(x: f32, y: f32) SELF { this.style.translate_x = x; this.style.translate_y = y; return this }
+    /// Scales the element around its center.
+    + fn scale(factor: f32) SELF { this.style.scale_factor = factor; return this }
+    /// Rotates the element around its center in degrees.
+    + fn rotate(deg: f32) SELF { this.style.rotate_deg = deg; return this }
+    /// Smoothly transitions background, border, text color and opacity changes over `seconds`.
+    + fn transition(seconds: f64 (0.15)) SELF { this.style.transition_seconds = seconds; return this }
     /// Scales an image to fit inside the element, keeping its aspect ratio.
     + fn object_contain() SELF { this.style.image_fit = .contain; return this }
     /// Scales an image to cover the element, keeping its aspect ratio and cutting off the rest.
@@ -294,6 +381,11 @@
     + fn cursor(cursor: Cursor) SELF { this.style.cursor_style = cursor; return this }
     + fn cursor_pointer() SELF { this.style.cursor_style = .pointer; return this }
     + fn cursor_text() SELF { this.style.cursor_style = .text; return this }
+    + fn cursor_grab() SELF { this.style.cursor_style = .grab; return this }
+    + fn cursor_grabbing() SELF { this.style.cursor_style = .grabbing; return this }
+    + fn cursor_not_allowed() SELF { this.style.cursor_style = .not_allowed; return this }
+    + fn cursor_wait() SELF { this.style.cursor_style = .wait; return this }
+    + fn cursor_move() SELF { this.style.cursor_style = .move; return this }
 
     // Text, inherited by children
     + fn text_color(color: Color) SELF { this.style.color = color; return this }
@@ -325,6 +417,8 @@
     + fn whitespace_nowrap() SELF { this.style.nowrap = true; return this }
     /// Keeps text on one line and ends it with "…" when it does not fit.
     + fn truncate() SELF { this.style.nowrap = true; this.style.ellipsis = true; return this }
+    /// Limits wrapped text to at most `lines` lines, ending the last line with "…" if clipped.
+    + fn line_clamp(lines: uint) SELF { this.style.max_lines = lines; return this }
     /// Allows selecting and copying static text with the mouse and Ctrl/Cmd+C. Inherited by children.
     + fn selectable(on: bool (true)) SELF { this.style.text_selectable = on; return this }
 }
